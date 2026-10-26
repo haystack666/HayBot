@@ -1,0 +1,25 @@
+data/
+node_modules/
+.DS_Store
+.env
+.venv/
+**/__pycache__/
+**/.pytest_cache/
+frontend/dist/
+
+# Local runtime, private configuration and generated artifacts
+.playwright-mcp/
+.worktrees/
+*.db
+*.db-*
+*.sqlite*
+*.pem
+*.key
+.env.*
+!.env.example
+/personas/
+/models/
+/imports/
+/memory-mobile.png
+
+/docs/
