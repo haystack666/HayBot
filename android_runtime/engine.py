@@ -1,0 +1,356 @@
+"""Restricted lifecycle and input operations for project-owned Android containers."""
+from __future__ import annotations
+
+import asyncio
+import base64
+import json
+import os
+import re
+import sqlite3
+import time
+import uuid
+from pathlib import Path
+from typing import Literal
+from urllib.parse import urlsplit
+
+from pydantic import BaseModel, Field, model_validator
+
+
+class RuntimeFailure(ValueError):
+    pass
+
+
+class DeviceCreate(BaseModel):
+    model_config = {'extra': 'forbid'}
+    name: str = Field(min_length=1, max_length=60)
+    width: int = Field(default=720, ge=320, le=1440)
+    height: int = Field(default=1280, ge=480, le=2560)
+    dpi: int = Field(default=240, ge=120, le=640)
+    memory_mb: int = Field(default=2048, ge=1024, le=8192)
+
+
+class Action(BaseModel):
+    model_config = {'extra': 'forbid'}
+    kind: Literal['tap', 'swipe', 'text', 'key', 'open', 'wait']
+    x: int = Field(default=0, ge=0, le=2560)
+    y: int = Field(default=0, ge=0, le=2560)
+    x2: int = Field(default=0, ge=0, le=2560)
+    y2: int = Field(default=0, ge=0, le=2560)
+    duration_ms: int = Field(default=350, ge=100, le=3000)
+    text: str = Field(default='', max_length=2000)
+    key: Literal['home', 'back', 'recent', 'enter', 'delete', 'wake'] = 'home'
+    url: str = Field(default='', max_length=2048)
+
+    @model_validator(mode='after')
+    def valid_action(self):
+        if self.kind == 'open':
+            u = urlsplit(self.url)
+            if u.scheme not in ('https', 'http') or not u.hostname or u.username or u.password or any(ord(c) < 32 for c in self.url):
+                raise ValueError('只能打开 HTTP/HTTPS 网页')
+        if self.kind == 'text' and (not self.text or '\0' in self.text):
+            raise ValueError('请输入有效文字')
+        return self
+
+
+class GuestCommand:
+    """All arguments originate in trusted code, not command text from the web/model."""
+    def __init__(self, mode='lima', instance='haybot-android', ssh_config=None):
+        if mode not in ('lima', 'docker', 'ssh'):
+            raise RuntimeFailure('不支持的运行底座')
+        if not re.fullmatch(r'[a-zA-Z0-9_-]{1,60}', instance):
+            raise RuntimeFailure('运行时名称无效')
+        self.mode, self.instance, self.ssh_config = mode, instance, ssh_config
+
+    async def __call__(self, *args, timeout=40):
+        if self.mode == 'lima':
+            argv = ['limactl', 'shell', self.instance, '--', *args]
+        elif self.mode == 'ssh':
+            # SSH has a remote shell: quote every trusted argv, including text payloads.
+            import shlex
+            argv = ['ssh', '-F', str(self.ssh_config), '-o', 'BatchMode=yes', 'haybot-android', shlex.join(args)]
+        else:
+            argv = list(args)
+        if args and args[0] == 'docker' and self.mode in ('lima', 'ssh'):
+            if self.mode == 'lima':
+                argv = ['limactl', 'shell', self.instance, '--', 'sudo', '-n', *args]
+            else:
+                import shlex
+                argv[-1] = shlex.join(['sudo', '-n', *args])
+        try:
+            proc = await asyncio.create_subprocess_exec(*argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            try:
+                out, err = await asyncio.wait_for(proc.communicate(), timeout)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                proc.kill()
+                await proc.communicate()
+                raise
+            if proc.returncode:
+                # Command outputs may contain UI text. Only a short diagnostic is exposed.
+                raise RuntimeFailure(err.decode(errors='replace')[-600:] or '运行时命令失败')
+            return out
+        except FileNotFoundError:
+            raise RuntimeFailure('运行底座命令未安装，请运行 scripts/android_runtime.py setup') from None
+        except asyncio.TimeoutError:
+            raise RuntimeFailure('安卓操作超时，结果可能未知；请观察画面后决定，不自动重试') from None
+
+
+class AndroidEngine:
+    def __init__(self, directory, command=None, image=None):
+        self.root = Path(directory); self.root.mkdir(parents=True, exist_ok=True)
+        self.db = sqlite3.connect(self.root / 'devices.sqlite3', check_same_thread=False)
+        self.db.row_factory = sqlite3.Row
+        self.db.executescript('''PRAGMA journal_mode=WAL;
+          CREATE TABLE IF NOT EXISTS devices(id TEXT PRIMARY KEY, bot_id TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL, config TEXT NOT NULL, state TEXT NOT NULL, error TEXT NOT NULL DEFAULT '', created REAL NOT NULL);
+        ''')
+        self.command = command or GuestCommand(os.getenv('HAYBOT_ANDROID_BACKEND', 'lima'), ssh_config=os.getenv('HAYBOT_ANDROID_SSH_CONFIG'))
+        self.image = image or os.getenv('HAYBOT_ANDROID_IMAGE', 'redroid/redroid:12.0.0_64only-latest')
+        if not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9./:@_-]{1,250}', self.image):
+            raise RuntimeFailure('Android 镜像名称无效')
+        self.locks = {}; self.leases = {}; self.revoked = set()
+
+    def close(self):
+        self.db.close()
+
+    def lock(self, device_id):
+        return self.locks.setdefault(device_id, asyncio.Lock())
+
+    def get(self, bot_id, device_id):
+        if not re.fullmatch(r'[0-9a-f]{32}', device_id):
+            raise RuntimeFailure('设备不存在')
+        row = self.db.execute('SELECT * FROM devices WHERE id=? AND bot_id=?', (device_id, bot_id)).fetchone()
+        if not row:
+            raise RuntimeFailure('设备不存在或未绑定当前 Bot')
+        result = dict(row); result['config'] = json.loads(result['config'])
+        result['busy'] = device_id in self.leases
+        return result
+
+    def list(self, bot_id):
+        return [self.get(bot_id, row['id']) for row in self.db.execute('SELECT id FROM devices WHERE bot_id=? ORDER BY created', (bot_id,))]
+
+    def state(self, device_id, state, error=''):
+        with self.db:
+            self.db.execute('UPDATE devices SET state=?,error=? WHERE id=?', (state, error[:600], device_id))
+
+    async def create(self, bot_id, config):
+        if not re.fullmatch(r'[a-zA-Z0-9_-]{1,80}', bot_id):
+            raise RuntimeFailure('Bot 标识无效')
+        device_id = uuid.uuid4().hex
+        try:
+            with self.db:
+                self.db.execute('INSERT INTO devices VALUES (?,?,?,?,?,?,?)', (device_id, bot_id, config.name.strip() or 'Android', config.model_dump_json(), 'stopped', '', time.time()))
+        except sqlite3.IntegrityError:
+            raise RuntimeFailure('每个 Bot 当前只支持一台独占设备') from None
+        return self.get(bot_id, device_id)
+
+    async def inspect(self, device_id):
+        name = 'haybot-android-' + device_id
+        # Only the exact expected container may be accessed.
+        exists = await self.command('docker', 'ps', '-a', '--filter', 'name=^/' + name + '$', '--format', '{{.Names}}')
+        if name not in exists.decode().splitlines():
+            return None
+        data = json.loads(await self.command('docker', 'inspect', name))
+        container = data[0]
+        if container.get('Config', {}).get('Labels', {}).get('io.haybot.android') != device_id:
+            raise RuntimeFailure('拒绝操作非 HayBot 管理的容器')
+        return container
+
+    async def volume(self, device_id):
+        name = 'haybot-android-data-' + device_id
+        names = await self.command('docker', 'volume', 'ls', '--filter', 'name=^' + name + '$', '--format', '{{.Name}}')
+        if name not in names.decode().splitlines():
+            return None
+        data = json.loads(await self.command('docker', 'volume', 'inspect', name))[0]
+        if (data.get('Labels') or {}).get('io.haybot.android') != device_id:
+            raise RuntimeFailure('拒绝使用或删除非 HayBot 管理的数据卷')
+        return data
+
+    async def health(self):
+        try:
+            raw = await self.command('docker', 'info', '--format', '{{json .}}', timeout=15)
+            data = json.loads(raw)
+            await self.command('test', '-d', '/sys/module/binder_linux', timeout=10)
+            return {'ready': True, 'backend': getattr(self.command, 'mode', 'test'), 'architecture': data.get('Architecture', ''), 'kernel': data.get('KernelVersion', ''), 'image': self.image}
+        except (RuntimeFailure, ValueError):
+            return {'ready': False, 'backend': getattr(self.command, 'mode', 'test'), 'image': self.image, 'detail': '专用运行时未就绪，检查 Docker、Binder 和安装日志'}
+
+    async def start(self, bot_id, device_id):
+        async with self.lock(device_id):
+            d = self.get(bot_id, device_id)
+            self.check_lease(device_id, '')
+            self.state(device_id, 'starting')
+            try:
+                info = await self.inspect(device_id)
+                if info:
+                    if not info['State']['Running']:
+                        await self.command('docker', 'start', 'haybot-android-' + device_id)
+                else:
+                    cfg = d['config']; volume = 'haybot-android-data-' + device_id
+                    # Named volume, no host paths; ADB is loopback-only inside the dedicated guest.
+                    if not await self.volume(device_id):
+                        await self.command('docker', 'volume', 'create', '--label', 'io.haybot.android=' + device_id, volume)
+                    await self.command('docker', 'run', '-d', '--name', 'haybot-android-' + device_id,
+                        '--label', 'io.haybot.android=' + device_id, '--privileged', '--restart', 'unless-stopped',
+                        '--memory', str(cfg['memory_mb']) + 'm', '--cpus', '2',
+                        '--mount', 'type=volume,source=' + volume + ',target=/data',
+                        '-p', '127.0.0.1::5555', self.image,
+                        'androidboot.redroid_width=' + str(cfg['width']), 'androidboot.redroid_height=' + str(cfg['height']),
+                        'androidboot.redroid_dpi=' + str(cfg['dpi']), 'androidboot.redroid_gpu_mode=guest',
+                        'androidboot.use_memfd=true', timeout=600)
+                self.state(device_id, 'booting')
+            except BaseException:
+                self.state(device_id, 'error', '启动失败，请检查运行时日志和镜像下载')
+                raise
+            return self.get(bot_id, device_id)
+
+    async def serial(self, device_id):
+        info = await self.inspect(device_id)
+        if not info or not info['State']['Running']:
+            raise RuntimeFailure('设备未运行')
+        ports = info.get('NetworkSettings', {}).get('Ports', {}).get('5555/tcp') or []
+        if len(ports) != 1 or ports[0]['HostIp'] != '127.0.0.1' or not str(ports[0]['HostPort']).isdigit():
+            raise RuntimeFailure('设备 ADB 映射异常')
+        serial = '127.0.0.1:' + ports[0]['HostPort']
+        await self.command('adb', 'connect', serial, timeout=15)
+        return serial
+
+    async def status(self, bot_id, device_id):
+        async with self.lock(device_id):
+            d = self.get(bot_id, device_id)
+            try:
+                info = await self.inspect(device_id)
+                if not info or not info['State']['Running']:
+                    self.state(device_id, 'stopped')
+                else:
+                    serial = await self.serial(device_id)
+                    boot = await self.command('adb', '-s', serial, 'shell', 'getprop', 'sys.boot_completed', timeout=10)
+                    self.state(device_id, 'running' if boot.strip() == b'1' else 'booting')
+            except RuntimeFailure:
+                self.state(device_id, 'error', '无法连接设备，请检查运行时')
+            return self.get(bot_id, device_id)
+
+    def check_lease(self, device_id, lease):
+        current = self.leases.get(device_id, '')
+        if current != lease:
+            raise RuntimeFailure('设备由任务占用，或任务已被人工接管')
+
+    async def claim(self, bot_id, device_id, lease=''):
+        lease = lease or uuid.uuid4().hex
+        if not re.fullmatch('[0-9a-f]{32}', lease):
+            raise RuntimeFailure('任务租约无效')
+        async with self.lock(device_id):
+            self.get(bot_id, device_id); self.check_lease(device_id, '')
+            if lease in self.revoked:
+                raise RuntimeFailure('任务已取消，拒绝恢复旧租约')
+            self.leases[device_id] = lease
+            return lease
+
+    async def revoke(self, bot_id, device_id, lease):
+        self.get(bot_id, device_id)
+        if not re.fullmatch('[0-9a-f]{32}', lease):
+            raise RuntimeFailure('任务租约无效')
+        # Deliberately before acquiring the device lock: pending actions and late claims
+        # must observe cancellation even if another observation/action holds the lock.
+        self.revoked.add(lease)
+        if self.leases.get(device_id) == lease:
+            self.leases.pop(device_id, None)
+        return {'ok': True}
+
+    async def release(self, bot_id, device_id, lease):
+        return await self.revoke(bot_id, device_id, lease)
+
+    async def takeover(self, bot_id, device_id):
+        self.get(bot_id, device_id)
+        lease = self.leases.pop(device_id, None)
+        if lease:
+            self.revoked.add(lease)
+        return {'ok': True}
+
+    async def stop(self, bot_id, device_id):
+        await self.takeover(bot_id, device_id)
+        async with self.lock(device_id):
+            self.get(bot_id, device_id); self.leases.pop(device_id, None)
+            if await self.inspect(device_id):
+                await self.command('docker', 'stop', '--time', '15', 'haybot-android-' + device_id)
+            self.state(device_id, 'stopped')
+            return self.get(bot_id, device_id)
+
+    async def remove_container(self, bot_id, device_id):
+        async with self.lock(device_id):
+            self.get(bot_id, device_id); self.check_lease(device_id, '')
+            info = await self.inspect(device_id)
+            if info and info['State']['Running']:
+                raise RuntimeFailure('请先停止设备')
+            if info:
+                await self.command('docker', 'rm', 'haybot-android-' + device_id)
+            self.state(device_id, 'stopped')
+            return self.get(bot_id, device_id)
+
+    async def delete(self, bot_id, device_id, destroy_data=False):
+        if not destroy_data:
+            return await self.remove_container(bot_id, device_id)
+        async with self.lock(device_id):
+            self.get(bot_id, device_id); self.check_lease(device_id, '')
+            info = await self.inspect(device_id)
+            if info and info['State']['Running']:
+                raise RuntimeFailure('请先停止设备')
+            volume = await self.volume(device_id)
+            if info:
+                await self.command('docker', 'rm', 'haybot-android-' + device_id)
+            if volume:
+                await self.command('docker', 'volume', 'rm', 'haybot-android-data-' + device_id)
+            with self.db:
+                self.db.execute('DELETE FROM devices WHERE id=? AND bot_id=?', (device_id, bot_id))
+            return {'ok': True}
+
+    async def observe(self, bot_id, device_id, lease=''):
+        async with self.lock(device_id):
+            self.get(bot_id, device_id)
+            # Admin may view while a task runs; task observations must hold a valid lease.
+            if lease:
+                self.check_lease(device_id, lease)
+            serial = await self.serial(device_id)
+            image = await self.command('adb', '-s', serial, 'exec-out', 'screencap', '-p', timeout=25)
+            if not image.startswith(b'\x89PNG\r\n\x1a\n') or len(image) > 8 * 1024 * 1024:
+                raise RuntimeFailure('设备未返回有效截图')
+            tree = ''
+            try:
+                tree = (await self.u2(serial, {'kind': 'hierarchy'})).decode()[:40000]
+            except RuntimeFailure:
+                pass
+            return {'image': base64.b64encode(image).decode(), 'hierarchy': tree, 'at': time.time()}
+
+    async def u2(self, serial, payload):
+        # Fixed helper; payload is base64 JSON, never interpreted as shell or Python source.
+        code = "import sys,json,base64,uiautomator2 as u; d=u.connect(sys.argv[1]); p=json.loads(base64.b64decode(sys.argv[2])); print(d.dump_hierarchy() if p['kind']=='hierarchy' else d.send_keys(p['text'],clear=False))"
+        return await self.command('/opt/haybot-u2/bin/python', '-c', code, serial, base64.b64encode(json.dumps(payload).encode()).decode(), timeout=45)
+
+    async def action(self, bot_id, device_id, action, lease=''):
+        async with self.lock(device_id):
+            d = self.get(bot_id, device_id); self.check_lease(device_id, lease)
+            serial = await self.serial(device_id)
+            self.check_lease(device_id, lease)
+            cfg = d['config']
+            if action.kind in ('tap', 'swipe'):
+                points = [(action.x, action.y)] + ([(action.x2, action.y2)] if action.kind == 'swipe' else [])
+                if any(x >= cfg['width'] or y >= cfg['height'] for x, y in points):
+                    raise RuntimeFailure('触摸位置超出屏幕')
+            keys = {'home': '3', 'back': '4', 'recent': '187', 'enter': '66', 'delete': '67', 'wake': '224'}
+            if action.kind == 'tap':
+                args = ['input', 'tap', str(action.x), str(action.y)]
+            elif action.kind == 'swipe':
+                args = ['input', 'swipe', str(action.x), str(action.y), str(action.x2), str(action.y2), str(action.duration_ms)]
+            elif action.kind == 'key':
+                args = ['input', 'keyevent', keys[action.key]]
+            elif action.kind == 'open':
+                # adb shell reconstructs a command; quote URL even though local subprocess uses argv.
+                import shlex
+                args = ['am', 'start', '-a', 'android.intent.action.VIEW', '-d', shlex.quote(action.url)]
+            elif action.kind == 'text':
+                await self.u2(serial, {'kind': 'text', 'text': action.text})
+                return {'ok': True}
+            else:
+                await asyncio.sleep(action.duration_ms / 1000)
+                return {'ok': True}
+            await self.command('adb', '-s', serial, 'shell', *args, timeout=25)
+            return {'ok': True}

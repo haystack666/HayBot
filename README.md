@@ -303,3 +303,31 @@ QQ 采用 `files` 的 `file_data` 上传取得 `file_info`，`srv_send_msg=false
 定时任务需要 Bot 在线；每日任务只在时刻后的 2 分钟内发出，一次定时最晚允许 5 分钟，等待锁或模型过慢超过期限会跳过。每个账号的同一天同一时刻只建立一条每日任务，修改策略及重启不重复发布。发送结果不明、发送中断或缺少 tid 时记录为未知，不自动重试；请先去 QQ 空间核对。草稿、定时和排队任务可本地取消，已确认发布的记录可以同步删除 QQ 空间说说。
 
 数据位于各 Bot SQLite 的 `qzone_config`、`qzone_posts`、`qzone_images` 表和同目录 `qzone-assets/`。本地记录保留 tid、状态及配图，删除说说不会删除聊天、记忆或日程。当前对接 NapCat `send_qzone_msg` 和 `delete_qzone_msg`；官方机器人不提供该页面的发布能力。
+
+## 安卓设备（实验性）
+
+安卓功能在 `feature/android-runtime` 分支开发。HayBot 管理 redroid Android 12 容器；每个 Bot 独占一台设备和独立数据卷。默认关闭模型操作，不改变现有聊天配置。Mac 使用 HayBot 专用 Linux VM，不使用个人 AVD；Linux 可直接运行。Windows x64 使用专用 QEMU Linux VM，不修改全局 WSL 内核。Windows/Linux 仍需对应实机验收，不能以 Mac 运行结果代替。
+
+在**部署电脑宿主系统**安装 Python 3.10+ 后运行：
+
+```bash
+# macOS 先安装 Lima；Linux 先准备 Docker；Windows x64 先安装 QEMU、OpenSSH 并启用 WHPX。
+# 可通过 HTTP_PROXY / HTTPS_PROXY 使用自己的下载代理。
+python3 scripts/android_runtime.py setup
+python3 scripts/android_runtime.py start
+python3 scripts/android_runtime.py status
+```
+
+`setup` 会创建专用虚拟机，或在 Linux 上安装 Docker/ADB/Binder 和 UI 自动化依赖。Linux 安装脚本适用于 Ubuntu/Debian 系；不覆盖其他发行版内核。Windows 依赖 QEMU、qemu-img、ssh、ssh-keygen，需加入 PATH；安装器准备独立 qcow2 磁盘、cloud-init 和项目 SSH 密钥。Windows ARM64 暂未支持。
+
+将 `.android-runtime/haybot.env` 中的两项配置加入项目 `.env`（不要提交凭证），再重建 app 服务：
+
+```bash
+docker compose up -d --no-deps app
+```
+
+后台进入对应 Bot 的「接入设置 → 安卓设备」，创建、启动设备后可获取画面。点击画面轻触，拖动画面滑动；先聚焦输入框再发送文字，支持中文。模型任务使用独立视觉模型、步数和时限；任务进行中可停止或人工接管。截图和 UI 资料仅在执行任务时发给所选模型供应商，请在自己的测试手机上使用。
+
+Mac/Windows 管理器仅监听本机 `127.0.0.1:17321`；Linux 监听 Docker bridge 私有网关，使 app 容器可访问且不绑定局域网网卡。管理器使用独立 Token；ADB 只绑定专用 VM 或 Linux 宿主的回环接口。HayBot app 不挂载 Docker socket。Linux 上管理器需有当前 Docker daemon 的访问权限。远程部署应将运行管理器与 HayBot 部署在同一台宿主；外部设备连接暂未提供配置入口。
+
+停止设备保留数据；「移除容器」也保留数据，重新启动可重建；「销毁设备数据」会二次确认并永久删除对应手机卷。任务或服务中断不会自动重放已执行的外部动作。日志保存在 `.android-runtime/manager.log`，设备清单和手机卷独立于 HayBot 的聊天数据库。`python3 scripts/android_runtime.py stop` 只停止管理器，设备和 VM 保留；Mac 可另运行 `limactl stop haybot-android` 关闭专用 VM。

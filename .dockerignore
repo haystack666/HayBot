@@ -6,3 +6,12 @@ data
 **/__pycache__
 **/.pytest_cache
 .venv
+
+.android-runtime
+.superpowers
+docs
+.playwright-mcp
+imports
+models
+personas
+memory-mobile.png

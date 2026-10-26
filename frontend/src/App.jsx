@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ArrowDownLeft, ArrowUpRight, Bot, ChevronRight, CircleHelp, Cpu, FileText, LayoutDashboard, LoaderCircle, LogOut, Menu, PanelLeftClose, PanelLeftOpen, Play, Radio, RefreshCw, Save, ShieldCheck, SlidersHorizontal, Square, X, Bell, MessageSquare, CalendarDays, Brain, Image, Globe2 } from 'lucide-react'
+import { ArrowDownLeft, ArrowUpRight, Bot, ChevronRight, CircleHelp, Cpu, FileText, LayoutDashboard, LoaderCircle, LogOut, Menu, PanelLeftClose, PanelLeftOpen, Play, Radio, RefreshCw, Save, ShieldCheck, SlidersHorizontal, Square, X, Bell, MessageSquare, CalendarDays, Brain, Image, Globe2, Smartphone } from 'lucide-react'
 import { Dialog } from 'radix-ui'
 import { NavLink, useNavigate, useParams } from 'react-router-dom'
 import ProactivePage from './ProactivePage'
@@ -12,6 +12,7 @@ import MemoryPage from './MemoryPage'
 import MemesPage from './MemesPage'
 import QzonePage from './QzonePage'
 import LogsPage from './LogsPage'
+import AndroidPage from './AndroidPage'
 import ThemeSelector from './ThemeSelector'
 import BotNavigation from './components/BotNavigation'
 import { Brand, Panel, Field, Logs, Notice } from './components/console'
@@ -32,6 +33,7 @@ export const pages = [
   { id: 'qzone', title: 'QQ 空间', subtitle: '编辑、定时发布角色动态，管理配图与可见范围。', icon: Globe2 },
   { id: 'proactive', title: '主动消息', subtitle: '设置定时问候和主动搭话策略。', icon: Bell },
   { id: 'chats', title: '聊天记录', subtitle: '查看当前 Bot 的聊天记录，支持列表与气泡视图。', icon: MessageSquare },
+  { id: 'android', title: '安卓设备', subtitle: '管理独立手机、查看画面并执行安卓操作任务。', icon: Smartphone },
   { id: 'logs', title: '运行日志', subtitle: '筛选运行事件，查看模型耗时、异常原因与消息处理链路。', icon: FileText },
 ]
 const states = { stopped: '已停止', connecting: '连接中', connected: '运行中', reconnecting: '重新连接中' }
@@ -154,13 +156,13 @@ export default function App({ page }) {
     <Dialog.Root open={mobileOpen} onOpenChange={setMobileOpen}><Dialog.Trigger asChild><Button className="mobile-menu" variant="ghost" size="icon" aria-label="打开导航"><Menu size={18} /></Button></Dialog.Trigger><Dialog.Portal><Dialog.Overlay className="sheet-overlay" /><Dialog.Content className="mobile-sidebar"><Dialog.Title className="sr-only">HayBot 导航</Dialog.Title><Dialog.Description className="sr-only">选择机器人管理页面</Dialog.Description><Dialog.Close asChild><Button variant="ghost" size="icon-sm" className="sheet-close" aria-label="关闭导航"><X size={16} /></Button></Dialog.Close><Navigation {...{botId, bots, switchBot, guardLeave}} closeMenu={() => setMobileOpen(false)} mobile /></Dialog.Content></Dialog.Portal></Dialog.Root>
     <div className="breadcrumb"><span className="breadcrumb-bot" title={currentBot?.name}>{currentBot?.name || '工作空间'}</span><ChevronRight size={13} /><b>{current.title}</b></div></div><div className="top-actions"><Badge variant="outline" className="runtime-badge"><span className={`status-dot ${active ? 'live' : ''}`} />{botId ? states[status.state] : `${bots.filter(bot => bot.state === 'connected').length} 在线`}</Badge><span className="topbar-divider" /><ThemeSelector /><Button variant="ghost" size="icon" aria-label="退出登录" title="退出登录" onClick={() => action('logout', async () => { await api('/logout', 'POST'); setAuthed(false); setConfig(null); setSavedConfig(null); setDirty(false) })}><LogOut size={16} /></Button></div></header>
     <main className="main" id="main-content">{page !== 'bots' && <div className="page-heading"><div><h1>{current.title}</h1><p className="subtitle">{current.subtitle}</p></div><div className="action-row">
-      {!botId || page === 'chats' || page === 'qzone' ? null : page === 'overview' || page === 'logs' ? <Button variant="outline" disabled={!!busy} onClick={() => action('refresh', async () => { if (page === 'logs') setStatus(await api('/status')); else await checkModels(savedConfig.ollama) }, '状态已刷新')}><RefreshCw size={14} className={busy === 'refresh' ? 'spin' : ''} />刷新状态</Button> : <><Button variant="outline" disabled={!dirty || !!busy || active} onClick={cancel}>取消更改</Button><Button disabled={!!busy || active || !dirty} onClick={() => action('save', save, '配置已保存')}><Save size={14} />{busy === 'save' ? '保存中…' : dirty ? '保存更改' : '配置已保存'}</Button></>}
+      {!botId || page === 'chats' || page === 'qzone' || page === 'android' ? null : page === 'overview' || page === 'logs' ? <Button variant="outline" disabled={!!busy} onClick={() => action('refresh', async () => { if (page === 'logs') setStatus(await api('/status')); else await checkModels(savedConfig.ollama) }, '状态已刷新')}><RefreshCw size={14} className={busy === 'refresh' ? 'spin' : ''} />刷新状态</Button> : <><Button variant="outline" disabled={!dirty || !!busy || active} onClick={cancel}>取消更改</Button><Button disabled={!!busy || active || !dirty} onClick={() => action('save', save, '配置已保存')}><Save size={14} />{busy === 'save' ? '保存中…' : dirty ? '保存更改' : '配置已保存'}</Button></>}
       {botId && toggleButton}
     </div></div>}
     {botId && status.state === 'stopped' && status.start_error && <Notice alert>自动启动失败：{status.start_error}。已保存的机器人无需重新扫码，可检查配置后点击“启动机器人”重试。</Notice>}
     {pollError && <Notice alert>后台连接中断，页面显示上次状态，正在重试。</Notice>}
     {dirty && (page === 'overview' || page === 'logs' || page === 'chats' || page === 'qzone') && <Notice>有尚未保存的配置，请返回配置页面保存或取消更改。</Notice>}
-    {botId && active && page !== 'overview' && page !== 'logs' && page !== 'chats' && page !== 'qzone' && <Notice>机器人运行期间配置只读，请先停止机器人，再修改并保存。</Notice>}
+    {botId && active && page !== 'overview' && page !== 'logs' && page !== 'chats' && page !== 'qzone' && page !== 'android' && <Notice>机器人运行期间配置只读，请先停止机器人，再修改并保存。</Notice>}
     {page === 'bots' && <BotsPage api={api} notify={notify} onChanged={loadBotList} />}
     {page === 'overview' && <Overview status={status} config={config} ollamaState={ollamaState} navigate={navigate} providers={providers} />}
     {botId && <ConfigurationPages {...{page, config, active, busy, dirty, update, action, api, notify, checkModels, models, ollamaState, setTransport}} />}
@@ -169,6 +171,7 @@ export default function App({ page }) {
     {page === 'schedule' && <SchedulePage config={config.schedule} update={(key, value) => update('schedule', key, value)} {...{active, busy, dirty, api, notify}} model={config.ollama.model} />}
     {page === 'memory' && <MemoryPage config={config.memory} update={(key, value) => update('memory', key, value)} {...{active, busy, dirty, api, notify}} />}
     {page === 'memes' && <MemesPage {...{api, providers, notify}} memory={config.memory} onSaved={memes => { setConfig(c => ({ ...c, memes })); setSavedConfig(c => ({ ...c, memes })) }} />}
+    {page === 'android' && <AndroidPage key={botId} {...{api, notify, providers}} />}
     {page === 'qzone' && <QzonePage key={botId} {...{api,notify,dirty}} />}
     {page === 'chats' && <ChatsPage api={api} botName={currentBot?.name} />}
     {page === 'logs' && <LogsPage key={botId} {...{api, notify}} />}

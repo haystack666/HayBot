@@ -3,7 +3,7 @@ import { Brain, ChevronRight, FileText, MessageSquare, Radio } from 'lucide-reac
 import { NavLink, useParams } from 'react-router-dom'
 
 const groups = [
-  { id: 'connections', title: '接入设置', icon: Radio, pages: ['qq', 'providers'] },
+  { id: 'connections', title: '接入设置', icon: Radio, pages: ['qq', 'providers', 'android'] },
   { id: 'character', title: '角色与对话', icon: Brain, pages: ['rules', 'memory', 'schedule', 'memes'] },
   { id: 'interaction', title: '主动互动', icon: MessageSquare, pages: ['proactive', 'qzone'] },
   { id: 'records', title: '记录与诊断', icon: FileText, pages: ['chats', 'logs'] },

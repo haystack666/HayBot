@@ -9,6 +9,10 @@ services:
       OLLAMA_URL: http://ollama:11434
       OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:0.6b}
       COOKIE_SECURE: "false"
+      ANDROID_RUNTIME_URL: ${ANDROID_RUNTIME_URL:-}
+      ANDROID_RUNTIME_TOKEN: ${ANDROID_RUNTIME_TOKEN:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - app-data:/data
     depends_on:

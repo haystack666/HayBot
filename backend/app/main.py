@@ -28,6 +28,9 @@ def create_app(data_dir=None, static_dir=None):
             raise RuntimeError('ADMIN_PASSWORD 必须设置且至少 12 位')
         app.state.password = password
         app.state.manager = BotManager(data_dir or os.getenv('DATA_DIR', '/data'))
+        from .android import AndroidTasks
+        app.state.android = AndroidTasks(app.state.manager, app.state.manager.registry.root)
+        app.state.manager.android_service = app.state.android
         app.state.qq_connect = QQConnect(app.state.manager)
         app.state.session = secrets.token_urlsafe(48)
         app.state.auth_version = time.time()
@@ -35,6 +38,7 @@ def create_app(data_dir=None, static_dir=None):
         try:
             yield
         finally:
+            await app.state.android.close()
             await app.state.qq_connect.close()
             await app.state.manager.close()
 
@@ -516,6 +520,9 @@ def create_app(data_dir=None, static_dir=None):
     from .qzone_routes import register_qzone_routes
     register_qzone_routes(app,scoped_runtime)
 
+    from .android_routes import register_android_routes
+    register_android_routes(app, scoped_runtime)
+
     root = Path(static_dir or os.getenv('STATIC_DIR', '/app/static'))
     if (root / 'assets').exists():
         app.mount('/assets', StaticFiles(directory=root / 'assets'), name='assets')
@@ -540,6 +547,7 @@ def create_app(data_dir=None, static_dir=None):
     @app.get('/schedule')
     @app.get('/memory')
     @app.get('/memes')
+    @app.get('/android')
     @app.get('/qzone')
     async def index():
         if not (root / 'index.html').exists():

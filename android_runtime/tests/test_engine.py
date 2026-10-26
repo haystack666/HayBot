@@ -1,0 +1,171 @@
+import asyncio
+import json
+
+import pytest
+
+from android_runtime.engine import AndroidEngine, DeviceCreate, Action, RuntimeFailure
+
+
+class Guest:
+    def __init__(self):
+        self.calls = []
+        self.containers = {}
+        self.volumes = {}
+
+    async def __call__(self, *args, **kwargs):
+        self.calls.append(args)
+        if args[:2] == ('docker', 'ps'):
+            return '\n'.join(self.containers).encode()
+        if args[:3] == ('docker','volume','ls'):
+            return '\n'.join(self.volumes).encode()
+        if args[:3] == ('docker','volume','inspect'):
+            if args[-1] not in self.volumes: raise RuntimeFailure('volume missing')
+            return json.dumps([self.volumes[args[-1]]]).encode()
+        if args[:3] == ('docker','volume','create'):
+            self.volumes[args[-1]]={'Labels': {'io.haybot.android': args[args.index('--label')+1].split('=',1)[1]}}
+        if args[:3] == ('docker','volume','rm'):
+            if args[-1] not in self.volumes:raise RuntimeFailure('volume missing')
+            del self.volumes[args[-1]]
+        if args[:2] == ('docker', 'inspect'):
+            name = args[-1]
+            if name not in self.containers:
+                raise RuntimeFailure('not found')
+            return json.dumps([self.containers[name]]).encode()
+        if args[:2] == ('docker', 'run'):
+            name = args[args.index('--name') + 1]
+            self.containers[name] = {'Config': {'Labels': {'io.haybot.android': name.removeprefix('haybot-android-')}}, 'State': {'Running': True}, 'NetworkSettings': {'Ports': {'5555/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '41321'}]}}}
+            return b'container-id'
+        if args[:2] == ('docker', 'stop'):
+            self.containers[args[-1]]['State']['Running'] = False
+        if args[:2] == ('docker', 'rm'):
+            self.containers.pop(args[-1], None)
+        if 'getprop' in args:
+            return b'1\n'
+        return b'ok'
+
+
+@pytest.mark.asyncio
+async def test_create_is_scoped_persistent_and_no_public_adb(tmp_path):
+    guest = Guest()
+    engine = AndroidEngine(tmp_path, guest)
+    device = await engine.create('bot-a', DeviceCreate(name='Phone'))
+    assert device['bot_id'] == 'bot-a'
+    assert device['state'] == 'stopped'
+    await engine.start('bot-a', device['id'])
+    run = next(x for x in guest.calls if x[:2] == ('docker', 'run'))
+    assert '127.0.0.1::5555' in run
+    assert '--privileged' in run
+    assert '--mount' in run and 'type=volume' in run[run.index('--mount') + 1]
+    assert not any('/Users/' in x or 'docker.sock' in x for x in run)
+    assert engine.list('bot-b') == []
+    with pytest.raises(RuntimeFailure):
+        await engine.stop('bot-b', device['id'])
+    engine.close()
+    reopened = AndroidEngine(tmp_path, guest)
+    assert reopened.list('bot-a')[0]['id'] == device['id']
+    reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_retained_device_can_restart_and_destroy_requires_stopped(tmp_path):
+    guest = Guest(); engine = AndroidEngine(tmp_path, guest)
+    device = await engine.create('bot-a', DeviceCreate(name='Phone'))
+    await engine.start('bot-a', device['id'])
+    with pytest.raises(RuntimeFailure):
+        await engine.delete('bot-a', device['id'], destroy_data=True)
+    await engine.stop('bot-a', device['id'])
+    await engine.remove_container('bot-a', device['id'])
+    assert engine.list('bot-a')[0]['id'] == device['id']
+    assert not any(x[:3] == ('docker', 'volume', 'rm') for x in guest.calls)
+    await engine.start('bot-a', device['id'])
+    await engine.stop('bot-a', device['id'])
+    await engine.delete('bot-a', device['id'], destroy_data=True)
+    assert engine.list('bot-a') == []
+    assert any(x[:3] == ('docker', 'volume', 'rm') for x in guest.calls)
+    engine.close()
+
+
+@pytest.mark.asyncio
+async def test_lease_blocks_manual_action_until_takeover_and_fences_old_task(tmp_path):
+    guest = Guest(); engine = AndroidEngine(tmp_path, guest)
+    d = await engine.create('a', DeviceCreate(name='Phone'))
+    await engine.start('a', d['id'])
+    lease = await engine.claim('a', d['id'])
+    with pytest.raises(RuntimeFailure):
+        await engine.action('a', d['id'], Action(kind='key', key='home'))
+    await engine.takeover('a', d['id'])
+    with pytest.raises(RuntimeFailure):
+        await engine.action('a', d['id'], Action(kind='key', key='home'), lease=lease)
+    await engine.action('a', d['id'], Action(kind='key', key='home'))
+    engine.close()
+
+
+@pytest.mark.asyncio
+async def test_refuses_resource_not_owned_by_project(tmp_path):
+    guest = Guest(); engine = AndroidEngine(tmp_path, guest)
+    d = await engine.create('a', DeviceCreate(name='Phone'))
+    guest.containers['haybot-android-' + d['id']] = {'Config': {'Labels': {}}, 'State': {'Running': True}}
+    with pytest.raises(RuntimeFailure):
+        await engine.start('a', d['id'])
+    assert not any(x[:2] == ('docker', 'start') for x in guest.calls)
+    engine.close()
+
+
+def test_actions_reject_shell_and_escape_attempts():
+    for payload in [{'kind': 'shell', 'text': 'id'}, {'kind': 'key', 'key': 'home;id'}, {'kind': 'tap', 'x': -1, 'y': 2}, {'kind': 'open', 'url': 'file:///etc/passwd'}, {'kind': 'text', 'text': 'a', 'command': 'sh'}]:
+        with pytest.raises(ValueError):
+            Action.model_validate(payload)
+
+@pytest.mark.asyncio
+async def test_health_accepts_loaded_binder_module_without_legacy_device_node(tmp_path):
+    async def guest(*args, **kwargs):
+        if args[:2] == ('docker', 'info'):
+            return b'{"Architecture":"aarch64","KernelVersion":"6.8.0"}'
+        if args == ('test', '-d', '/sys/module/binder_linux'):
+            return b''
+        raise RuntimeFailure('legacy binder device missing')
+    engine=AndroidEngine(tmp_path,guest)
+    assert (await engine.health())['ready'] is True
+    engine.close()
+
+@pytest.mark.asyncio
+async def test_destroy_never_started_device_and_refuse_unowned_volume(tmp_path):
+    guest=Guest(); engine=AndroidEngine(tmp_path,guest)
+    d=await engine.create('a',DeviceCreate(name='unused'))
+    await engine.delete('a',d['id'],destroy_data=True)
+    assert engine.list('a')==[]
+    d=await engine.create('a',DeviceCreate(name='unowned'))
+    guest.volumes['haybot-android-data-'+d['id']]={'Labels':{}}
+    with pytest.raises(RuntimeFailure):await engine.start('a',d['id'])
+    with pytest.raises(RuntimeFailure):await engine.delete('a',d['id'],destroy_data=True)
+    assert 'haybot-android-data-'+d['id'] in guest.volumes
+    engine.close()
+
+@pytest.mark.asyncio
+async def test_revocation_fences_queued_action_and_late_claim(tmp_path):
+    guest=Guest(); engine=AndroidEngine(tmp_path,guest)
+    d=await engine.create('a',DeviceCreate(name='phone'))
+    await engine.start('a',d['id'])
+    lease='1'*32
+    await engine.claim('a',d['id'],lease)
+    lock=engine.lock(d['id']);await lock.acquire()
+    action=asyncio.create_task(engine.action('a',d['id'],Action(kind='key',key='home'),lease=lease))
+    await asyncio.sleep(0)
+    await engine.revoke('a',d['id'],lease)
+    lock.release()
+    with pytest.raises(RuntimeFailure):await action
+    with pytest.raises(RuntimeFailure):await engine.claim('a',d['id'],lease)
+    engine.close()
+
+@pytest.mark.asyncio
+async def test_revocation_during_adb_preflight_prevents_input(tmp_path):
+    guest=Guest();engine=AndroidEngine(tmp_path,guest)
+    d=await engine.create('a',DeviceCreate(name='phone'));await engine.start('a',d['id'])
+    lease=await engine.claim('a',d['id']);entered=asyncio.Event();resume=asyncio.Event()
+    async def serial(_):entered.set();await resume.wait();return '127.0.0.1:40000'
+    engine.serial=serial
+    job=asyncio.create_task(engine.action('a',d['id'],Action(kind='key',key='home'),lease))
+    await entered.wait();await engine.revoke('a',d['id'],lease);resume.set()
+    with pytest.raises(RuntimeFailure):await job
+    assert not any('keyevent' in call for call in guest.calls)
+    engine.close()
