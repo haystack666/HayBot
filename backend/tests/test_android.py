@@ -159,3 +159,25 @@ async def test_invalid_model_decision_retries_before_action_and_keeps_diagnostic
     assert runtime.store.stats()['output_tokens']==4
     assert 'image' not in attempts[0] and 'api_key' not in attempts[0]
     await tasks.close();await manager.close()
+
+@pytest.mark.asyncio
+async def test_duplicate_y_repair_uses_canonical_points_without_replaying_bad_assistant(tmp_path,monkeypatch):
+    import app.android as module
+    from app.registry import BotManager
+    manager=BotManager(tmp_path);tasks=AndroidTasks(manager,tmp_path)
+    cfg=tasks.config('default');cfg.enabled=True;cfg.model='vision';tasks.save_config('default',cfg)
+    bad='{"action":{"kind":"swipe","x":360,"y":10,"x2":360,"y":700,"duration_ms":500}}'
+    responses=iter([bad,'{"action":{"kind":"swipe","start":[360,10],"end":[360,700],"duration_ms":500}}'])
+    messages=[]
+    async def generate(*args,**kwargs):
+        import copy
+        messages.append(copy.deepcopy(args[3]))
+        return {'message':{'content':next(responses)},'eval_count':3}
+    monkeypatch.setattr(module,'generate',generate)
+    job=tasks.submit('default','0'*32,'test');tasks.jobs[job['id']].cancel();await asyncio.gather(tasks.jobs[job['id']],return_exceptions=True);tasks.update(job['id'],state='running')
+    result=await tasks.decide('default',cfg,'test',{'image':png(),'hierarchy':''},[],job['id'])
+    assert result['action']['y']==10 and result['action']['y2']==700
+    assert not any(m.get('role')=='assistant' and m.get('content')==bad for m in messages[1])
+    assert 'start' in messages[1][-1]['content'] and 'end' in messages[1][-1]['content']
+    assert len(tasks.diagnostics('default',job['id']))==2
+    await tasks.close();await manager.close()

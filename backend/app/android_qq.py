@@ -130,7 +130,7 @@ start只用于明确委托手机操作；能不能帮我打开设置属于委托
         if request=='status':
             visible=[t for t in jobs if self.tasks.valid_origin(t)]
             task=visible[0] if visible else None
-            content=f'手机任务{STATES.get(task["state"],task["state"])}：{task["goal"][:400]}\n{task["result"] or "已完成 "+str(len(task["steps"]))+" 步，仍在处理。"}' if task else '还没有你发起的手机任务。发送 /手机 任务内容 即可开始。'
+            content=f'手机任务{STATES.get(task["state"],task["state"])}：{task["goal"][:400]}\n{self.result_text(task) or "已完成 "+str(len(task["steps"]))+" 步，仍在处理。"}' if task else '还没有你发起的手机任务。发送 /手机 任务内容 即可开始。'
             await self.send(bot,config,data,target,content,guard=lambda:current() and (task is None or self.tasks.valid_origin(task)));return True
         if request=='stop':
             active=next((t for t in jobs if t['state'] in ('queued','running')),None)
@@ -187,6 +187,13 @@ start只用于明确委托手机操作；能不能帮我打开设置属于委托
         bot.store.record_result('sent','手机截图已发送',category='message',event='android.screenshot_sent')
         return True
 
+    @staticmethod
+    def result_text(task):
+        result=task.get('result','')
+        if task.get('state')=='failed' and result.startswith('操作模型连续两次'):
+            return '操作模型没有生成完整有效的动作，已停止，本轮未操作手机。详细原因已保存在后台模型返回诊断中。'
+        return result
+
     async def notify(self,bot_id,task_id):
         task=self.tasks.get(bot_id,task_id)
         if task['state'] in ('queued','running','cancelled') or task['notification']!='ready':return
@@ -200,7 +207,7 @@ start只用于明确委托手机操作；能不能帮我打开设置属于委托
         if not self.tasks.notification(task_id,'sending',expected='ready'):return
         guard=lambda:self.tasks.valid_origin(self.tasks.get(bot_id,task_id)) and self.runtime(bot) is runtime and bot.state=='connected'
         try:
-            ok=await self.send(bot,config,data,origin['target'],f'手机任务{STATES.get(task["state"],task["state"])}：{task["goal"][:400]}\n{task["result"]}',sequence=2,guard=guard,event='result')
+            ok=await self.send(bot,config,data,origin['target'],f'手机任务{STATES.get(task["state"],task["state"])}：{task["goal"][:400]}\n{self.result_text(task)}',sequence=2,guard=guard,event='result')
             self.tasks.notification(task_id,'sent' if ok else 'unknown',expected='sending')
         except Exception:self.tasks.notification(task_id,'unknown',expected='sending')
 
