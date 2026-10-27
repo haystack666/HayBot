@@ -13,6 +13,13 @@ async def setup_bridge(tmp_path):
     bot=manager.get('default').bot;bot.android=bridge
     cfg=bot.store.load();cfg.transport='napcat';cfg.napcat.self_id='20002';cfg.napcat.ws_url='ws://test';cfg.rules.cooldown=0;bot.store.save(cfg);bot.state='connected'
     tasks.save_config('default',AndroidConfig(enabled=True,model='vision',qq_enabled=True,qq_owner_id='10001'))
+    async def voice(bot,phase,task,guard):
+        if not guard():return None
+        if phase=='started':return '我去看看。'
+        if phase=='no_task':return '这会儿没在弄手机。'
+        if phase=='stopped':return '好，先停下。'
+        return task.get('result') or '还在看。'
+    bridge.voice=AsyncMock(side_effect=voice)
     bot.api=AsyncMock(return_value={'id':'receipt'})
     async def gateway(method,path,body=None,**kwargs):
         if path.endswith('/devices'):return {'devices':[{'id':'0'*32,'state':'running'}]}
@@ -34,7 +41,8 @@ async def test_qq_command_submits_background_task_and_receipt_confirmed_result(t
     assert job['origin']['requester_id']=='10001'
     final=tasks.get('default',job['id']);assert final['state']=='completed' and final['notification']=='sent'
     sent=[c.kwargs['json']['content'] for c in bot.api.call_args_list]
-    assert any('开始' in s for s in sent) and any('Android12' in s for s in sent)
+    assert '我去看看。' in sent and any('Android12' in s for s in sent)
+    assert all('手机任务已' not in s and '/手机进度' not in s for s in sent)
     await bridge.notify('default',job['id'])
     assert len(bot.api.call_args_list)==len(sent)
     await bot.handle(payload('/手机进度',mid='two'))

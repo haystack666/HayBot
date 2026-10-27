@@ -15,6 +15,8 @@ class AndroidQQ:
     def __init__(self,tasks):
         self.tasks=tasks
         tasks.completion_callback=self.notify
+        from .android_voice import AndroidVoice
+        self.voice=AndroidVoice(self).compose
 
     @staticmethod
     def command(text):
@@ -34,6 +36,7 @@ class AndroidQQ:
         return next((r for r in self.tasks.manager.runtimes.values() if r.bot is bot and not r.closing),None)
 
     def allowed(self,bot,user,group):
+        if self.tasks.closed:return False
         r=self.runtime(bot)
         if not r or group:return False
         c=self.tasks.config(r.id)
@@ -130,15 +133,18 @@ start只用于明确委托手机操作；能不能帮我打开设置属于委托
         if request=='status':
             visible=[t for t in jobs if self.tasks.valid_origin(t)]
             task=visible[0] if visible else None
-            content=f'手机任务{STATES.get(task["state"],task["state"])}：{task["goal"][:400]}\n{self.result_text(task) or "已完成 "+str(len(task["steps"]))+" 步，仍在处理。"}' if task else '还没有你发起的手机任务。发送 /手机 任务内容 即可开始。'
-            await self.send(bot,config,data,target,content,guard=lambda:current() and (task is None or self.tasks.valid_origin(task)));return True
+            guard=lambda:current() and (task is None or self.tasks.valid_origin(task))
+            content=await self.voice(bot,'status' if task else 'no_task',task or {},guard)
+            if content:await self.send(bot,config,data,target,content,guard=guard)
+            return True
         if request=='stop':
             active=next((t for t in jobs if t['state'] in ('queued','running')),None)
             if active:
                 result=await self.tasks.cancel(runtime.id,active['id'])
-                content=result['result']
-            else:content='当前没有你正在执行的手机任务。'
-            await self.send(bot,config,data,target,content,guard=current);return True
+                content=await self.voice(bot,'stopped',result,current)
+            else:content=await self.voice(bot,'no_task',{},current)
+            if content:await self.send(bot,config,data,target,content,guard=current)
+            return True
         try:
             devices=(await self.tasks.gateway.request('GET',f'/bots/{quote(runtime.id,safe="")}/devices'))['devices']
             if not current():return True
@@ -148,12 +154,31 @@ start只用于明确委托手机操作；能不能帮我打开设置属于委托
             origin={'source':'qq','account_id':config.account_id,'requester_id':str(user),'scope_id':sid,'source_id':source_id,
                 'message_id':data['id'],'timestamp':data.get('timestamp'),'target':str(target)}
             task=self.tasks.submit(runtime.id,d['id'],intent['goal'],origin=origin)
-            confirmed=await self.send(bot,config,data,target,'手机任务已开始：'+intent['goal'][:1000]+'\n完成后我会通知你，也可以发 /手机进度 或 /停止手机。',guard=current,event='started')
-            self.tasks.notification(task['id'],'ready' if confirmed else 'skipped',expected='pending_ack')
-            if self.tasks.jobs[task['id']].done():await self.notify(runtime.id,task['id'])
+            await self.acknowledge(bot,config,data,target,runtime.id,task['id'],current)
         except ValueError as exc:
-            await self.send(bot,config,data,target,'暂时无法开始手机任务：'+str(exc),guard=current)
+            content=await self.voice(bot,'rejected',{'goal':intent.get('goal',''),'state':'rejected','result':str(exc)},current)
+            if content:await self.send(bot,config,data,target,content,guard=current)
         return True
+
+    async def acknowledge(self,bot,config,data,target,bot_id,task_id,current):
+        active=lambda:current() and self.tasks.get(bot_id,task_id)['state'] in ('queued','running')
+        task=self.tasks.get(bot_id,task_id)
+        content=await self.voice(bot,'started',task,active)
+        if not current():
+            self.tasks.notification(task_id,'skipped',expected='pending_ack');return
+        task=self.tasks.get(bot_id,task_id)
+        if task['state']=='cancelled':
+            self.tasks.notification(task_id,'skipped',expected='pending_ack');return
+        confirmed=False
+        if content and active():
+            try:confirmed=await self.send(bot,config,data,target,content,guard=active,event='started')
+            except asyncio.CancelledError:raise
+            except Exception:pass  # Never replay an unconfirmed acknowledgement.
+        if not current() or self.tasks.get(bot_id,task_id)['state']=='cancelled':
+            self.tasks.notification(task_id,'skipped',expected='pending_ack');return
+        self.tasks.notification(task_id,'ready' if confirmed else 'ready_unannounced',expected='pending_ack')
+        if self.tasks.get(bot_id,task_id)['state'] not in ('queued','running'):
+            await self.notify(bot_id,task_id)
 
     async def screenshot(self,bot,config,data,target,bot_id,guard):
         devices=(await self.tasks.gateway.request('GET',f'/bots/{quote(bot_id,safe="")}/devices'))['devices']
@@ -196,18 +221,22 @@ start只用于明确委托手机操作；能不能帮我打开设置属于委托
 
     async def notify(self,bot_id,task_id):
         task=self.tasks.get(bot_id,task_id)
-        if task['state'] in ('queued','running','cancelled') or task['notification']!='ready':return
+        if task['state'] in ('queued','running','cancelled') or task['notification'] not in ('ready','ready_unannounced'):return
         origin=task['origin']
         if not self.tasks.valid_origin(task):
-            self.tasks.notification(task_id,'skipped',expected='ready');return
+            self.tasks.notification(task_id,'skipped',expected=task['notification']);return
         runtime=self.tasks.manager.get(bot_id);bot=runtime.bot;config=bot.store.load()
         data={'id':origin['message_id'],'timestamp':origin.get('timestamp')}
         if bot.state not in ('connected','connecting') or config.transport!='napcat' and bot.schedule_reply_expired(data,command='手机'):
-            self.tasks.notification(task_id,'skipped',expected='ready');return
-        if not self.tasks.notification(task_id,'sending',expected='ready'):return
+            self.tasks.notification(task_id,'skipped',expected=task['notification']);return
+        unannounced=task['notification']=='ready_unannounced'
+        if not self.tasks.notification(task_id,'sending',expected=task['notification']):return
         guard=lambda:self.tasks.valid_origin(self.tasks.get(bot_id,task_id)) and self.runtime(bot) is runtime and bot.state=='connected'
         try:
-            ok=await self.send(bot,config,data,origin['target'],f'手机任务{STATES.get(task["state"],task["state"])}：{task["goal"][:400]}\n{self.result_text(task)}',sequence=2,guard=guard,event='result')
+            content=await self.voice(bot,'completed_unannounced' if unannounced and task['state']=='completed' else task['state'],task,guard)
+            if content is None:
+                self.tasks.notification(task_id,'skipped',expected='sending');return
+            ok=await self.send(bot,config,data,origin['target'],content,sequence=2,guard=guard,event='result')
             self.tasks.notification(task_id,'sent' if ok else 'unknown',expected='sending')
         except Exception:self.tasks.notification(task_id,'unknown',expected='sending')
 

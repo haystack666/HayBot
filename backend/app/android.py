@@ -176,7 +176,15 @@ class AndroidTasks:
         for task_id, job in list(self.jobs.items()):
             if not job.done():
                 row = self.db.execute('SELECT bot_id FROM android_tasks WHERE id=?', (task_id,)).fetchone()
-                if row: await self.cancel(row['bot_id'], task_id)
+                if row:
+                    state=self.get(row['bot_id'],task_id)['state']
+                    if state in ('queued','running'):
+                        await self.cancel(row['bot_id'], task_id)
+                    else:
+                        if self.get(row['bot_id'],task_id)['notification']=='sending':
+                            self.notification(task_id,'unknown',expected='sending')
+                        job.cancel()
+                        await asyncio.gather(job,return_exceptions=True)
         self.closed = True
         self.db.close()
 
