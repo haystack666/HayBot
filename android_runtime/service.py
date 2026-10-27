@@ -12,6 +12,10 @@ from pydantic import BaseModel, Field
 from .engine import AndroidEngine, DeviceCreate, Action, RuntimeFailure
 
 
+class GoogleProfile(BaseModel):
+    enabled: bool
+    confirm: str = Field(pattern=r'^[0-9a-f]{32}$')
+
 class Lease(BaseModel):
     lease: str = Field(default='', max_length=64)
 
@@ -86,6 +90,17 @@ def create_app(engine=None, token=None):
         idle(device_id)
         if destroy_data and confirm != device_id: raise HTTPException(422, '彻底销毁需要确认设备 ID')
         return await app.state.engine.delete(bot_id, device_id, destroy_data)
+
+    @app.post('/bots/{bot_id}/devices/{device_id}/google-play',status_code=202)
+    async def google_play(bot_id: str,device_id: str,body: GoogleProfile):
+        e=app.state.engine;e.get(bot_id,device_id);idle(device_id)
+        if body.confirm!=device_id:raise HTTPException(422,'系统配套切换需要确认设备 ID')
+        e.check_lease(device_id,'');e.require_automation(device_id)
+        async def run():
+            try:await e.google_play(bot_id,device_id,body.enabled)
+            except Exception as exc:e.state(device_id,'error',str(exc)[:500])
+        e.state(device_id,'starting');app.state.operations[device_id]=asyncio.create_task(run())
+        return e.get(bot_id,device_id)
 
     @app.get('/bots/{bot_id}/devices/{device_id}/apps')
     async def apps(bot_id: str, device_id: str):

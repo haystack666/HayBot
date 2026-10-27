@@ -11,6 +11,7 @@ class DeviceBody(StrictModel):
     dpi: int = Field(default=240, ge=120, le=640)
     memory_mb: int = Field(default=2048, ge=1024, le=8192)
     initialize: bool = True
+    google_play: bool = False
 
 class TaskBody(StrictModel):
     goal: str = Field(min_length=1, max_length=3000)
@@ -95,6 +96,11 @@ def register_android_routes(app, scoped_runtime):
     async def manual(device_id:str,body:dict,runtime=Depends(scoped_runtime)):
         if service().busy(runtime.id):raise HTTPException(409,'请先人工接管或停止任务')
         return await service().gateway.request('POST',path(runtime,device_id)+'/action',body)
+
+    @app.post('/api/bots/{bot_id}/android/devices/{device_id}/google-play',status_code=202)
+    async def google_play(device_id:str,body:dict,runtime=Depends(scoped_runtime)):
+        if service().busy(runtime.id):raise HTTPException(409,'请先停止安卓任务')
+        return await service().gateway.request('POST',path(runtime,device_id)+'/google-play',body)
 
     @app.get('/api/bots/{bot_id}/android/devices/{device_id}/apps')
     async def apps(device_id:str,runtime=Depends(scoped_runtime)):

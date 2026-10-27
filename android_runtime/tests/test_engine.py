@@ -14,6 +14,8 @@ class Guest:
 
     async def __call__(self, *args, **kwargs):
         self.calls.append(args)
+        if args[:3] == ('docker','image','inspect'):
+            return json.dumps([{'Id':'sha256:'+'a'*64}]).encode()
         if args[:2] == ('docker', 'ps'):
             return '\n'.join(self.containers).encode()
         if args[:3] == ('docker','volume','ls'):
@@ -213,3 +215,60 @@ async def test_launch_only_accepts_catalog_apps(tmp_path):
     await engine.action('a',d['id'],Action(kind='launch',app='coolapk'))
     assert any('com.coolapk.market/.view.main.MainActivity' in c for c in guest.calls)
     engine.close()
+
+@pytest.mark.asyncio
+async def test_google_profile_rebuild_preserves_volume_and_is_bot_scoped(tmp_path):
+    guest=Guest();e=AndroidEngine(tmp_path,guest)
+    d=await e.create('a',DeviceCreate(name='p'));await e.start('a',d['id'])
+    volume='haybot-android-data-'+d['id']
+    with pytest.raises(RuntimeFailure):await e.google_play('other',d['id'],True)
+    await e.google_play('a',d['id'],True)
+    assert volume in guest.volumes
+    assert not any(c[:3]==('docker','volume','rm') for c in guest.calls)
+    assert e.get('a',d['id'])['config']['google_play'] is True
+    run=[c for c in guest.calls if c[:2]==('docker','run')][-1]
+    assert 'sha256:'+'a'*64 in run
+    e.close()
+
+@pytest.mark.asyncio
+async def test_gms_switch_cannot_stop_after_owner_login_acknowledged(tmp_path):
+    entered=asyncio.Event();resume=asyncio.Event()
+    class Paused(Guest):
+        async def __call__(self,*args,**kwargs):
+            if args[:3]==('docker','image','inspect'):
+                entered.set();await resume.wait()
+            return await super().__call__(*args,**kwargs)
+    guest=Paused();e=AndroidEngine(tmp_path,guest);d=await e.create('a',DeviceCreate(name='p'));await e.start('a',d['id'])
+    job=asyncio.create_task(e.google_play('a',d['id'],True));await entered.wait()
+    await e.login('a',d['id'],True);resume.set()
+    with pytest.raises(RuntimeFailure):await job
+    assert not any(c[:2]==('docker','stop') for c in guest.calls)
+    e.close()
+
+@pytest.mark.asyncio
+async def test_gms_launch_failure_restores_working_original_phone(tmp_path):
+    class Broken(Guest):
+        async def __call__(self,*args,**kwargs):
+            if args[:2]==('docker','run') and any('sha256:' in a for a in args):raise RuntimeFailure('gms startup failed')
+            return await super().__call__(*args,**kwargs)
+    guest=Broken();e=AndroidEngine(tmp_path,guest);d=await e.create('a',DeviceCreate(name='p'));await e.start('a',d['id'])
+    result=await e.google_play('a',d['id'],True)
+    assert not result['config'].get('google_play')
+    assert result['state']=='running' and '恢复' in result['error']
+    assert guest.containers['haybot-android-'+d['id']]['State']['Running']
+    e.close()
+
+@pytest.mark.asyncio
+async def test_new_google_phone_pins_image_for_future_rebuild(tmp_path):
+    class Images(Guest):
+        digest='a'*64
+        async def __call__(self,*args,**kwargs):
+            if args[:3]==('docker','image','inspect'):return json.dumps([{'Id':'sha256:'+self.digest}]).encode()
+            return await super().__call__(*args,**kwargs)
+    guest=Images();e=AndroidEngine(tmp_path,guest);d=await e.create('a',DeviceCreate(name='p',google_play=True))
+    await e.start('a',d['id'])
+    assert e.get('a',d['id'])['config']['google_play_image_id']=='sha256:'+'a'*64
+    guest.digest='b'*64
+    await e.stop('a',d['id']);await e.remove_container('a',d['id']);await e.start('a',d['id'])
+    assert 'sha256:'+'a'*64 in [c for c in guest.calls if c[:2]==('docker','run')][-1]
+    e.close()

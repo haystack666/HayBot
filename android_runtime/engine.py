@@ -28,6 +28,7 @@ class DeviceCreate(BaseModel):
     dpi: int = Field(default=240, ge=120, le=640)
     memory_mb: int = Field(default=2048, ge=1024, le=8192)
     initialize: bool = False
+    google_play: bool = False
 
 
 class Action(BaseModel):
@@ -125,7 +126,8 @@ class AndroidEngine:
         self.db.commit()
         self.command = command or GuestCommand(os.getenv('HAYBOT_ANDROID_BACKEND', 'lima'), ssh_config=os.getenv('HAYBOT_ANDROID_SSH_CONFIG'))
         self.image = image or os.getenv('HAYBOT_ANDROID_IMAGE', 'redroid/redroid:12.0.0_64only-latest')
-        if not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9./:@_-]{1,250}', self.image):
+        self.gms_image = os.getenv('HAYBOT_ANDROID_GMS_IMAGE', 'haybot/redroid12-gapps:local')
+        if any(not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9./:@_-]{1,250}', value) for value in (self.image,self.gms_image)):
             raise RuntimeFailure('Android 镜像名称无效')
         self.locks = {}; self.leases = {}; self.revoked = set()
 
@@ -191,7 +193,11 @@ class AndroidEngine:
             raw = await self.command('docker', 'info', '--format', '{{json .}}', timeout=15)
             data = json.loads(raw)
             await self.command('test', '-d', '/sys/module/binder_linux', timeout=10)
-            return {'ready': True, 'backend': getattr(self.command, 'mode', 'test'), 'architecture': data.get('Architecture', ''), 'kernel': data.get('KernelVersion', ''), 'image': self.image}
+            try:
+                await self.command('docker','image','inspect',self.gms_image,timeout=10)
+                google_play_ready=True
+            except RuntimeFailure:google_play_ready=False
+            return {'google_play_ready':google_play_ready,'ready': True, 'backend': getattr(self.command, 'mode', 'test'), 'architecture': data.get('Architecture', ''), 'kernel': data.get('KernelVersion', ''), 'image': self.image}
         except (RuntimeFailure, ValueError):
             return {'ready': False, 'backend': getattr(self.command, 'mode', 'test'), 'image': self.image, 'detail': '专用运行时未就绪，检查 Docker、Binder 和安装日志'}
 
@@ -203,6 +209,58 @@ class AndroidEngine:
             if app in __import__('android_runtime.provisioning',fromlist=['APPS']).APPS:
                 save(self,device_id,app,'failed',str(exc)[:500])
             raise
+
+    async def gms_image_id(self):
+        try:
+            data=json.loads(await self.command('docker','image','inspect',self.gms_image,timeout=10))
+            image_id=data[0]['Id']
+            if not re.fullmatch(r'sha256:[0-9a-f]{64}',image_id):raise ValueError()
+            return image_id
+        except (RuntimeFailure,ValueError,KeyError,IndexError):
+            raise RuntimeFailure('宿主尚未构建兼容 Google Play 的镜像，请先运行 GApps 构建程序') from None
+
+    async def wait_running(self,bot_id,device_id):
+        for _ in range(60):
+            if self.login_active(device_id):return self.get(bot_id,device_id)
+            current=await self.status(bot_id,device_id)
+            if current['state']=='running':return current
+            await asyncio.sleep(2)
+        raise RuntimeFailure('新系统未能正常开机')
+
+    async def google_play(self,bot_id,device_id,enabled):
+        before=self.get(bot_id,device_id);self.check_lease(device_id,'');self.require_automation(device_id)
+        old_config=json.dumps(before['config'])
+        old_info=await self.inspect(device_id)
+        old_image=(old_info or {}).get('Image') or (self.gms_image if before['config'].get('google_play') else self.image)
+        target_id=await self.gms_image_id() if enabled else None
+        # Owner mode may have been acknowledged during image/ADB lookups.
+        self.require_automation(device_id)
+        await self.stop(bot_id,device_id,automated=True)
+        try:
+            async with self.lock(device_id):
+                d=self.get(bot_id,device_id);self.require_automation(device_id)
+                d['config']['google_play']=enabled
+                if enabled:d['config']['google_play_image_id']=target_id
+                else:d['config'].pop('google_play_image_id',None)
+                with self.db:self.db.execute('UPDATE devices SET config=? WHERE id=?',(json.dumps(d['config']),device_id))
+            await self.remove_container(bot_id,device_id,automated=True)
+            await self._start(bot_id,device_id,automated=True)
+            return await self.wait_running(bot_id,device_id)
+        except Exception as exc:
+            if self.login_active(device_id):
+                # No additional stop/rebuild is allowed after owner takeover.
+                raise RuntimeFailure('owner 已接管，停止系统切换；可在退出登录模式后恢复标准系统') from None
+            try:
+                await self.stop(bot_id,device_id,automated=True)
+                await self.remove_container(bot_id,device_id,automated=True)
+                with self.db:self.db.execute('UPDATE devices SET config=? WHERE id=?',(old_config,device_id))
+                await self._start(bot_id,device_id,automated=True,image_override=old_image)
+                restored=await self.wait_running(bot_id,device_id)
+                self.state(device_id,restored['state'],'系统切换失败，已恢复原系统；手机数据保留')
+                return self.get(bot_id,device_id)
+            except Exception:
+                with self.db:self.db.execute('UPDATE devices SET config=? WHERE id=?',(old_config,device_id))
+                raise RuntimeFailure('系统切换失败，自动恢复未完成；手机数据保留，请通过后台恢复标准系统') from None
 
     async def start(self, bot_id, device_id):
         device=await self._start(bot_id,device_id)
@@ -218,13 +276,22 @@ class AndroidEngine:
                 except Exception:pass  # each app retains its own progress/error; no data reset
         return self.get(bot_id,device_id)
 
-    async def _start(self, bot_id, device_id):
+    async def _start(self, bot_id, device_id, automated=False, image_override=None):
         async with self.lock(device_id):
             d = self.get(bot_id, device_id)
             self.check_lease(device_id, '')
+            if automated:self.require_automation(device_id)
             self.state(device_id, 'starting')
             try:
                 info = await self.inspect(device_id)
+                selected_image=image_override or self.image
+                if not image_override and d['config'].get('google_play'):
+                    selected_image=d['config'].get('google_play_image_id') or await self.gms_image_id()
+                    if not re.fullmatch(r'sha256:[0-9a-f]{64}',selected_image):raise RuntimeFailure('Google 配套镜像标识无效')
+                    if not d['config'].get('google_play_image_id'):
+                        d['config']['google_play_image_id']=selected_image
+                        with self.db:self.db.execute('UPDATE devices SET config=? WHERE id=?',(json.dumps(d['config']),device_id))
+                if automated:self.require_automation(device_id)
                 if info:
                     if not info['State']['Running']:
                         await self.command('docker', 'start', 'haybot-android-' + device_id)
@@ -233,11 +300,12 @@ class AndroidEngine:
                     # Named volume, no host paths; ADB is loopback-only inside the dedicated guest.
                     if not await self.volume(device_id):
                         await self.command('docker', 'volume', 'create', '--label', 'io.haybot.android=' + device_id, volume)
+                    if automated:self.require_automation(device_id)
                     await self.command('docker', 'run', '-d', '--name', 'haybot-android-' + device_id,
                         '--label', 'io.haybot.android=' + device_id, '--privileged', '--restart', 'unless-stopped',
                         '--memory', str(cfg['memory_mb']) + 'm', '--cpus', '2',
                         '--mount', 'type=volume,source=' + volume + ',target=/data',
-                        '-p', '127.0.0.1::5555', self.image,
+                        '-p', '127.0.0.1::5555', selected_image,
                         'androidboot.redroid_width=' + str(cfg['width']), 'androidboot.redroid_height=' + str(cfg['height']),
                         'androidboot.redroid_dpi=' + str(cfg['dpi']), 'androidboot.redroid_gpu_mode=guest',
                         'androidboot.use_memfd=true', timeout=600)
@@ -332,22 +400,25 @@ class AndroidEngine:
             self.revoked.add(lease)
         return {'ok': True}
 
-    async def stop(self, bot_id, device_id):
+    async def stop(self, bot_id, device_id, automated=False):
+        if automated:self.require_automation(device_id)
         await self.takeover(bot_id, device_id)
         async with self.lock(device_id):
             self.get(bot_id, device_id); self.leases.pop(device_id, None)
             if await self.inspect(device_id):
+                if automated:self.require_automation(device_id)
                 await self.command('docker', 'stop', '--time', '15', 'haybot-android-' + device_id)
             self.state(device_id, 'stopped')
             return self.get(bot_id, device_id)
 
-    async def remove_container(self, bot_id, device_id):
+    async def remove_container(self, bot_id, device_id, automated=False):
         async with self.lock(device_id):
             self.get(bot_id, device_id); self.check_lease(device_id, '')
             info = await self.inspect(device_id)
             if info and info['State']['Running']:
                 raise RuntimeFailure('请先停止设备')
             if info:
+                if automated:self.require_automation(device_id)
                 await self.command('docker', 'rm', 'haybot-android-' + device_id)
             self.state(device_id, 'stopped')
             return self.get(bot_id, device_id)
