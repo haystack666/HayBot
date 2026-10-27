@@ -10,6 +10,7 @@ class DeviceBody(StrictModel):
     height: int = Field(default=1280, ge=480, le=2560)
     dpi: int = Field(default=240, ge=120, le=640)
     memory_mb: int = Field(default=2048, ge=1024, le=8192)
+    initialize: bool = True
 
 class TaskBody(StrictModel):
     goal: str = Field(min_length=1, max_length=3000)
@@ -39,7 +40,9 @@ def register_android_routes(app, scoped_runtime):
                 health=await s.gateway.request('GET','/health')
                 devices=(await s.gateway.request('GET',path(runtime)))['devices']
             except ValueError as exc: health={'ready':False,'detail':str(exc)}
-        return {'configured':s.gateway.configured,'runtime':health,'devices':devices,'config':s.config(runtime.id).model_dump(),'tasks':s.list(runtime.id)}
+        for d in devices:
+            if s.login_paused(runtime.id,d['id']):d['owner_login']=True
+        return {'configured':s.gateway.configured,'runtime':health,'devices':devices,'config':s.config(runtime.id).model_dump(),'tasks':s.list(runtime.id),'publications':s.social.list(runtime.id)}
 
     @app.put('/api/bots/{bot_id}/android/config')
     async def config(body:AndroidConfig,runtime=Depends(scoped_runtime)):
@@ -51,7 +54,9 @@ def register_android_routes(app, scoped_runtime):
 
     @app.get('/api/bots/{bot_id}/android/devices/{device_id}')
     async def device(device_id:str,runtime=Depends(scoped_runtime)):
-        return await service().gateway.request('GET',path(runtime,device_id))
+        result=await service().gateway.request('GET',path(runtime,device_id))
+        if service().login_paused(runtime.id,device_id):result['owner_login']=True
+        return result
 
     @app.post('/api/bots/{bot_id}/android/devices/{device_id}/control/{operation}')
     async def operate(device_id:str,operation:str,runtime=Depends(scoped_runtime)):
@@ -62,6 +67,18 @@ def register_android_routes(app, scoped_runtime):
         result = await service().gateway.request('POST',path(runtime,device_id)+'/'+operation)
         if operation in ('stop','takeover'):
             service().acknowledge_takeover(runtime.id)
+        return result
+
+    @app.post('/api/bots/{bot_id}/android/devices/{device_id}/login/{operation}')
+    async def login(device_id:str, operation:str, runtime=Depends(scoped_runtime)):
+        if operation not in ('begin','finish'): raise HTTPException(404,'操作不存在')
+        # Durable backend fence also invalidates already-captured QQ images.
+        if operation=='begin':service().set_login(runtime.id,device_id,True)
+        result = await service().gateway.request('POST',path(runtime,device_id)+'/login/'+operation)
+        if operation=='finish':service().set_login(runtime.id,device_id,False)
+        if operation == 'begin':
+            for task in service().list(runtime.id):
+                if task['state'] in ('queued','running'): await service().cancel(runtime.id,task['id'])
         return result
 
     @app.delete('/api/bots/{bot_id}/android/devices/{device_id}')
@@ -78,6 +95,16 @@ def register_android_routes(app, scoped_runtime):
     async def manual(device_id:str,body:dict,runtime=Depends(scoped_runtime)):
         if service().busy(runtime.id):raise HTTPException(409,'请先人工接管或停止任务')
         return await service().gateway.request('POST',path(runtime,device_id)+'/action',body)
+
+    @app.get('/api/bots/{bot_id}/android/devices/{device_id}/apps')
+    async def apps(device_id:str,runtime=Depends(scoped_runtime)):
+        return await service().gateway.request('GET',path(runtime,device_id)+'/apps')
+
+    @app.post('/api/bots/{bot_id}/android/devices/{device_id}/apps/{app_id}/install',status_code=202)
+    async def install(device_id:str,app_id:str,runtime=Depends(scoped_runtime)):
+        from urllib.parse import quote
+        if service().busy(runtime.id):raise HTTPException(409,'请先停止安卓任务')
+        return await service().gateway.request('POST',path(runtime,device_id)+'/apps/'+quote(app_id,safe='')+'/install')
 
     @app.post('/api/bots/{bot_id}/android/tasks',status_code=202)
     async def task(body:TaskBody,runtime=Depends(scoped_runtime)):

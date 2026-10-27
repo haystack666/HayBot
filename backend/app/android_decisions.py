@@ -12,7 +12,7 @@ class DecisionFormatError(ValueError):
 Pixel = Annotated[int, Field(ge=0,le=2560,strict=True)]
 
 class DeviceAction(StrictModel):
-    kind: Literal['tap','swipe','text','key','open','wait']
+    kind: Literal['tap','swipe','text','key','open','wait','launch']
     x: int | None = Field(default=None,ge=0,le=2560,strict=True)
     y: int | None = Field(default=None,ge=0,le=2560,strict=True)
     x2: int | None = Field(default=None,ge=0,le=2560,strict=True)
@@ -23,6 +23,7 @@ class DeviceAction(StrictModel):
     text: str = Field(default='',max_length=2000)
     key: Literal['home','back','recent','enter','delete','wake'] | None = None
     url: str = Field(default='',max_length=2048)
+    app: Literal['coolapk','playstore','douyin','bilibili','xiaohongshu','chrome'] | None = None
 
     @model_validator(mode='after')
     def complete(self):
@@ -33,7 +34,7 @@ class DeviceAction(StrictModel):
                 raise ValueError('不能混用start/end与x/y/x2/y2坐标')
             self.x,self.y=self.start
             self.x2,self.y2=self.end
-        required={'tap':['x','y'],'swipe':['x','y','x2','y2'],'key':['key']}.get(self.kind,[])
+        required={'tap':['x','y'],'swipe':['x','y','x2','y2'],'key':['key'],'launch':['app']}.get(self.kind,[])
         missing=[name for name in required if getattr(self,name) is None]
         if missing:raise ValueError(f'{self.kind} 缺少参数：'+','.join(missing))
         if self.kind=='text' and (not self.text or '\0' in self.text):raise ValueError('text 缺少有效文字')
@@ -42,15 +43,30 @@ class DeviceAction(StrictModel):
             if u.scheme not in ('http','https') or not u.hostname or u.username or u.password or any(ord(c)<32 for c in self.url):raise ValueError('open 只允许HTTP/HTTPS网页')
         return self
 
+class Watch(StrictModel):
+    frames: int = Field(default=6,ge=3,le=8,strict=True)
+    interval_seconds: int = Field(default=3,ge=1,le=10,strict=True)
+
+class Social(StrictModel):
+    kind: Literal['draft','mention','publish','verify']
+    platform: Literal['douyin','bilibili','xiaohongshu']
+    content_id: str = Field(default='',max_length=500)
+    draft_id: str = Field(default='',pattern=r'^(?:[0-9a-f]{32})?$')
+    mention: bool = False
+    x: int = Field(default=0,ge=0,le=2560,strict=True)
+    y: int = Field(default=0,ge=0,le=2560,strict=True)
+
 class Decision(StrictModel):
     reason: str = Field(default='',max_length=2000)
     done: bool = Field(default=False,strict=True)
     blocked: bool = Field(default=False,strict=True)
     result: str = Field(default='',max_length=2000)
     action: DeviceAction | None = None
+    watch: Watch | None = None
+    social: Social | None = None
     @model_validator(mode='after')
     def one(self):
-        if sum([self.done,self.blocked,self.action is not None])!=1:raise ValueError('必须且只能返回一个action或done/blocked结果')
+        if sum([self.done,self.blocked,self.action is not None,self.watch is not None,self.social is not None])!=1:raise ValueError('必须且只能返回一个action或done/blocked结果')
         if (self.done or self.blocked) and not self.result.strip():raise ValueError('缺少结果说明')
         return self
 

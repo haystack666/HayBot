@@ -169,3 +169,47 @@ async def test_revocation_during_adb_preflight_prevents_input(tmp_path):
     with pytest.raises(RuntimeFailure):await job
     assert not any('keyevent' in call for call in guest.calls)
     engine.close()
+
+@pytest.mark.asyncio
+async def test_owner_login_is_durable_blocks_bot_but_allows_owner_control(tmp_path):
+    guest = Guest(); engine = AndroidEngine(tmp_path, guest)
+    d = await engine.create('owner', DeviceCreate(name='phone'))
+    await engine.start('owner', d['id'])
+    lease = await engine.claim('owner', d['id'])
+    await engine.login('owner', d['id'], True)
+    assert engine.get('owner', d['id'])['owner_login'] is True
+    for op in (engine.claim('owner', d['id']), engine.observe('owner', d['id'], lease),
+               engine.action('owner', d['id'], Action(kind='key'), lease)):
+        with pytest.raises(RuntimeFailure): await op
+    await engine.action('owner', d['id'], Action(kind='key'))
+    engine.close()
+    engine = AndroidEngine(tmp_path, guest)
+    with pytest.raises(RuntimeFailure): await engine.claim('owner', d['id'])
+    with pytest.raises(RuntimeFailure): await engine.login('other', d['id'], False)
+    await engine.login('owner', d['id'], False)
+    assert engine.get('owner', d['id'])['owner_login'] is False
+    assert await engine.claim('owner', d['id'])
+    engine.close()
+
+@pytest.mark.asyncio
+async def test_bot_observe_without_task_is_also_blocked_during_login(tmp_path):
+    guest=Guest(); engine=AndroidEngine(tmp_path,guest)
+    d=await engine.create('a',DeviceCreate(name='phone'));await engine.start('a',d['id'])
+    await engine.login('a',d['id'],True)
+    with pytest.raises(RuntimeFailure):await engine.observe('a',d['id'],automated=True)
+    assert not any('screencap' in c for c in guest.calls)
+    engine.close()
+
+@pytest.mark.asyncio
+async def test_launch_only_accepts_catalog_apps(tmp_path):
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):Action(kind='launch',app='shell;id')
+    class Launcher(Guest):
+        async def __call__(self,*args,**kwargs):
+            if 'resolve-activity' in args:return b'com.coolapk.market/.view.main.MainActivity\n'
+            if 'pm' in args and 'list' in args:return b'package:com.coolapk.market\n'
+            return await super().__call__(*args,**kwargs)
+    guest=Launcher();engine=AndroidEngine(tmp_path,guest);d=await engine.create('a',DeviceCreate(name='p'));await engine.start('a',d['id'])
+    await engine.action('a',d['id'],Action(kind='launch',app='coolapk'))
+    assert any('com.coolapk.market/.view.main.MainActivity' in c for c in guest.calls)
+    engine.close()

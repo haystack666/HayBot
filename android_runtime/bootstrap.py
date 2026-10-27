@@ -15,7 +15,7 @@ VM_NAME = 'haybot-android'
 PORT = 17321
 GUEST_INSTALL = '''export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y docker.io adb python3-venv linux-modules-extra-$(uname -r)
+apt-get install -y docker.io adb aapt apksigner curl python3-venv linux-modules-extra-$(uname -r)
 python3 -m venv /opt/haybot-u2
 /opt/haybot-u2/bin/pip install 'uiautomator2==3.7.1'
 mkdir -p /etc/modules-load.d /etc/modprobe.d

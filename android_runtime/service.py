@@ -87,6 +87,25 @@ def create_app(engine=None, token=None):
         if destroy_data and confirm != device_id: raise HTTPException(422, '彻底销毁需要确认设备 ID')
         return await app.state.engine.delete(bot_id, device_id, destroy_data)
 
+    @app.get('/bots/{bot_id}/devices/{device_id}/apps')
+    async def apps(bot_id: str, device_id: str):
+        from .provisioning import status
+        job=app.state.operations.get(device_id)
+        return await status(app.state.engine,bot_id,device_id,refresh=not job or job.done())
+
+    @app.post('/bots/{bot_id}/devices/{device_id}/apps/{app_id}/install', status_code=202)
+    async def install(bot_id: str, device_id: str, app_id: str):
+        from .provisioning import APPS, save
+        e=app.state.engine;e.get(bot_id,device_id);idle(device_id)
+        if app_id not in APPS: raise HTTPException(404,'应用不存在')
+        e.check_lease(device_id,'');e.require_automation(device_id)
+        save(e,device_id,app_id,'queued','等待初始化')
+        async def run():
+            try: await e.provision(bot_id,device_id,app_id)
+            except Exception: pass  # provision persists a bounded diagnostic
+        app.state.operations[device_id]=asyncio.create_task(run())
+        return {'accepted':True}
+
     @app.post('/bots/{bot_id}/devices/{device_id}/claim')
     async def claim(bot_id: str, device_id: str, body: Lease):
         idle(device_id)
@@ -106,10 +125,15 @@ def create_app(engine=None, token=None):
         idle(device_id)
         return await app.state.engine.takeover(bot_id, device_id)
 
+    @app.post('/bots/{bot_id}/devices/{device_id}/login/{operation}')
+    async def login(bot_id: str, device_id: str, operation: str):
+        if operation not in ('begin', 'finish'): raise HTTPException(404, '操作不存在')
+        return await app.state.engine.login(bot_id, device_id, operation == 'begin')
+
     @app.get('/bots/{bot_id}/devices/{device_id}/observe')
-    async def observe(bot_id: str, device_id: str, lease: str = Query(default='', max_length=64)):
+    async def observe(bot_id: str, device_id: str, lease: str = Query(default='', max_length=64), automated: bool = False):
         idle(device_id)
-        return await app.state.engine.observe(bot_id, device_id, lease)
+        return await app.state.engine.observe(bot_id, device_id, lease, automated=automated)
 
     @app.post('/bots/{bot_id}/devices/{device_id}/action')
     async def action(bot_id: str, device_id: str, body: Action, lease: str = Query(default='', max_length=64)):

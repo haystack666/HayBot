@@ -24,7 +24,7 @@ async def setup_bridge(tmp_path):
     async def gateway(method,path,body=None,**kwargs):
         if path.endswith('/devices'):return {'devices':[{'id':'0'*32,'state':'running'}]}
         if path.endswith('/claim'):return {'lease':body['lease']}
-        if path.endswith('/observe'):return {'image':png(),'hierarchy':''}
+        if path.split('?')[0].endswith('/observe'):return {'image':png(),'hierarchy':''}
         return {'ok':True}
     tasks.gateway.request=gateway
     tasks.decide=AsyncMock(return_value={'done':True,'result':'Android12，已返回桌面'})
@@ -150,7 +150,7 @@ async def test_reset_during_screenshot_capture_prevents_image_send(tmp_path):
     original=tasks.gateway.request
     async def gateway(method,path,body=None,**kw):
         value=await original(method,path,body,**kw)
-        if path.endswith('/observe'):
+        if path.split('?')[0].endswith('/observe'):
             with bot.store.db:bot.store.db.execute('UPDATE user_scopes SET source_floor=999999')
         return value
     tasks.gateway.request=gateway
@@ -232,4 +232,18 @@ async def test_reset_or_bot_stop_revokes_inflight_qq_phone_task(tmp_path,operati
     assert tasks.get('default',job['id'])['state']=='cancelled'
     assert any(path.endswith('/revoke') for path in calls)
     assert not any(path.endswith('/action') for path in calls)
+    await tasks.close();await manager.close()
+
+@pytest.mark.asyncio
+async def test_login_during_official_upload_blocks_final_screenshot_send(tmp_path):
+    manager,tasks,bridge,bot=await setup_bridge(tmp_path)
+    c=bot.store.load();c.transport='qq_official';c.qq.app_id='123456';bot.store.save(c)
+    async def upload(method,path,**kwargs):
+        if path.endswith('/files'):
+            tasks.set_login('default','0'*32,True)
+            return {'file_info':'media-token'}
+        return {'id':'receipt'}
+    bot.api=AsyncMock(side_effect=upload)
+    await bot.handle(payload('/手机截图'))
+    assert not any(call.args[1].endswith('/messages') for call in bot.api.await_args_list)
     await tasks.close();await manager.close()

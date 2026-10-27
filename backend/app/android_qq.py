@@ -185,7 +185,12 @@ start只用于明确委托手机操作；能不能帮我打开设置属于委托
         if not guard():return False
         if not devices:raise ValueError('当前 Bot 还没有手机')
         device=devices[0]
-        observation=await self.tasks.gateway.request('GET',f'/bots/{quote(bot_id,safe="")}/devices/{device["id"]}/observe')
+        epoch=self.tasks.login_epoch(bot_id,device['id'])
+        original_guard=guard
+        guard=lambda:original_guard() and self.tasks.login_valid(bot_id,device['id'],epoch)
+        if not guard():return False
+        if device.get('owner_login'):raise ValueError('owner 正在登录，暂不发送手机画面')
+        observation=await self.tasks.gateway.request('GET',f'/bots/{quote(bot_id,safe="")}/devices/{device["id"]}/observe?automated=true')
         if not guard():return False
         encoded=observation.get('image','')
         if not isinstance(encoded,str) or len(encoded)>12*1024*1024:raise ValueError('设备截图大小异常')
