@@ -92,3 +92,7 @@ def register_android_routes(app, scoped_runtime):
     @app.post('/api/bots/{bot_id}/android/tasks/{task_id}/cancel')
     async def cancel(task_id:str,runtime=Depends(scoped_runtime)):
         return await service().cancel(runtime.id,task_id)
+
+    @app.get('/api/bots/{bot_id}/android/tasks/{task_id}/diagnostics')
+    async def diagnostics(task_id:str,runtime=Depends(scoped_runtime)):
+        return {'attempts':service().diagnostics(runtime.id,task_id)}

@@ -215,3 +215,15 @@ async def test_probe_verifies_login_without_starting_or_consuming_events(client)
         status=await asyncio.to_thread(client.get,'/api/bots/default/status')
         assert status.json()['state']=='stopped'
         assert [r['action'] for r in calls]==['get_login_info','get_status']
+
+@pytest.mark.asyncio
+async def test_plain_picture_is_not_sent_as_meme(tmp_path):
+    from app.napcat import NapCatTransport
+    async with napcat_server() as (url,calls,connections):
+        s=Store(tmp_path);configure(s,url);b=Bot(s);t=b.napcat
+        await t.start()
+        await t.send_picture(False,'10002',b'test-picture-bytes')
+        message=next(c for c in calls if c['action']=='send_private_msg')['params']['message'][0]
+        assert message['type']=='image' and message['data']['file'].startswith('base64://')
+        assert message['data'].get('sub_type',0)==0
+        await t.close();await b.stop();await b.client.aclose();s.close()

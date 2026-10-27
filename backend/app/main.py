@@ -31,6 +31,10 @@ def create_app(data_dir=None, static_dir=None):
         from .android import AndroidTasks
         app.state.android = AndroidTasks(app.state.manager, app.state.manager.registry.root)
         app.state.manager.android_service = app.state.android
+        from .android_qq import AndroidQQ
+        app.state.manager.android_qq = AndroidQQ(app.state.android)
+        for runtime in app.state.manager.runtimes.values():
+            runtime.bot.android = app.state.manager.android_qq
         app.state.qq_connect = QQConnect(app.state.manager)
         app.state.session = secrets.token_urlsafe(48)
         app.state.auth_version = time.time()

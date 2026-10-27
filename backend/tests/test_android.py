@@ -139,3 +139,23 @@ async def test_cancel_before_worker_starts_does_not_claim_phone(tmp_path):
     assert not any(path.endswith('/claim') for path in calls)
     assert tasks.get('default',task['id'])['state']=='cancelled'
     await tasks.close();await manager.close()
+
+@pytest.mark.asyncio
+async def test_invalid_model_decision_retries_before_action_and_keeps_diagnostics(tmp_path,monkeypatch):
+    import app.android as module
+    from app.registry import BotManager
+    manager=BotManager(tmp_path);tasks=AndroidTasks(manager,tmp_path)
+    runtime=manager.get('default');cfg=tasks.config('default')
+    cfg.enabled=True;cfg.model='vision';tasks.save_config('default',cfg)
+    responses=iter(['', '{"action":{"kind":"key","key":"home"}}'])
+    async def generate(*args,**kwargs):return {'message':{'content':next(responses)},'eval_count':2}
+    monkeypatch.setattr(module,'generate',generate)
+    job=tasks.submit('default','0'*32,'test');tasks.jobs[job['id']].cancel();await asyncio.gather(tasks.jobs[job['id']],return_exceptions=True)
+    tasks.update(job['id'],state='running')
+    result=await tasks.decide('default',cfg,'test',{'image':png(),'hierarchy':''},[],job['id'])
+    assert result['action']['key']=='home'
+    attempts=tasks.diagnostics('default',job['id'])
+    assert len(attempts)==2 and attempts[0]['error'] and attempts[1]['content'].startswith('{')
+    assert runtime.store.stats()['output_tokens']==4
+    assert 'image' not in attempts[0] and 'api_key' not in attempts[0]
+    await tasks.close();await manager.close()

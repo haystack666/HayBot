@@ -8,7 +8,7 @@ from urllib.parse import quote
 WARNING = (
     '重置前请确认影响：\n'
     '1. 清空你与当前机器人的全部对话上下文、长期记忆（偏好、关系、共同经历和约定）、摘要及向量索引。\n'
-    '2. 取消正在生成的旧回复，清理旧记忆任务，防止旧聊天再次恢复这些记忆。记忆产生的未来日程约定会同步移除。\n'
+    '2. 停止本次对话发起的手机任务（已执行的动作不会撤销），取消正在生成的旧回复，清理旧记忆任务，防止旧聊天再次恢复这些记忆。记忆产生的未来日程约定会同步移除。\n'
     '3. 后台聊天档案、机器人人格、配置和已有普通日程保留；其他用户和机器人不受影响。\n'
     '此操作不可通过机器人撤销。\n'
     '请在 2 分钟内发送 /reset 确认（或 /reset confirm）执行；发送 /reset 取消 可取消。仅发送 /reset 不会清空。'
@@ -80,6 +80,8 @@ class ResetCommands:
         # Consume before any await: concurrent confirmations cannot erase newer conversations twice.
         self.confirmations.pop(sid, None)
         count = self.bot.memory.data.reset_scope(sid)
+        if self.bot.android:
+            await self.bot.android.cancel_scope(self.bot,sid)
         self.bot.inbox.clear_scope(sid)
         self.bot.last.pop(key, None)
         previous = self.bot.tasks_by_key.get(key)

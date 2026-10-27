@@ -204,3 +204,7 @@ class NapCatTransport:
         if not data or len(data)>10*1024*1024:raise NapCatError('表情包大小超出限制')
         return await self.send(group,target,[{'type':'image','data':{'file':'base64://'+base64.b64encode(data).decode(),
             'sub_type':1,'summary':'[表情包]'}}],before_send)
+
+    async def send_picture(self,group,target,data,before_send=None):
+        if not data or len(data)>10*1024*1024:raise NapCatError('图片大小超出限制')
+        return await self.send(group,target,[{'type':'image','data':{'file':'base64://'+base64.b64encode(data).decode(),'summary':'[手机截图]'}}],before_send)

@@ -164,6 +164,7 @@ class BotManager:
     def attach(self, bot_id):
         runtime = BotRuntime(self.registry.directory(bot_id), self.inference_lock, self.providers, self.memes)
         runtime.id = bot_id
+        runtime.bot.android = getattr(self, 'android_qq', None)
         self.runtimes[bot_id] = runtime
         runtime.store.log('info', '机器人管理服务已就绪')
         runtime.start_background()

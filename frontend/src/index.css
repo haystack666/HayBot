@@ -313,3 +313,5 @@ svg { flex-shrink: 0; } fieldset { min-width: 0; }
 .android-task ol{display:grid;gap:12px;margin:14px 0 0;padding:0;list-style:none}
 .android-task code{display:block;white-space:pre-wrap;font-size:11px;overflow-wrap:anywhere;opacity:.7}
 @media(max-width:900px){.android-layout{grid-template-columns:1fr}.android-screen{max-width:320px}}
+
+.android-diagnostic-actions{margin-top:12px}.android-diagnostics{display:grid;gap:8px}.android-diagnostics pre{font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:320px;overflow:auto;border:1px solid var(--border);border-radius:6px;padding:12px}

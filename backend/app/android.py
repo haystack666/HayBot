@@ -4,6 +4,7 @@ import base64
 import io
 import json
 import os
+import re
 import sqlite3
 import time
 import uuid
@@ -15,6 +16,7 @@ from PIL import Image
 from pydantic import BaseModel, Field
 from .config import StrictModel, OllamaConfig
 from .providers import generate, read_response
+from .android_decisions import parse_decision, public_body, DecisionFormatError
 
 
 class AndroidUnavailable(ValueError):
@@ -25,6 +27,9 @@ class AndroidConfig(StrictModel):
     enabled: bool = False
     provider_id: str = Field(default='', max_length=80)
     model: str = Field(default='', max_length=200)
+    qq_enabled: bool = False
+    qq_owner_id: str = Field(default='', max_length=128, pattern=r'^(?:[A-Za-z0-9_-]{1,128})?$')
+    natural_requests: bool = True
     max_steps: int = Field(default=15, ge=1, le=60)
     timeout_minutes: int = Field(default=5, ge=1, le=20)
 
@@ -69,7 +74,17 @@ class AndroidTasks:
         ''')
         with self.db:
             self.db.execute("UPDATE android_tasks SET state='unknown', result='服务重启，上一操作结果可能未知；请人工观察设备后再创建任务' WHERE state IN ('queued','running')")
+        columns={r['name'] for r in self.db.execute('PRAGMA table_info(android_tasks)')}
+        for name,default in [('origin',"'{}'"),('notification',"''")]:
+            if name not in columns:
+                with self.db:self.db.execute(f'ALTER TABLE android_tasks ADD COLUMN {name} TEXT NOT NULL DEFAULT {default}')
+        self.db.execute('''CREATE TABLE IF NOT EXISTS android_model_attempts(
+          id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, step INTEGER NOT NULL,
+          attempt INTEGER NOT NULL, content TEXT NOT NULL, error TEXT NOT NULL, metadata TEXT NOT NULL, created REAL NOT NULL)''')
+        self.db.commit()
         self.jobs = {}
+        self.completion_callback = None
+        self.closed = False
 
     def config(self, bot_id):
         row = self.db.execute('SELECT config FROM android_config WHERE bot_id=?', (bot_id,)).fetchone()
@@ -94,7 +109,8 @@ class AndroidTasks:
     def get(self, bot_id, task_id):
         row = self.db.execute('SELECT * FROM android_tasks WHERE bot_id=? AND id=?', (bot_id, task_id)).fetchone()
         if not row: raise ValueError('安卓任务不存在')
-        result = dict(row); result['steps'] = json.loads(result['steps'])
+        result = dict(row); result['steps'] = json.loads(result['steps']); result['origin'] = json.loads(result['origin'])
+        result['diagnostic_count'] = self.db.execute('SELECT COUNT(*) FROM android_model_attempts WHERE task_id=?',(task_id,)).fetchone()[0]
         return result
 
     def list(self, bot_id):
@@ -107,7 +123,13 @@ class AndroidTasks:
         with self.db:
             self.db.execute('UPDATE android_tasks SET state=?,result=?,steps=?,updated=? WHERE id=?', (state or row['state'], result if result is not None else row['result'], json.dumps(steps, ensure_ascii=False), time.time(), task_id))
 
-    def submit(self, bot_id, device_id, goal):
+    def notification(self, task_id, state, expected=None):
+        with self.db:
+            sql='UPDATE android_tasks SET notification=? WHERE id=?'+(' AND notification=?' if expected is not None else '')
+            args=(state,task_id,expected) if expected is not None else (state,task_id)
+            return self.db.execute(sql,args).rowcount==1
+
+    def submit(self, bot_id, device_id, goal, origin=None):
         config = self.config(bot_id)
         if not config.enabled: raise ValueError('请先启用安卓任务并配置视觉模型')
         if not config.model: raise ValueError('请先填写独立的安卓操作模型')
@@ -115,8 +137,9 @@ class AndroidTasks:
         goal = goal.strip()
         if not goal or len(goal) > 3000: raise ValueError('任务目标须为1–3000字')
         task_id = uuid.uuid4().hex; now = time.time()
+        origin = origin or {'source':'web','account_id':self.manager.get(bot_id).store.load().account_id}
         with self.db:
-            self.db.execute('INSERT INTO android_tasks VALUES (?,?,?,?,?,?,?, ?,?)', (task_id, bot_id, device_id, goal, 'queued', '', '[]', now, now))
+            self.db.execute('INSERT INTO android_tasks (id,bot_id,device_id,goal,state,result,steps,created,updated,origin,notification) VALUES (?,?,?,?,?,?,?,?,?,?,?)', (task_id, bot_id, device_id, goal, 'queued', '', '[]', now, now, json.dumps(origin), 'pending_ack' if origin.get('source')=='qq' else ''))
         self.jobs[task_id] = asyncio.create_task(self.run(bot_id, task_id, config))
         return self.get(bot_id, task_id)
 
@@ -154,9 +177,26 @@ class AndroidTasks:
             if not job.done():
                 row = self.db.execute('SELECT bot_id FROM android_tasks WHERE id=?', (task_id,)).fetchone()
                 if row: await self.cancel(row['bot_id'], task_id)
+        self.closed = True
         self.db.close()
 
-    async def decide(self, bot_id, config, goal, observation, steps):
+    def diagnostics(self, bot_id, task_id):
+        self.get(bot_id,task_id)
+        return [{**dict(r),'metadata':json.loads(r['metadata'])} for r in self.db.execute('SELECT * FROM android_model_attempts WHERE task_id=? ORDER BY id',(task_id,))]
+
+    def valid_origin(self, task):
+        try:
+            runtime=self.manager.get(task['bot_id']);origin=task['origin'];current=runtime.store.load()
+            if origin.get('account_id',current.account_id)!=current.account_id:return False
+            if origin.get('source')=='qq':
+                cfg=self.config(task['bot_id'])
+                if not cfg.qq_enabled or not cfg.enabled or cfg.qq_owner_id!=origin.get('requester_id'):return False
+                scope=runtime.store.scopes.get(origin['scope_id'],current.account_id)
+                if origin.get('source_id',0)<=scope['source_floor']:return False
+            return True
+        except Exception:return False
+
+    async def decide(self, bot_id, config, goal, observation, steps, task_id=''):
         runtime = self.manager.get(bot_id)
         chat = runtime.store.load().ollama
         provider = self.manager.providers.get(config.provider_id or chat.provider_id)
@@ -172,17 +212,39 @@ class AndroidTasks:
 逐步完成目标：previous_steps 中已经基于实际截图观察到的子目标无需反复执行。可以结合此前实际观察到的结果与当前截图验证最终状态；例如此前已看见设置图标、当前已回桌面，则任务已完成，不要再次打开应用列表。完成时输出{"done":true,"result":"可观察到的完成结果"}。不能把准备操作或点击成功当作外部发送完成；结果不确定则停止并输出{"blocked":true,"result":"原因，需要人工检查"}。
 禁止付款/转账/购买、删除私人数据、更改账号安全设置；遇到验证码或登录需人工接管。不得主动读取与任务无关的聊天、联系人和文件。'''
         content = json.dumps({'goal': goal, 'screen_size': [screen.width, screen.height], 'previous_steps': steps[-8:], 'untrusted_ui_tree': observation.get('hierarchy', '')[:18000]}, ensure_ascii=False)
-        async def request(method, url, **kwargs):
-            async with httpx.AsyncClient(trust_env=False, follow_redirects=False) as client:
-                return read_response(await client.request(method, url, **kwargs))
-        answer = await generate(request, provider, selection, [{'role': 'system', 'content': instructions}, {'role': 'user', 'content': content, 'images': [base64.b64encode(b.getvalue()).decode()]}], 1200, thinking=False)
-        runtime.store.record_usage(answer)
-        text = answer.get('message', {}).get('content', '').strip()
-        if text.startswith('```'): text = text.split('\n', 1)[1].rsplit('```', 1)[0].strip()
-        decision = json.loads(text)
-        if not isinstance(decision, dict): raise ValueError('操作模型未返回有效JSON')
-        if decision.get('action') and not isinstance(decision['action'], dict): raise ValueError('操作模型动作格式错误')
-        return decision
+        messages=[{'role':'system','content':instructions},{'role':'user','content':content,'images':[base64.b64encode(b.getvalue()).decode()]}]
+        last_error=''
+        for attempt in range(1,3):
+            if task_id and not self.valid_origin(self.get(bot_id,task_id)):
+                raise ValueError('手机任务授权或对话范围已变化，已停止')
+            metadata={'provider_id':config.provider_id or chat.provider_id,'model':config.model}
+            async def request(method,url,**kwargs):
+                async with httpx.AsyncClient(trust_env=False,follow_redirects=False) as client:
+                    data=read_response(await client.request(method,url,**kwargs))
+                first=(data.get('choices') or [{}])[0]
+                if isinstance(first,dict):
+                    metadata['finish_reason']=first.get('finish_reason')
+                    msg=first.get('message') or {}
+                    if isinstance(msg,dict):metadata['has_reasoning']=bool(msg.get('reasoning_content') or msg.get('reasoning'))
+                metadata['status']=data.get('status') or data.get('done_reason')
+                return data
+            answer=await generate(request,provider,selection,messages,1200 if attempt==1 else 2400,thinking=False)
+            runtime.store.record_usage(answer)
+            raw=answer.get('message',{}).get('content') or ''
+            metadata.update(input_tokens=answer.get('prompt_eval_count',0),output_tokens=answer.get('eval_count',0),content_chars=len(raw))
+            try:
+                decision=parse_decision(raw);last_error=''
+            except DecisionFormatError as exc:
+                decision=None;last_error=str(exc)
+            diagnostic=public_body(raw)[:8000]
+            if provider.api_key:diagnostic=diagnostic.replace(provider.api_key,'[redacted]')
+            diagnostic=re.sub(r'(?:sk-[A-Za-z0-9_-]{16,}|Bearer\s+\S+)','[redacted]',diagnostic)
+            if task_id:
+                with self.db:self.db.execute('INSERT INTO android_model_attempts(task_id,step,attempt,content,error,metadata,created) VALUES (?,?,?,?,?,?,?)',(task_id,len(steps)+1,attempt,diagnostic,last_error,json.dumps(metadata),time.time()))
+            if decision is not None:return decision
+            if attempt==1:
+                messages.extend([{'role':'assistant','content':public_body(raw)[:4000] or '[空正文]'}, {'role':'user','content':'上一返回格式不合格，还没有执行任何手机动作。请仅重新生成一个完整JSON对象；tap必须包含x/y，swipe必须包含x/y/x2/y2，key必须有key。done/blocked不能同时含action。错误：'+last_error}])
+        raise DecisionFormatError('操作模型连续两次返回无效格式，未执行本轮动作。'+last_error+'；可在任务的模型返回诊断中查看正文')
 
     async def run(self, bot_id, task_id, config):
         task = self.get(bot_id, task_id)
@@ -196,11 +258,12 @@ class AndroidTasks:
             async with asyncio.timeout(config.timeout_minutes * 60):
                 for i in range(config.max_steps):
                     runtime = self.manager.get(bot_id)
+                    if not self.valid_origin(self.get(bot_id,task_id)):raise ValueError('手机任务授权或对话范围已变化，已停止')
                     observation = await self.gateway.request('GET', base + '/observe', lease=lease)
                     current = self.get(bot_id, task_id)
-                    decision = await self.decide(bot_id, config, task['goal'], observation, current['steps'])
+                    decision = await self.decide(bot_id, config, task['goal'], observation, current['steps'], task_id)
                     if self.get(bot_id, task_id)['state'] != 'running': return
-                    self.manager.get(bot_id)  # Archived/deleted Bot cannot execute a late decision.
+                    if not self.valid_origin(self.get(bot_id,task_id)):raise ValueError('手机任务授权或对话范围已变化，已停止')
                     if decision.get('done') is True:
                         self.update(task_id, state='completed', result=str(decision.get('result', '完成'))[:2000], step={'index': i + 1, 'at': time.time(), 'kind': 'verified', 'reason': str(decision.get('result', ''))[:2000]})
                         return
@@ -225,3 +288,6 @@ class AndroidTasks:
             if lease:
                 try: await asyncio.wait_for(self.gateway.request('POST', base + '/release', {'lease': lease}), 10)
                 except Exception: pass
+            if self.completion_callback and self.get(bot_id,task_id)['origin'].get('source')=='qq':
+                try:await self.completion_callback(bot_id,task_id)
+                except Exception:pass

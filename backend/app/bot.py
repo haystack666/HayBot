@@ -20,6 +20,7 @@ from .memory_store import StaleMemory
 
 class Bot:
     def __init__(self, store, client=None, inference_lock=None, providers=None, memes=None):
+        self.android = None
         self.store = store
         self.providers = providers
         if providers is not None:
@@ -190,6 +191,9 @@ class Bot:
         self.store.log('info', '机器人已启动，正在连接 QQ 官方网关')
 
     async def stop(self):
+        self.state = 'stopped'
+        if self.android:
+            await self.android.cancel_scope(self)
         if self.task:
             self.task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -322,7 +326,8 @@ class Bot:
         return re.sub(r'<@!?\d+>', '', data.get('content') or '').strip()
 
     def is_command(self, text):
-        return (self.reset.action(text) is not None or text in ('/查看日程', '/重置日程', '/查看记忆')
+        from .android_qq import AndroidQQ
+        return (AndroidQQ.command(text) is not None or self.reset.action(text) is not None or text in ('/查看日程', '/重置日程', '/查看记忆')
                 or text.startswith('/记住') or text.startswith('/忘记'))
 
     async def receive(self, payload):
@@ -415,6 +420,8 @@ class Bot:
                     await day.sync_commitments()
                     await self.send_schedule_text(response, c, d, group, target, source='memory')
                 return
+            if self.android and await self.android.handle(self,text,c,d,group,target,user,sid,incoming['id'] if incoming else 0,batch,key):
+                return True
             if key in self.pending or (batch is None and time.time() - self.last.get(key, 0) < c.rules.cooldown):
                 return
             if batch is None and not self.store.claim(f'{target}:{d["id"]}'):
@@ -459,7 +466,8 @@ class Bot:
             meme_instruction = self.memes.instruction(meme_candidates, bool(dialogue_instruction))
             qzone = getattr(self, 'qzone', None)
             qzone_context = qzone.chat_context(sid) if qzone else ''
-            messages = [{'role': 'system', 'content': c.rules.prompt + memory_context + schedule_context + qzone_context + dialogue_instruction + meme_instruction}, *old, user_message]
+            android_context = self.android.chat_context(self,user,group) if self.android else ''
+            messages = [{'role': 'system', 'content': c.rules.prompt + android_context + memory_context + schedule_context + qzone_context + dialogue_instruction + meme_instruction}, *old, user_message]
             try:
                 answer = await self.generate(c.ollama, messages, max(2048, c.ollama.max_tokens) if dialogue_instruction or meme_instruction else c.ollama.max_tokens, thinking=self.provider(c.ollama).chat_thinking)
             except (ValueError, httpx.HTTPError):
