@@ -2,6 +2,13 @@ from pathlib import Path
 import pytest
 from android_runtime.bootstrap import qemu_arguments, cloud_config, write_environment
 
+def test_dedicated_lima_never_inherits_host_proxy():
+    template=(Path(__file__).parents[1]/'lima.yaml').read_text()
+    assert 'propagateProxyEnv: false' in template
+    # Lima reads macOS system proxy independently from process env propagation.
+    for name in ('http_proxy','https_proxy','ftp_proxy','HTTP_PROXY','HTTPS_PROXY','FTP_PROXY'):
+        assert f'  {name}: ""' in template
+
 
 def test_windows_vm_is_dedicated_and_only_forwards_loopback_ssh(tmp_path):
     args = qemu_arguments(tmp_path, 'Windows', 'AMD64')

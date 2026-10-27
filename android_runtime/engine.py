@@ -26,7 +26,7 @@ class DeviceCreate(BaseModel):
     width: int = Field(default=720, ge=320, le=1440)
     height: int = Field(default=1280, ge=480, le=2560)
     dpi: int = Field(default=240, ge=120, le=640)
-    memory_mb: int = Field(default=2048, ge=1024, le=8192)
+    memory_mb: int = Field(default=4096, ge=1024, le=8192)
     initialize: bool = False
     google_play: bool = False
 
@@ -75,6 +75,13 @@ class GuestCommand:
         except BaseException:
             proc.kill();await proc.communicate();raise
         if proc.returncode:raise RuntimeFailure('安装资源传输失败')
+
+    async def spawn(self,*args):
+        import shlex
+        if self.mode=='lima':argv=['limactl','shell',self.instance,'--',*args]
+        elif self.mode=='ssh':argv=['ssh','-F',str(self.ssh_config),'-o','BatchMode=yes','haybot-android',shlex.join(args)]
+        else:argv=list(args)
+        return await asyncio.create_subprocess_exec(*argv,stdin=asyncio.subprocess.PIPE,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.PIPE,limit=5*1024*1024)
 
     async def __call__(self, *args, timeout=40):
         if self.mode == 'lima':
@@ -129,7 +136,13 @@ class AndroidEngine:
         self.gms_image = os.getenv('HAYBOT_ANDROID_GMS_IMAGE', 'haybot/redroid12-gapps:local')
         if any(not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9./:@_-]{1,250}', value) for value in (self.image,self.gms_image)):
             raise RuntimeFailure('Android 镜像名称无效')
-        self.locks = {}; self.leases = {}; self.revoked = set()
+        self.locks = {}; self.leases = {}; self.revoked = set();self.manual_owners={};self.live=None
+
+    def streams(self):
+        if self.live is None:
+            from .stream import LiveManager
+            self.live=LiveManager(self)
+        return self.live
 
     def close(self):
         self.db.close()
@@ -354,7 +367,9 @@ class AndroidEngine:
             # Persist before awaiting the lock: in-flight actions recheck after preflight.
             with self.db:
                 self.db.execute('INSERT OR IGNORE INTO owner_logins VALUES (?)', (device_id,))
-            await self.takeover(bot_id, device_id)
+            await self.takeover(bot_id, device_id, preserve_manual=True)
+        elif self.live:
+            await self.live.close_device(device_id,controls_only=True)
         async with self.lock(device_id):
             self.get(bot_id, device_id)
             if not active:
@@ -363,6 +378,7 @@ class AndroidEngine:
 
     def check_lease(self, device_id, lease):
         if lease: self.require_automation(device_id)
+        if device_id in self.manual_owners:raise RuntimeFailure('手机正在由实时窗口操作，请先停止实时操作')
         current = self.leases.get(device_id, '')
         if current != lease:
             raise RuntimeFailure('设备由任务占用，或任务已被人工接管')
@@ -393,16 +409,18 @@ class AndroidEngine:
     async def release(self, bot_id, device_id, lease):
         return await self.revoke(bot_id, device_id, lease)
 
-    async def takeover(self, bot_id, device_id):
+    async def takeover(self, bot_id, device_id, preserve_manual=False):
         self.get(bot_id, device_id)
         lease = self.leases.pop(device_id, None)
         if lease:
             self.revoked.add(lease)
+        if self.live and not preserve_manual:await self.live.close_device(device_id,controls_only=True)
         return {'ok': True}
 
     async def stop(self, bot_id, device_id, automated=False):
         if automated:self.require_automation(device_id)
         await self.takeover(bot_id, device_id)
+        if self.live:await self.live.close_device(device_id)
         async with self.lock(device_id):
             self.get(bot_id, device_id); self.leases.pop(device_id, None)
             if await self.inspect(device_id):
@@ -412,6 +430,8 @@ class AndroidEngine:
             return self.get(bot_id, device_id)
 
     async def remove_container(self, bot_id, device_id, automated=False):
+        self.get(bot_id,device_id)
+        if self.live:await self.live.close_device(device_id)
         async with self.lock(device_id):
             self.get(bot_id, device_id); self.check_lease(device_id, '')
             info = await self.inspect(device_id)
@@ -424,6 +444,8 @@ class AndroidEngine:
             return self.get(bot_id, device_id)
 
     async def delete(self, bot_id, device_id, destroy_data=False):
+        self.get(bot_id,device_id)
+        if self.live:await self.live.close_device(device_id)
         if not destroy_data:
             return await self.remove_container(bot_id, device_id)
         async with self.lock(device_id):

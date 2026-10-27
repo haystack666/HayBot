@@ -3,6 +3,17 @@ minimumLimaVersion: 2.0.0
 base:
 - template:_images/ubuntu-24.04
 vmType: vz
+propagateProxyEnv: false
+# Empty values also suppress macOS system proxy auto-detection in Lima.
+env:
+  http_proxy: ""
+  https_proxy: ""
+  ftp_proxy: ""
+  HTTP_PROXY: ""
+  HTTPS_PROXY: ""
+  FTP_PROXY: ""
+  all_proxy: ""
+  ALL_PROXY: ""
 cpus: 4
 memory: 6GiB
 disk: 40GiB

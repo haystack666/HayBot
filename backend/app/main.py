@@ -66,7 +66,7 @@ def create_app(data_dir=None, static_dir=None):
         response.headers['X-Content-Type-Options'] = 'nosniff'
         response.headers['X-Frame-Options'] = 'DENY'
         response.headers['Referrer-Policy'] = 'same-origin'
-        response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'"
+        response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'"
         if request.url.path.startswith('/api/'):
             response.headers['Cache-Control'] = 'no-store'
         return response
@@ -526,6 +526,8 @@ def create_app(data_dir=None, static_dir=None):
 
     from .android_routes import register_android_routes
     register_android_routes(app, scoped_runtime)
+    from .android_live import register_android_live
+    register_android_live(app)
 
     root = Path(static_dir or os.getenv('STATIC_DIR', '/app/static'))
     if (root / 'assets').exists():

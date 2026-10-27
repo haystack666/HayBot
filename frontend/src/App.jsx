@@ -171,7 +171,7 @@ export default function App({ page }) {
     {page === 'schedule' && <SchedulePage config={config.schedule} update={(key, value) => update('schedule', key, value)} {...{active, busy, dirty, api, notify}} model={config.ollama.model} />}
     {page === 'memory' && <MemoryPage config={config.memory} update={(key, value) => update('memory', key, value)} {...{active, busy, dirty, api, notify}} />}
     {page === 'memes' && <MemesPage {...{api, providers, notify}} memory={config.memory} onSaved={memes => { setConfig(c => ({ ...c, memes })); setSavedConfig(c => ({ ...c, memes })) }} />}
-    {page === 'android' && <AndroidPage key={botId} {...{api, notify, providers}} />}
+    {page === 'android' && <AndroidPage key={botId} {...{api, notify, providers, botId}} />}
     {page === 'qzone' && <QzonePage key={botId} {...{api,notify,dirty}} />}
     {page === 'chats' && <ChatsPage api={api} botName={currentBot?.name} />}
     {page === 'logs' && <LogsPage key={botId} {...{api, notify}} />}

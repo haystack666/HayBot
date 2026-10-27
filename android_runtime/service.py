@@ -2,11 +2,12 @@
 from __future__ import annotations
 import asyncio
 import hmac
+import json
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request, Query
+from fastapi import FastAPI, HTTPException, Request, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from .engine import AndroidEngine, DeviceCreate, Action, RuntimeFailure
@@ -33,6 +34,7 @@ def create_app(engine=None, token=None):
         for task in app.state.operations.values():
             if not task.done(): task.cancel()
         await asyncio.gather(*app.state.operations.values(), return_exceptions=True)
+        if app.state.engine.live:await app.state.engine.live.close()
         if owned: app.state.engine.close()
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
@@ -154,6 +156,49 @@ def create_app(engine=None, token=None):
     async def action(bot_id: str, device_id: str, body: Action, lease: str = Query(default='', max_length=64)):
         idle(device_id)
         return await app.state.engine.action(bot_id, device_id, body, lease)
+
+    @app.websocket('/bots/{bot_id}/devices/{device_id}/live')
+    async def live(ws:WebSocket,bot_id:str,device_id:str):
+        if ws.headers.get('origin') or not hmac.compare_digest(ws.headers.get('authorization','').encode(),('Bearer '+token).encode()):
+            await ws.close(code=1008);return
+        session=None;workers=[]
+        try:
+            idle(device_id)
+            session=await app.state.engine.streams().open(bot_id,device_id)
+            await ws.accept()
+            session.attached=True
+            async def video():
+                while True:
+                    kind,data=await session.queue.get()
+                    if kind==b'E':
+                        await ws.send_text(json.dumps({'type':'error','message':data.decode()},ensure_ascii=False))
+                        raise RuntimeFailure(data.decode())
+                    if kind==b'C':await ws.send_text(data.decode())
+                    else:await ws.send_bytes(data)
+            async def controls():
+                while True:
+                    raw=await ws.receive_text()
+                    if len(raw)>12000:raise RuntimeFailure('输入过大')
+                    value=json.loads(raw)
+                    if value.get('type')=='claim':
+                        await session.claim();await ws.send_json({'type':'control','owned':True})
+                    elif value.get('type')=='ping':await ws.send_json({'type':'pong'})
+                    elif value.get('type')=='release':return
+                    else:await session.input(value)
+            workers=[asyncio.create_task(video()),asyncio.create_task(controls())]
+            done,_=await asyncio.wait(workers,return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                if not task.cancelled() and task.exception():raise task.exception()
+        except (Exception,asyncio.CancelledError):
+            try:await ws.close(code=1011,reason='实时连接结束；请重新连接或切换截图模式')
+            except Exception:pass
+        finally:
+            for worker in workers:worker.cancel()
+            await asyncio.gather(*workers,return_exceptions=True)
+            if session:
+                closing=asyncio.create_task(session.close())
+                try:await asyncio.shield(closing)
+                except asyncio.CancelledError:pass
 
     return app
 

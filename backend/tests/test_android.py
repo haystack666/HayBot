@@ -16,6 +16,7 @@ def png():
 
 def test_android_routes_require_auth_and_keep_bot_scopes(tmp_path, monkeypatch):
     monkeypatch.setenv('ADMIN_PASSWORD', 'test-password-long-enough')
+    monkeypatch.delenv('ANDROID_RUNTIME_URL', raising=False); monkeypatch.delenv('ANDROID_RUNTIME_TOKEN', raising=False)
     with TestClient(create_app(tmp_path)) as c:
         assert c.get('/api/bots/default/android').status_code == 401
         c.post('/api/login', json={'password': 'test-password-long-enough'})

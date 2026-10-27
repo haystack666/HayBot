@@ -7,6 +7,7 @@ import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Switch } from '@/components/ui/switch'
 import { Badge } from '@/components/ui/badge'
+import AndroidLive from './AndroidLive'
 import AndroidCompanion from './AndroidCompanion'
 import AndroidApps from './AndroidApps'
 import { pointOnScreen, androidConfigPayload } from './lib/android'
@@ -14,11 +15,13 @@ import { pointOnScreen, androidConfigPayload } from './lib/android'
 const states = { stopped: '已停止', starting: '正在启动', booting: '安卓开机中', running: '运行中', error: '设备异常', queued: '排队中', completed: '已完成', failed: '失败', cancelled: '已停止', unknown: '结果未知', blocked: '需要接管', budget_exhausted: '达到步骤上限' }
 const time = value => new Date(value * 1000).toLocaleString('zh-CN', { hour12: false })
 
-export default function AndroidPage({ api, notify, providers }) {
+export default function AndroidPage({ api, notify, providers, botId }) {
   const [snapshot, setSnapshot] = useState(null), [config, setConfig] = useState(null), [saved, setSaved] = useState(null)
   const [device, setDevice] = useState(null), [screen, setScreen] = useState(null), [error, setError] = useState(''), [working, setWorking] = useState('')
   const [diagnostics, setDiagnostics] = useState({})
   const [goal, setGoal] = useState(''), [text, setText] = useState(''), [name, setName] = useState('Android'), [confirm, setConfirm] = useState(null), [autoPreview, setAutoPreview] = useState(false)
+  const stream = useRef(null)
+  const [liveMode, setLiveMode] = useState(true)
   const live = useRef(true), refreshing = useRef(false), pointer = useRef(null), busy = useRef(false)
   const refresh = useCallback(async () => {
     const next = await api('/android')
@@ -61,6 +64,7 @@ export default function AndroidPage({ api, notify, providers }) {
   const changed = JSON.stringify(config) !== JSON.stringify(saved)
   async function manual(value) {
     if (!device || working || activeTask) return
+    if (stream.current?.controlOwned && stream.current.sendAction(value)) return
     await action('manual', async () => { await api(`/android/devices/${device.id}/manual`, 'POST', value); await new Promise(resolve => setTimeout(resolve, 400)); await preview() })
   }
   function pointerDown(event) { if (!working && !activeTask) { event.currentTarget.setPointerCapture(event.pointerId); pointer.current = { x: event.clientX, y: event.clientY } } }
@@ -84,12 +88,15 @@ export default function AndroidPage({ api, notify, providers }) {
         {!device ? <form className="page-stack" onSubmit={e => { e.preventDefault(); action('create', async () => { await api('/android/devices', 'POST', { name, google_play: !!snapshot.runtime.google_play_ready }); setScreen(null) }, '设备已创建，点击启动开机') }}><Field id="android-name" label="设备名称"><Input id="android-name" value={name} required maxLength={60} onChange={e => setName(e.target.value)} /></Field><Button disabled={!!working || !snapshot.runtime.ready}><Smartphone size={14} />创建设备</Button></form> : <div className="page-stack">
           <div className="android-device-actions"><Button size="sm" disabled={!!working || !['stopped', 'error'].includes(device.state)} onClick={() => action('start', () => api(`/android/devices/${device.id}/control/start`, 'POST'), '设备正在启动')}><Play size={13} />启动</Button><Button size="sm" variant="outline" disabled={!!working || !['running', 'booting', 'error'].includes(device.state)} onClick={() => action('stop', async () => { await api(`/android/devices/${device.id}/control/stop`, 'POST'); setScreen(null); setAutoPreview(false) }, '设备已停止')}><Square size={13} />停止</Button><Button size="sm" variant="outline" disabled={!!working || device.state !== 'running'} onClick={() => action('takeover', () => api(`/android/devices/${device.id}/control/takeover`, 'POST'), '已停止任务，可手动操作设备')}><Hand size={13} />人工接管</Button></div>
           <Notice>{device.owner_login ? 'owner 登录模式：Bot 已暂停操作和取图。请自行完成账号登录、验证码，再点击「完成登录」。' : '应用登录必须由 owner 自行完成。登录前请先进入 owner 登录模式。'}</Notice>
-          <Button variant="outline" disabled={!!working || device.state !== 'running'} onClick={() => action('login', () => api(`/android/devices/${device.id}/login/${device.owner_login ? 'finish' : 'begin'}`, 'POST'), device.owner_login ? '已退出登录模式，可重新提交任务' : 'Bot 已暂停，请自行登录应用')}>{device.owner_login ? '完成登录，恢复 Bot' : 'owner 登录模式'}</Button>
+          <Button variant="outline" disabled={!!working || device.state !== 'running'} onClick={() => action('login', async () => { await api(`/android/devices/${device.id}/login/${device.owner_login ? 'finish' : 'begin'}`, 'POST'); if (device.owner_login) stream.current?.reconnect() }, device.owner_login ? '已退出登录模式，可重新提交任务' : 'Bot 已暂停，请自行登录应用')}>{device.owner_login ? '完成登录，恢复 Bot' : 'owner 登录模式'}</Button>
+          {liveMode && device.state === 'running' ? <AndroidLive ref={stream} botId={botId} device={device} disabled={!!working} onTakeover={async () => { await api(`/android/devices/${device.id}/control/takeover`, 'POST'); await refresh() }} onFallback={() => setLiveMode(false)} /> : <>
           <div className={`android-screen ${working || activeTask ? 'android-screen-busy' : ''}`} style={{ aspectRatio: `${device.config.width}/${device.config.height}` }}>
             {screen ? <img draggable={false} src={`data:image/png;base64,${screen.image}`} alt="安卓设备当前画面；点击或拖动进行操作" onPointerDown={pointerDown} onPointerUp={pointerUp} onPointerCancel={() => { pointer.current = null }} /> : <div className="android-screen-empty"><Smartphone size={36} /><span>{device.state === 'running' ? '点击「获取画面」查看手机' : '启动安卓后查看画面'}</span></div>}
           </div>
           <div className="android-preview-actions"><Button variant="outline" size="sm" disabled={!!working || device.state !== 'running'} onClick={() => action('preview', preview)}><RefreshCw size={13} />获取画面</Button><label className="android-auto-preview"><Switch checked={autoPreview} disabled={device.state !== 'running'} onCheckedChange={setAutoPreview} aria-label="自动更新画面" /><span>自动更新</span></label></div>
           {screen && <p className="push-hint">画面时间：{time(screen.at)}。点击屏幕进行轻触，拖动进行滑动。</p>}
+          </>}
+          {!liveMode && <Button size="sm" variant="outline" disabled={device.state !== 'running'} onClick={() => { setAutoPreview(false); setLiveMode(true) }}>切换实时视频</Button>}
           <div className="android-keybar">{[['back', ArrowLeft, '返回'], ['home', Home, '主页'], ['recent', Layers, '最近应用']].map(([key, Icon, title]) => <Button key={key} variant="outline" size="sm" disabled={!!working || !!activeTask || device.state !== 'running'} onClick={() => manual({ kind: 'key', key })}><Icon size={15} />{title}</Button>)}</div>
           <form className="android-input-row" onSubmit={e => { e.preventDefault(); const value = text; manual({ kind: 'text', text: value }).then(() => setText('')) }}><Input aria-label="向设备输入文字" placeholder="先点中输入框，再输入中文或文字" value={text} maxLength={2000} onChange={e => setText(e.target.value)} /><Button size="icon" aria-label="输入文字" disabled={!text || !!working || !!activeTask || device.state !== 'running'}><Send size={15} /></Button></form>
           {device.error && <Notice alert>{device.error}</Notice>}
