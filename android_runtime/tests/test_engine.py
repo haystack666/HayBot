@@ -47,6 +47,44 @@ class Guest:
 
 
 @pytest.mark.asyncio
+async def test_observation_preserves_large_xml_and_tail_security_nodes(tmp_path):
+    import xml.etree.ElementTree as ET
+    from app.android_companion import login_screen, target_text
+    tree='<hierarchy>'+''.join('<node text="酷安内容" content-desc="'+'x'*500+'"/>' for _ in range(160))+'<node class="android.widget.EditText" password="true"/><node text="发布" bounds="[0,0][200,200]"/></hierarchy>'
+    assert len(tree)>80000
+    class ScreenGuest(Guest):
+        async def __call__(self,*args,**kwargs):
+            if 'screencap' in args:return b'\x89PNG\r\n\x1a\nimage'
+            return await super().__call__(*args,**kwargs)
+    e=AndroidEngine(tmp_path,ScreenGuest());d=await e.create('a',DeviceCreate(name='phone'));await e.start('a',d['id'])
+    async def hierarchy(*args):return tree.encode()
+    e.u2=hierarchy
+    try:
+        observed=await e.observe('a',d['id'])
+        assert observed['hierarchy']==tree
+        ET.fromstring(observed['hierarchy'])
+        assert login_screen(observed['hierarchy'])
+        assert target_text(observed['hierarchy'],10,10)=='发布  '
+    finally:e.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('raw',[b'<hierarchy><node',b'x'*(1024*1024+1)],ids=['incomplete','oversized'])
+async def test_invalid_or_oversized_tree_is_reported_without_silent_truncation(tmp_path,raw):
+    class ScreenGuest(Guest):
+        async def __call__(self,*args,**kwargs):
+            if 'screencap' in args:return b'\x89PNG\r\n\x1a\nimage'
+            return await super().__call__(*args,**kwargs)
+    e=AndroidEngine(tmp_path,ScreenGuest());d=await e.create('a',DeviceCreate(name='phone'));await e.start('a',d['id'])
+    async def hierarchy(*args):return raw
+    e.u2=hierarchy
+    try:
+        with pytest.raises(RuntimeFailure,match='页面结构'):
+            await e.observe('a',d['id'])
+    finally:e.close()
+
+
+@pytest.mark.asyncio
 async def test_create_is_scoped_persistent_and_no_public_adb(tmp_path):
     guest = Guest()
     engine = AndroidEngine(tmp_path, guest)

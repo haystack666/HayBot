@@ -9,6 +9,7 @@ import re
 import sqlite3
 import time
 import uuid
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
@@ -476,9 +477,19 @@ class AndroidEngine:
                 raise RuntimeFailure('设备未返回有效截图')
             tree = ''
             try:
-                tree = (await self.u2(serial, {'kind': 'hierarchy'})).decode()[:40000]
+                raw_tree = await self.u2(serial, {'kind': 'hierarchy'})
             except RuntimeFailure:
                 pass
+            else:
+                # Do not slice XML: long feeds routinely exceed 40k characters.
+                # Security checks must see a complete tree, including tail nodes.
+                if len(raw_tree)>1024*1024:
+                    raise RuntimeFailure('页面结构超过 1 MiB，已停止本轮操作；请返回较简单页面后重试')
+                try:
+                    tree=raw_tree.decode('utf-8')
+                    ET.fromstring(tree)
+                except (UnicodeDecodeError,ET.ParseError):
+                    raise RuntimeFailure('页面结构采集结果不完整，未执行本轮操作；请刷新页面后重试') from None
             if automated or lease: self.require_automation(device_id)
             return {'image': base64.b64encode(image).decode(), 'hierarchy': tree, 'at': time.time()}
 
