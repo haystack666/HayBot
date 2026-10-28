@@ -1,4 +1,4 @@
-export const logCategories = { system: '系统', qq: 'QQ 连接', message: '消息处理', model: '模型调用', memory: '角色记忆', schedule: '每日日程', proactive: '主动消息', config: '配置管理' }
+export const logCategories = { system: '系统', qq: 'QQ 连接', message: '消息处理', model: '模型调用', memory: '角色记忆', schedule: '每日日程', proactive: '主动消息', config: '配置管理', diary: '私人日记' }
 export const logLevels = { error: '错误', warn: '警告', info: '信息', debug: '调试' }
 const ranges = { '1h': 3600, '24h': 86400, '7d': 604800, all: null }
 export function readLogFilters(params) {

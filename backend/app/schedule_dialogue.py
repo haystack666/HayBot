@@ -2,12 +2,12 @@
 import copy
 from contextlib import nullcontext
 import json
-import re
 import uuid
 
 from pydantic import ConfigDict, Field, ValidationError
 from .config import StrictModel
 from .schedule import Activity, DayEvent, DayPlan, ScheduleError, ScheduleChanged, minute
+from .reply_envelope import extract_envelope, public_reply
 
 
 class DialogueUpdate(StrictModel):
@@ -72,22 +72,22 @@ class DialogueSchedule:
                 '日程由后台独立同步，不需要在正文附带日程修改JSON。若有表情包输出协议，遵守其传输格式。\n')
 
     def decode(self, raw):
-        text = re.sub(r'^```(?:json)?\s*|\s*```$', '', raw.strip(), flags=re.IGNORECASE)
         try:
-            value = json.loads(text)
+            parsed = extract_envelope(raw, expected=True)
         except ValueError:
-            if text.startswith('{') and '"reply"' in text:
-                raise ScheduleError('对话日程输出不完整，未修改安排') from None
+            raise ScheduleError('对话日程输出不完整，未修改安排') from None
+        if parsed is None:
             return raw, None
+        value = parsed.value
         if not isinstance(value, dict) or 'reply' not in value:
-            return raw, None
+            raise ScheduleError('对话日程输出没有正文')
         try:
             envelope = DialogueReply.model_validate(value)
         except ValidationError:
             raise ScheduleError('对话日程调整格式无效，未修改安排') from None
         if not envelope.reply.strip():
             raise ScheduleError('模型没有返回回复正文')
-        return envelope.reply.strip(), envelope.schedule_update
+        return public_reply(envelope.reply), None if parsed.mixed else envelope.schedule_update
 
     def prepare(self, update):
         if update is None:

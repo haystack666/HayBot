@@ -6,26 +6,33 @@ from urllib.parse import quote
 from .reply_segments import split_reply
 from .schedule import ScheduleChanged
 from .event_logs import exception_details
+from .message_quotes import receipt_metadata
+from .reply_envelope import public_reply
 
 
 class ReplyDelivery:
-    def __init__(self, bot, config, data, group, target, user, sid, key, day, schedule_stamp, memory_stamp, old, question, batch=None):
+    def __init__(self, bot, config, data, group, target, user, sid, key, day, schedule_stamp, memory_stamp, old, question, batch=None, group_turn=None):
         self.bot, self.store, self.config, self.data = bot, bot.store, config, data
         self.group, self.target, self.user, self.sid, self.key = group, target, user, sid, key
         self.day, self.schedule_stamp, self.memory_stamp = day, schedule_stamp, memory_stamp
         self.batch = batch
+        self.group_turn = group_turn
         self.old, self.question, self.confirmed, self.source_ids = old, question, [], []
         self.meme_context = ''
+        self.diary_context = None
 
     def state_current(self):
         return (self.day.matches(self.schedule_stamp) and self.bot.memory.matches(self.sid, self.memory_stamp)
-                and (self.batch is None or self.bot.inbox.live(self.batch)))
+                and (self.diary_context is None or self.bot.diary.chat_context(self.user,self.group)==self.diary_context)
+                and (self.batch is None or self.bot.inbox.live(self.batch))
+                and (self.group_turn is None or self.bot.group_chat.live(self.group_turn)))
 
     def current(self):
-        return self.state_current() and not self.bot.schedule_reply_expired(self.data, command='对话')
+        return (self.state_current() and not self.bot.schedule_reply_expired(self.data, command='对话')
+                and (self.group_turn is None or self.bot.group_chat.live(self.group_turn, fresh=True)))
 
     def save_prefix(self):
-        if self.confirmed and self.state_current():
+        if self.confirmed and self.state_current() and self.group_turn is None:
             self.store.save_history(self.key, [*self.old, {'role': 'user', 'content': self.question},
                 {'role': 'assistant', 'content': '\n\n'.join(self.confirmed)}], self.config.rules.rounds)
             self.bot.last[self.key] = time.time()
@@ -36,6 +43,8 @@ class ReplyDelivery:
         path = 'groups' if self.group else 'users'
         if self.batch is not None and not self.bot.inbox.mark_sending(self.batch):
             raise ScheduleChanged('消息批次已取消，停止发送')
+        if self.group_turn is not None and not self.bot.group_chat.mark_sending(self.group_turn):
+            raise ScheduleChanged('群聊话题或授权已变化，停止发送')
         receipt = await self.bot.api('POST', f'/v2/{path}/{quote(self.target, safe="")}/messages', before_send=self.current,
             json={'msg_type': 0, 'content': part, 'msg_id': self.data['id'], 'msg_seq': sequence})
         if not isinstance(receipt, dict) or not receipt.get('id'):
@@ -46,7 +55,8 @@ class ReplyDelivery:
         incoming = f'in:{self.config.account_id}:{self.target}:{self.data["id"]}'
         key = f'reply:{self.config.account_id}:{self.target}:{self.data["id"]}' if sequence == 1 else f'reply-part:{self.config.account_id}:{self.target}:{self.data["id"]}:{sequence}'
         self.store.chat.record(self.config.account_id, 'group' if self.group else 'user', self.target, 'assistant', part, key,
-            at=time.time(), status='sent' if self.state_current() else 'sent_stale', reply_to=incoming)
+            at=time.time(), status='sent' if self.state_current() else 'sent_stale', reply_to=incoming,
+            **receipt_metadata(receipt))
         self.source_ids.append(self.store.db.execute('SELECT id FROM chat_messages WHERE event_key=?', (key,)).fetchone()[0])
         self.store.record_result('sent', f'对话回复第 {sequence}/{total} 段已发送', category='message', event='message.segment_sent',
             details={'segment_index': sequence, 'segment_count': total, 'sent_message_id': receipt['id']})
@@ -80,7 +90,7 @@ class ReplyDelivery:
             key = f'reply-part:{self.config.account_id}:{self.target}:{self.data["id"]}:{sequence}'
             self.store.chat.record(self.config.account_id,'group' if self.group else 'user',self.target,'assistant',label,key,
                 attachment_count=1,meme_id=meme['id'],at=time.time(),source='meme',status='sent' if self.state_current() else 'sent_stale',
-                reply_to=f'in:{self.config.account_id}:{self.target}:{self.data["id"]}')
+                reply_to=f'in:{self.config.account_id}:{self.target}:{self.data["id"]}', **receipt_metadata(receipt))
             self.source_ids.append(self.store.db.execute('SELECT id FROM chat_messages WHERE event_key=?',(key,)).fetchone()[0])
             self.bot.memes.sent(self.sid,meme)
             self.store.record_result('sent','表情包已发送',category='message',event='meme.sent',details={'sent_message_id':receipt['id']})
@@ -89,6 +99,7 @@ class ReplyDelivery:
             self.store.log('warn','表情包发送失败，文字回复已保留',category='message',event='meme.send_failed',details=exception_details(error))
 
     async def send(self, content, prepared=None, update=None, meme=None, meme_candidates=None):
+        content = public_reply(content)
         rules = self.config.rules
         if meme and not self.bot.memes.current(meme): meme = None
         # Reserve a media bubble; existing maximum is conservative (four total).

@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>HayBot · 工作台设计提案</title>
+  <link rel="stylesheet" href="./prototype.css">
+</head>
+<body>
+  <a class="skip" href="#content">跳转到主要内容</a>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar" aria-label="主导航"></aside>
+    <div class="workspace">
+      <header class="topbar">
+        <div class="row"><button class="icon-btn mobile-menu" data-action="menu" aria-label="打开导航">☰</button><span id="breadcrumb"></span></div>
+        <div class="row"><span class="prototype-label">交互原型 <span>· 示例数据</span></span><select id="theme-choice" aria-label="主题配色"><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select><button class="icon-btn" data-drawer="design" aria-label="查看设计说明">?</button></div>
+      </header>
+      <main id="content" tabindex="-1">
+        <div class="page-heading"><div><div class="eyebrow" id="eyebrow"></div><h1 id="page-title"></h1><p id="page-description"></p></div><div class="row" id="page-actions"></div></div>
+        <nav class="tabs" id="tabs" aria-label="页内导航"></nav>
+        <div id="page"></div>
+        <footer class="page-footer"><span><i class="status-dot"></i> 本地工作空间</span><span>方案 01 · 2026.10.28</span></footer>
+      </main>
+    </div>
+  </div>
+  <div id="overlay-root"></div><div id="toast" role="status" aria-live="polite"></div>
+  <script src="./secondary.js"></script><script src="./app.js"></script>
+</body>
+</html>

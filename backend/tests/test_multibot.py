@@ -176,7 +176,7 @@ async def test_two_bots_handle_same_message_independently_and_share_model_capaci
     await asyncio.gather(*(runtime.bot.handle(event) for runtime in runtimes))
     assert peak == 1 and len(sends) == 2
     assert {token for token, _ in sends} == {'QQBot token-1', 'QQBot token-2'}
-    assert {message['messages'][0]['content'] for message in generations} == {'persona-0', 'persona-1'}
+    assert {message['messages'][0]['content'].split('\n\n[平台会话上下文]',1)[0] for message in generations} == {'persona-0', 'persona-1'}
     for index, runtime in enumerate(runtimes):
         assert runtime.store.stats()['received'] == 1 and runtime.store.stats()['sent'] == 1
         assert runtime.store.stats()['total_tokens'] == 13

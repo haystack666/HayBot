@@ -1,6 +1,6 @@
 from urllib.parse import quote
 from fastapi import Depends, HTTPException, Query
-from pydantic import Field
+from pydantic import Field, field_validator
 from .config import StrictModel
 from .android import AndroidConfig, AndroidUnavailable
 
@@ -11,11 +11,23 @@ class DeviceBody(StrictModel):
     dpi: int = Field(default=240, ge=120, le=640)
     memory_mb: int = Field(default=2048, ge=1024, le=8192)
     initialize: bool = True
-    google_play: bool = False
+    google_play: bool = True
 
 class TaskBody(StrictModel):
     goal: str = Field(min_length=1, max_length=3000)
     device_id: str = Field(default='', pattern=r'^(?:[0-9a-f]{32})?$')
+
+
+class DeviceRenameBody(StrictModel):
+    name: str = Field(min_length=1, max_length=60)
+
+    @field_validator('name')
+    @classmethod
+    def valid_name(cls, value):
+        value = value.strip()
+        if not value or any(ord(char) < 32 or ord(char) == 127 for char in value):
+            raise ValueError('手机名称需为 1–60 个字符，不能包含换行或控制字符')
+        return value
 
 
 def register_android_routes(app, scoped_runtime):
@@ -56,6 +68,12 @@ def register_android_routes(app, scoped_runtime):
     @app.get('/api/bots/{bot_id}/android/devices/{device_id}')
     async def device(device_id:str,runtime=Depends(scoped_runtime)):
         result=await service().gateway.request('GET',path(runtime,device_id))
+        if service().login_paused(runtime.id,device_id):result['owner_login']=True
+        return result
+
+    @app.patch('/api/bots/{bot_id}/android/devices/{device_id}')
+    async def rename(device_id:str,body:DeviceRenameBody,runtime=Depends(scoped_runtime)):
+        result=await service().gateway.request('PATCH',path(runtime,device_id),body.model_dump())
         if service().login_paused(runtime.id,device_id):result['owner_login']=True
         return result
 
@@ -106,6 +124,11 @@ def register_android_routes(app, scoped_runtime):
     async def apps(device_id:str,runtime=Depends(scoped_runtime)):
         return await service().gateway.request('GET',path(runtime,device_id)+'/apps')
 
+    @app.post('/api/bots/{bot_id}/android/devices/{device_id}/desktop',status_code=202)
+    async def desktop(device_id:str,runtime=Depends(scoped_runtime)):
+        if service().busy(runtime.id):raise HTTPException(409,'请先停止安卓任务')
+        return await service().gateway.request('POST',path(runtime,device_id)+'/desktop')
+
     @app.post('/api/bots/{bot_id}/android/devices/{device_id}/apps/{app_id}/install',status_code=202)
     async def install(device_id:str,app_id:str,runtime=Depends(scoped_runtime)):
         from urllib.parse import quote
@@ -125,6 +148,26 @@ def register_android_routes(app, scoped_runtime):
     @app.post('/api/bots/{bot_id}/android/tasks/{task_id}/cancel')
     async def cancel(task_id:str,runtime=Depends(scoped_runtime)):
         return await service().cancel(runtime.id,task_id)
+
+    @app.post('/api/bots/{bot_id}/android/tasks/{task_id}/resume',status_code=202)
+    async def resume(task_id:str,runtime=Depends(scoped_runtime)):
+        task=service().get(runtime.id,task_id)
+        devices=(await service().gateway.request('GET',path(runtime)))['devices']
+        if task['device_id'] not in [d['id'] for d in devices]:raise HTTPException(404,'当前 Bot 未绑定此设备')
+        return service().resume(runtime.id,task_id)
+
+    @app.post('/api/bots/{bot_id}/android/tasks/{task_id}/deliver')
+    async def deliver(task_id:str,runtime=Depends(scoped_runtime)):
+        import json,re
+        s=service();task=s.get(runtime.id,task_id);cfg=s.config(runtime.id)
+        if task['state']!='completed' or task['origin'].get('source')!='web':raise HTTPException(409,'仅支持已完成的网页任务结果')
+        if task['notification'] in ('sent','sending','unknown'):raise HTTPException(409,'已发送或发送结果未知，不自动重发')
+        if not re.search(r'发(?:送)?给(?:主人|我)|告诉(?:主人|我)',task['goal']):raise HTTPException(409,'原任务未要求发送给主人')
+        if runtime.store.load().transport!='napcat' or not cfg.qq_enabled or not cfg.qq_owner_id or not s.valid_origin(task):raise HTTPException(409,'授权主人或账号已变化，不能发送')
+        origin={**task['origin'],'notify_owner':cfg.qq_owner_id}
+        with s.db:s.db.execute('UPDATE android_tasks SET origin=?,notification=? WHERE id=?',(json.dumps(origin),'ready',task_id))
+        await s.completion_callback(runtime.id,task_id)
+        return s.get(runtime.id,task_id)
 
     @app.get('/api/bots/{bot_id}/android/tasks/{task_id}/diagnostics')
     async def diagnostics(task_id:str,runtime=Depends(scoped_runtime)):

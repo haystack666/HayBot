@@ -87,7 +87,7 @@ class ProactiveService:
         memory_context = await self.bot.memory.context(sid, instruction)
         memory_stamp = self.bot.memory.stamp(sid)
         history = self.store.history(f'user:{recipient}:{recipient}', min(config.rules.rounds, 2))
-        messages = [{'role': 'system', 'content': config.rules.prompt + memory_context + schedule_context}, *history, {'role': 'user', 'content':
+        messages = [{'role': 'system', 'content': config.rules.prompt + memory_context + schedule_context + self.bot.diary.chat_context(recipient)}, *history, {'role': 'user', 'content':
             '现在请主动发起一句私聊。结合已有对话，遵循设定的人格，简短自然，用一到两句话即可。'
             '不要声称知道用户此刻的状态，不要施压要求回复。只输出要发送的消息正文。\n本次要求：' + instruction}]
         result = await self.bot.generate(config.ollama, messages, config.ollama.max_tokens)
@@ -136,6 +136,7 @@ class ProactiveService:
         self.busy = True
         sending = False
         try:
+            diary_context = self.bot.diary.chat_context(recipient) if generated else ''
             content = await self.generate(config, recipient, instruction) if generated else instruction
             sid = self.store.scopes.ensure(config.account_id, 'user', recipient, recipient)['id']
             day = self.bot.schedule.for_scope(sid)
@@ -163,6 +164,8 @@ class ProactiveService:
             reason = self.reason(final, fresh, self.clock(), kind, manual)
             if final.account_id != config.account_id or final.proactive != config.proactive:
                 reason = '配置已变更，取消本次消息'
+            if generated and self.bot.diary.chat_context(recipient)!=diary_context:
+                reason = '日记分享范围或内容已变化，取消本次消息'
             if (schedule_stamp is not None and not day.matches(schedule_stamp)) or (memory_stamp is not None and not self.bot.memory.matches(sid, memory_stamp)):
                 reason = '日程已变化，取消基于旧安排的主动消息'
             if not manual and kind != 'reminder' and fresh['last_received'] != contact['last_received']:
@@ -181,6 +184,7 @@ class ProactiveService:
                 def still_current():
                     fresh=self.store.load()
                     return (fresh.account_id==config.account_id and fresh.proactive==config.proactive
+                        and (not generated or self.bot.diary.chat_context(recipient)==diary_context)
                         and (schedule_stamp is None or day.matches(schedule_stamp))
                         and (memory_stamp is None or self.bot.memory.matches(sid,memory_stamp)))
                 data=await self.bot.napcat.send_text(False,recipient,content,before_send=still_current)
@@ -198,7 +202,7 @@ class ProactiveService:
             if not data.get('id'):
                 raise httpx.RemoteProtocolError('QQ 未返回消息确认')
             at = self.clock()
-            self.store.proactive_sent(event_id, at, self.next_idle(config, at))
+            self.store.proactive_sent(event_id, at, self.next_idle(config, at), receipt=data)
             self.store.log('info', '主动消息已确认送达', category='proactive', event='proactive.sent', details={'push_id': event_id, 'sent_message_id': data['id']})
             self.store.set_capability(config.account_id, recipient, 'supported', '独立主动消息发送成功', at)
             if kind != 'test' and (memory_stamp is None or self.bot.memory.matches(sid, memory_stamp)) and (schedule_stamp is None or day.matches(schedule_stamp)):

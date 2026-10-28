@@ -141,7 +141,15 @@ class Store:
         if not rounds:
             return []
         row = self.db.execute('SELECT value FROM history WHERE key=?', (key,)).fetchone()
-        return json.loads(row['value'])[-rounds * 2:] if row else []
+        messages = json.loads(row['value'])[-rounds * 2:] if row else []
+        from .reply_envelope import public_reply
+        for message in messages:
+            if message.get('role') == 'assistant' and isinstance(message.get('content'), str):
+                try:
+                    message['content'] = public_reply(message['content'], history=True)
+                except ValueError:
+                    message['content'] = '[此前一次回复格式异常，正文不可用]'
+        return messages
 
     def save_history(self, key, messages, rounds):
         with self.db:
@@ -152,6 +160,8 @@ class Store:
     def clear_history(self):
         with self.db:
             self.db.execute('DELETE FROM history')
+            self.db.execute("INSERT OR REPLACE INTO chat_meta(key,value) VALUES ('history_floor',?)",
+                            (str(self.db.execute('SELECT COALESCE(MAX(id),0) FROM chat_messages').fetchone()[0]),))
 
     def contact(self, app_id, recipient):
         row = self.db.execute('SELECT * FROM proactive_contacts WHERE app_id=? AND id=?', (app_id, recipient)).fetchone()
@@ -207,7 +217,7 @@ class Store:
             if row and row['reminder_id'] and status in ('sent','failed','skipped','unknown'):
                 self.db.execute("UPDATE proactive_reminders SET status=?,detail=? WHERE id=? AND status!='cancelled'", (status, detail, row['reminder_id']))
 
-    def proactive_sent(self, event_id, at, next_idle):
+    def proactive_sent(self, event_id, at, next_idle, receipt=None):
         with self.db:
             row = self.db.execute('SELECT * FROM proactive_events WHERE id=?', (event_id,)).fetchone()
             if not row or row['status'] == 'sent':
@@ -218,8 +228,9 @@ class Store:
                 (at, next_idle, int(row['kind'] in ('idle','greeting')), row['app_id'], row['recipient']))
             if row['reminder_id']:
                 self.db.execute("UPDATE proactive_reminders SET status='sent',detail='QQ 已接收' WHERE id=?", (row['reminder_id'],))
+            from .message_quotes import receipt_metadata
             self.chat._record(row['app_id'], 'user', row['recipient'], 'assistant', row['content'],
-                              f'push:{event_id}', at=at, source=row['kind'])
+                              f'push:{event_id}', at=at, source=row['kind'], **receipt_metadata(receipt))
             self.db.execute('UPDATE statistics SET sent=sent+1 WHERE id=1')
             self._log('info', '主动消息已发送')
 

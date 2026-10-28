@@ -145,3 +145,15 @@ async def test_voice_cannot_promise_retry_deadline_or_unknown_success(tmp_path,p
     assert result and forbidden not in result
     if state=='unknown':assert '确认' in result
     await tasks.close();await manager.close()
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('reply',['刚刷到这条，给你看看：https://www.coolapk.com/feed/12345','[无需回应]','给你看看：https://www.coolapk.com/feed/99999'])
+async def test_share_reply_is_natural_but_preserves_observed_links(tmp_path,reply):
+    manager,tasks,bridge,bot=await setup_bridge(tmp_path)
+    bot.generate=AsyncMock(return_value={'message':{'content':reply}})
+    task={'goal':'浏览酷安发给主人','state':'completed','result':'已收集并整理1条','progress':{'links':[{'url':'https://www.coolapk.com/feed/12345'}]}}
+    try:
+        text=await AndroidVoice(bridge).compose(bot,'completed',task,lambda:True)
+        assert 'https://www.coolapk.com/feed/12345' in text
+        assert '99999' not in text and '已收集并整理' not in text
+    finally:await tasks.close();await manager.close()

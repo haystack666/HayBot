@@ -51,6 +51,48 @@ class NapCatConfig(StrictModel):
         return self
 
 
+class GroupOverride(StrictModel):
+    account_id: str = Field(min_length=1, max_length=128)
+    target_id: str = Field(min_length=1, max_length=128)
+    mode: Literal['mentions', 'natural', 'quiet', 'off'] = 'natural'
+    activity: Literal['reserved', 'balanced', 'active'] = 'balanced'
+
+
+class GroupOwner(StrictModel):
+    account_id: str = Field(min_length=1, max_length=128)
+    sender_id: str = Field(min_length=1, max_length=128)
+
+
+class GroupChatConfig(StrictModel):
+    mode: Literal['mentions', 'natural', 'quiet', 'off'] = 'mentions'
+    activity: Literal['reserved', 'balanced', 'active'] = 'balanced'
+    public_persona: str = Field(default='你是一位自然友好、有自己看法的群聊成员。像平常聊天一样简洁接话，不抢话，不强行延续话题。', max_length=6000)
+    interests: str = Field(default='', max_length=3000)
+    character_name: str = Field(default='', max_length=80)
+    owner_relationship: str = Field(default='', max_length=1500)
+    owners: list[GroupOwner] = Field(default_factory=list, max_length=100)
+    cooldown_seconds: int = Field(default=20, ge=0, le=600)
+    max_replies_per_hour: int = Field(default=60, ge=1, le=300)
+    overrides: list[GroupOverride] = Field(default_factory=list, max_length=100)
+
+    @model_validator(mode='after')
+    def unique_groups(self):
+        keys = [(item.account_id, item.target_id) for item in self.overrides]
+        if len(keys) != len(set(keys)):
+            raise ValueError('同一账号和群不能重复配置')
+        if len({item.account_id for item in self.owners}) != len(self.owners):
+            raise ValueError('同一接入账号只能配置一个群聊 Owner')
+        return self
+
+    def is_owner(self, account_id, sender):
+        return any(item.account_id == account_id and item.sender_id == sender for item in self.owners)
+
+    def policy(self, account_id, target_id):
+        override = next((item for item in self.overrides if item.account_id == account_id and item.target_id == target_id), None)
+        return {'mode': override.mode if override else self.mode,
+                'activity': override.activity if override else self.activity}
+
+
 class OllamaConfig(StrictModel):
     # Retain the persisted field name for existing installations and API clients.
     provider_id: str = Field(default='', pattern=r'^(?:[a-f0-9]{32})?$')
@@ -205,6 +247,7 @@ class MemeConfig(StrictModel):
 class Settings(StrictModel):
     transport: Literal['qq_official','napcat'] = 'qq_official'
     napcat: NapCatConfig = Field(default_factory=NapCatConfig)
+    group_chat: GroupChatConfig = Field(default_factory=GroupChatConfig)
     qq: QQConfig = Field(default_factory=QQConfig)
     ollama: OllamaConfig = Field(default_factory=OllamaConfig)
     rules: RulesConfig = Field(default_factory=RulesConfig)

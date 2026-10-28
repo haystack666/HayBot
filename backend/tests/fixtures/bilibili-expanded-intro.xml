@@ -1,0 +1,10 @@
+<hierarchy>
+  <node package="tv.danmaku.bili" resource-id="tv.danmaku.bili:id/tab_title" text="简介" content-desc="" bounds="[18,456][56,483]" />
+  <node package="tv.danmaku.bili" resource-id="tv.danmaku.bili:id/tab_title" text="评论" content-desc="" bounds="[119,456][157,483]" />
+  <node package="tv.danmaku.bili" resource-id="tv.danmaku.bili:id/author_name" text="FC投资人S" content-desc="" bounds="[81,515][177,542]" />
+  <node package="tv.danmaku.bili" resource-id="tv.danmaku.bili:id/title" text="【球王视角】穆里尼奥又听我话，国家德比战术博弈碾压，B站唯一懂球？皇马怎么赢得。（姆巴佩球王降临，贝林厄姆齐达内plus？ 居莱尔，巴尔韦德阵眼）" content-desc="" bounds="[18,588][663,695]" />
+  <node package="tv.danmaku.bili" resource-id="tv.danmaku.bili:id/views" text="6.9万" content-desc="6.9万播放" bounds="[18,704][90,729]" />
+  <node package="tv.danmaku.bili" resource-id="tv.danmaku.bili:id/desc" text="BV1U7nQ65EnK &#10;r-&#10; &#10;巴塞罗那  穆里尼奥  皇马  梅西  皇家马德里  居莱尔  &#10;球王  姆巴佩  维尼修斯  亚马尔  &#10; " content-desc="" bounds="[18,729][702,916]" />
+  <node package="tv.danmaku.bili" resource-id="tv.danmaku.bili:id/title" text="合集 · 足球集锦，杂谈，比赛分析类" content-desc="" bounds="[32,1042][362,1072]" />
+  <node package="tv.danmaku.bili" resource-id="tv.danmaku.bili:id/title" text="功夫女足" content-desc="" bounds="[222,1118][720,1147]" />
+</hierarchy>

@@ -20,7 +20,7 @@ def configure(store,url='ws://127.0.0.1:3001'):
 
 
 @asynccontextmanager
-async def napcat_server(online=True,account=10001,disconnect_on_send=False):
+async def napcat_server(online=True,account=10001,disconnect_on_send=False,quoted_message=None):
     calls=[];connections=[]
     async def handler(ws):
         connections.append(ws)
@@ -29,7 +29,9 @@ async def napcat_server(online=True,account=10001,disconnect_on_send=False):
             if r['action']=='never_reply':continue
             if disconnect_on_send and r['action'].startswith('send_'):
                 await ws.close();return
-            data={'user_id':account,'nickname':'测试 NapCat'} if r['action']=='get_login_info' else {'online':online,'good':True} if r['action']=='get_status' else {'message_id':456}
+            data=(quoted_message if r['action']=='get_msg' else
+                  {'user_id':account,'nickname':'测试 NapCat'} if r['action']=='get_login_info' else
+                  {'online':online,'good':True} if r['action']=='get_status' else {'message_id':456})
             await ws.send(json.dumps({'status':'ok','retcode':0,'data':data,'echo':r['echo']}))
     async with serve(handler,'127.0.0.1',0) as server:
         yield 'ws://127.0.0.1:'+str(server.sockets[0].getsockname()[1]),calls,connections

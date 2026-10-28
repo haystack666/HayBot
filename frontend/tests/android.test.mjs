@@ -11,3 +11,7 @@ test('empty numeric fields stay editable but are rejected before saving', () => 
   assert.throws(() => androidConfigPayload({ max_steps: '2', timeout_minutes: '' }), /时限/)
   assert.deepEqual(androidConfigPayload({ max_steps: '15', timeout_minutes: '5' }), { max_steps: 15, timeout_minutes: 5 })
 })
+test('manual stage budgets support long tasks beyond the former 60 step ceiling', () => {
+ assert.deepEqual(androidConfigPayload({adaptive_budget:false,max_steps:'600',timeout_minutes:'90'}),{adaptive_budget:false,max_steps:600,timeout_minutes:90})
+ assert.throws(()=>androidConfigPayload({max_steps:'10001',timeout_minutes:'90'}))
+})

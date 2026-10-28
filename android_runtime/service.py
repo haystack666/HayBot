@@ -10,7 +10,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from .engine import AndroidEngine, DeviceCreate, Action, RuntimeFailure
+from .engine import AndroidEngine, DeviceCreate, DeviceRename, Action, RuntimeFailure
 
 
 class GoogleProfile(BaseModel):
@@ -82,6 +82,10 @@ def create_app(engine=None, token=None):
         job = app.state.operations.get(device_id)
         return app.state.engine.get(bot_id, device_id) if job and not job.done() else await app.state.engine.status(bot_id, device_id)
 
+    @app.patch('/bots/{bot_id}/devices/{device_id}')
+    async def rename(bot_id: str, device_id: str, body: DeviceRename):
+        return app.state.engine.rename(bot_id, device_id, body.name)
+
     @app.post('/bots/{bot_id}/devices/{device_id}/stop')
     async def stop(bot_id: str, device_id: str):
         idle(device_id)
@@ -110,11 +114,24 @@ def create_app(engine=None, token=None):
         job=app.state.operations.get(device_id)
         return await status(app.state.engine,bot_id,device_id,refresh=not job or job.done())
 
+    @app.post('/bots/{bot_id}/devices/{device_id}/desktop', status_code=202)
+    async def desktop(bot_id: str, device_id: str):
+        from .desktop import arrange
+        from .provisioning import save
+        e=app.state.engine;e.get(bot_id,device_id);idle(device_id)
+        e.check_lease(device_id,'');e.require_automation(device_id)
+        save(e,device_id,'desktop','queued','等待整理桌面')
+        async def run():
+            try:await arrange(e,bot_id,device_id)
+            except RuntimeFailure:pass
+        app.state.operations[device_id]=asyncio.create_task(run())
+        return {'accepted':True}
+
     @app.post('/bots/{bot_id}/devices/{device_id}/apps/{app_id}/install', status_code=202)
     async def install(bot_id: str, device_id: str, app_id: str):
-        from .provisioning import APPS, save
+        from .provisioning import INITIAL_APPS, save
         e=app.state.engine;e.get(bot_id,device_id);idle(device_id)
-        if app_id not in APPS: raise HTTPException(404,'应用不存在')
+        if app_id not in INITIAL_APPS: raise HTTPException(404,'初始化仅支持 Via 浏览器和 Google 套件')
         e.check_lease(device_id,'');e.require_automation(device_id)
         save(e,device_id,app_id,'queued','等待初始化')
         async def run():
@@ -151,6 +168,16 @@ def create_app(engine=None, token=None):
     async def observe(bot_id: str, device_id: str, lease: str = Query(default='', max_length=64), automated: bool = False):
         idle(device_id)
         return await app.state.engine.observe(bot_id, device_id, lease, automated=automated)
+
+    @app.get('/bots/{bot_id}/devices/{device_id}/clipboard')
+    async def clipboard(bot_id: str, device_id: str, lease: str = Query(min_length=1,max_length=64)):
+        idle(device_id)
+        return await app.state.engine.clipboard(bot_id,device_id,lease)
+
+    @app.post('/bots/{bot_id}/devices/{device_id}/cleanup')
+    async def cleanup(bot_id: str, device_id: str, lease: str = Query(min_length=1,max_length=64)):
+        idle(device_id)
+        return await app.state.engine.cleanup(bot_id,device_id,lease)
 
     @app.post('/bots/{bot_id}/devices/{device_id}/action')
     async def action(bot_id: str, device_id: str, body: Action, lease: str = Query(default='', max_length=64)):

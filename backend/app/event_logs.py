@@ -8,7 +8,7 @@ import re
 import time
 from urllib.parse import urlsplit, urlunsplit
 
-CATEGORIES = ('system', 'qq', 'message', 'model', 'memory', 'schedule', 'proactive', 'config')
+CATEGORIES = ('system', 'qq', 'message', 'model', 'memory', 'schedule', 'proactive', 'config', 'diary')
 LEVELS = ('debug', 'info', 'warn', 'error')
 FIELDS = {'model', 'provider', 'provider_type', 'duration_ms', 'input_tokens', 'output_tokens', 'total_tokens',
           'http_status', 'error_type', 'error_code', 'retry_in', 'attempt', 'message_id', 'stage', 'reason', 'count',

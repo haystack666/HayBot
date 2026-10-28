@@ -305,6 +305,15 @@ def create_app(data_dir=None, static_dir=None):
             raise HTTPException(404, '当前机器人中不存在此会话')
         return result
 
+    @app.get('/api/bots/{bot_id}/group-chats')
+    async def group_chats(runtime: BotRuntime = Depends(scoped_runtime)):
+        config=runtime.store.load()
+        rows=runtime.store.db.execute("SELECT target_id,title,updated FROM chat_conversations WHERE app_id=? AND kind='group' ORDER BY updated DESC LIMIT 100",(config.account_id,)).fetchall()
+        groups=[{**dict(row),'policy':config.group_chat.policy(config.account_id,row['target_id'])} for row in rows]
+        decisions=[dict(row) for row in runtime.store.db.execute('SELECT id,target,at,state,reason,message_id FROM group_decisions WHERE app_id=? ORDER BY id DESC LIMIT 30',(config.account_id,))]
+        return {'account_id':config.account_id,'groups':groups,'decisions':decisions,
+                'inbox':runtime.bot.group_chat.snapshot()}
+
     def public_settings(runtime):
         config = runtime.store.load().model_dump()
         config['qq']['secret_set'] = bool(config['qq'].pop('secret'))
@@ -323,7 +332,7 @@ def create_app(data_dir=None, static_dir=None):
         async with runtime.control_lock, app.state.manager.config_lock:
             if runtime.bot.state != 'stopped':
                 raise HTTPException(409, '请先停止当前机器人再保存配置')
-            if runtime.bot.schedule.lock.locked() or runtime.bot.memory.busy:
+            if runtime.bot.schedule.lock.locked() or runtime.bot.memory.busy or runtime.bot.diary.lock.locked():
                 raise HTTPException(409, '日程正在生成，请等待完成后再保存配置')
             app.state.manager.assert_unique_app_id(c.account_id, runtime.id)
             old = runtime.store.load()
@@ -366,6 +375,7 @@ def create_app(data_dir=None, static_dir=None):
     async def status(runtime: BotRuntime = Depends(scoped_runtime)):
         return {'state': runtime.bot.state, 'stats': runtime.bot.stats,
                 'start_error': runtime.start_error, 'inbox': runtime.bot.inbox.snapshot(),
+                'group_inbox': runtime.bot.group_chat.snapshot(),
                 'jobs': len(runtime.bot.jobs) + int(runtime.proactive.busy) + int(runtime.bot.schedule.lock.locked()) + int(runtime.bot.memory.busy),
                 'uptime': int(time.time() - runtime.started), 'logs': runtime.store.logs()}
 
@@ -523,6 +533,8 @@ def create_app(data_dir=None, static_dir=None):
     register_meme_routes(app, scoped_runtime)
     from .qzone_routes import register_qzone_routes
     register_qzone_routes(app,scoped_runtime)
+    from .diary_routes import register_diary_routes
+    register_diary_routes(app,scoped_runtime)
 
     from .android_routes import register_android_routes
     register_android_routes(app, scoped_runtime)

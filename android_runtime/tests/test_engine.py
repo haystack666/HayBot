@@ -45,6 +45,17 @@ class Guest:
             return b'1\n'
         return b'ok'
 
+@pytest.mark.asyncio
+async def test_clipboard_returns_only_public_share_links_and_requires_lease(tmp_path):
+    e=AndroidEngine(tmp_path,Guest());d=await e.create('a',DeviceCreate(name='phone'));await e.start('a',d['id'])
+    lease=await e.claim('a',d['id'])
+    async def clipboard(*args):return json.dumps('private text https://www.coolapk.com/feed/74612141?share=1 https://example.com/secret').encode()
+    e.u2=clipboard
+    try:
+        assert await e.clipboard('a',d['id'],lease)=={'links':['https://www.coolapk.com/feed/74612141']}
+        with pytest.raises(RuntimeFailure):await e.clipboard('a',d['id'],'wrong')
+    finally:e.close()
+
 
 @pytest.mark.asyncio
 async def test_observation_preserves_large_xml_and_tail_security_nodes(tmp_path):
@@ -310,3 +321,24 @@ async def test_new_google_phone_pins_image_for_future_rebuild(tmp_path):
     await e.stop('a',d['id']);await e.remove_container('a',d['id']);await e.start('a',d['id'])
     assert 'sha256:'+'a'*64 in [c for c in guest.calls if c[:2]==('docker','run')][-1]
     e.close()
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('remaining',[False,True])
+@pytest.mark.parametrize('clear_button',[False,True])
+async def test_cleanup_verifies_home_and_stopped_processes(tmp_path,remaining,clear_button):
+    guest=Guest();e=AndroidEngine(tmp_path,guest)
+    d=await e.create('a',DeviceCreate(name='phone'));await e.start('a',d['id']);lease=await e.claim('a',d['id'])
+    async def command(*args,**kwargs):
+        if args[-3:]==('pm','list','packages'):return b'package:tv.danmaku.bili\n'
+        if args[-3:]==('dumpsys','activity','recents'):return b'ACTIVITY MANAGER RECENT TASKS\n  * Recent #0: Task{#1 type=home}\n'
+        if 'resolve-activity' in args:return b'com.android.launcher3/.Launcher\n'
+        if args[-2:]==('ps','-A'):return b'USER PID NAME\nu0 1 tv.danmaku.bili:player\n' if remaining else b'USER PID NAME\nshell 2 uiautomator\n'
+        return await guest(*args,**kwargs)
+    async def u2(*args):return json.dumps({'package':'com.android.launcher3','recents_cleared':clear_button}).encode()
+    e.command=command;e.u2=u2
+    try:
+        result=await e.cleanup('a',d['id'],lease)
+        assert result['home'] is True
+        assert result['background_cleared'] is (not remaining)
+        with pytest.raises(RuntimeFailure):await e.cleanup('a',d['id'],'wrong')
+    finally:e.close()

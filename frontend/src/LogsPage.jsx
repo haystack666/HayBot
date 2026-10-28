@@ -11,7 +11,7 @@ import { duration, logCategories, logLevels, logQuery, mergeLogPages, readLogFil
 const icons = { error: AlertCircle, warn: AlertTriangle, info: Info, debug: Search }
 const at = value => new Date(value * 1000).toLocaleString('zh-CN', { hour12: false })
 const fields = { batch_count: '合并用户消息数', batch_id: '消息批次编号', segment_index: '当前气泡序号', segment_count: '本次气泡总数', stage: '处理阶段', model: '模型', provider: '供应商', provider_type: '接口类型', duration_ms: '耗时', input_tokens: '输入 Token', output_tokens: '输出 Token', total_tokens: '总 Token', http_status: 'HTTP 状态', error_type: '异常类型', error_code: '错误码', reason: '详细原因', retry_in: '重试等待（秒）', attempt: '尝试次数', count: '数量', image_count: '图片数量', state: '状态', trigger: '触发类型', request_url: '服务地址', request_operation: '请求操作', message_id: 'QQ 消息 ID', sent_message_id: '发送确认 ID', revision: '日程版本' }
-const stages = { chat: '对话回复', schedule: '日程生成', memory: '记忆整理', proactive: '主动消息', embedding: '记忆嵌入', rerank: '记忆重排' }
+const stages = { chat: '对话回复', schedule: '日程生成', memory: '记忆整理', proactive: '主动消息', embedding: '记忆嵌入', rerank: '记忆重排', diary: '日记写作', diary_review: '日记核对' }
 
 function Level({ level }) { const Icon = icons[level] || Info; return <span className={`event-level event-level-${level}`}><Icon size={13} />{logLevels[level] || level}</span> }
 function Metadata({ event }) {

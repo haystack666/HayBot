@@ -3,6 +3,7 @@ import asyncio
 import re
 import time
 from urllib.parse import quote
+from .message_quotes import receipt_metadata
 
 
 WARNING = (
@@ -39,7 +40,7 @@ class ResetCommands:
             self.store.log('warn', 'QQ 未确认重置指令提示送达', category='message', event='reset.notice_unconfirmed')
             return False
         self.store.chat.record(config.account_id, 'group' if group else 'user', target, 'assistant', content,
-            f'reset:{config.account_id}:{target}:{data["id"]}:1', at=time.time(), source='reset')
+            f'reset:{config.account_id}:{target}:{data["id"]}:1', at=time.time(), source='reset', **receipt_metadata(receipt))
         self.store.record_result('sent', '重置指令提示已发送', category='message', event='reset.notice_sent')
         return True
 

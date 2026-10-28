@@ -51,6 +51,8 @@ class ConversationInbox:
         # Reuse the Bot key; pending CDN URLs/message content are never duplicated in plaintext.
         if self.db.execute('SELECT 1 FROM message_inbox WHERE message_id=?', (source['id'],)).fetchone():
             return False
+        if self.db.execute('SELECT 1 FROM group_inbox WHERE message_id=?', (source['id'],)).fetchone():
+            return False
         legacy = self.db.execute('SELECT at FROM seen WHERE id=?', (f'{owner["target"]}:{payload["d"]["id"]}',)).fetchone()
         if legacy and source['recorded_at'] <= legacy['at']:
             return False
@@ -91,19 +93,27 @@ class ConversationInbox:
         return True
 
     def pack(self, rows, config):
-        selected, texts, attachments = [], [], []
+        selected, texts, attachments, parts = [], [], [], []
         for row in rows:
             payload = json.loads(self.store.cipher.decrypt(row['payload'].encode()))
             text = self.bot.message_text(payload['d'])
             images = image_attachments(payload['d'])
-            if selected and (len('\n'.join([*texts, text])) > 12000 or len(attachments) + len(images) > 3):
+            part = {'content': text, **({'_quote': payload['d']['_quote']} if '_quote' in payload['d'] else {})}
+            if selected and (len('\n'.join([*texts, text])) > 12000 or len(attachments) + len(images) > 3
+                             or sum(len(self.bot.conversation_text(p)) for p in [*parts, part]) > 20000):
                 break
             selected.append((row, payload))
             texts.append(text)
+            parts.append(part)
             attachments.extend(images)
         payload = copy.deepcopy(selected[-1][1])
         payload['d']['content'] = '\n'.join(texts)
         payload['d']['attachments'] = attachments
+        from .conversation_context import participants
+        payload['d']['_message_parts'] = [{'message_id': str(item['d']['id']), **participants(item['d'])}
+                                         for _, item in selected]
+        if any('_quote' in part for part in parts):
+            payload['d']['_quote_parts'] = parts
         return {'id': uuid.uuid4().hex, 'scope_id': rows[0]['scope_id'], 'app_id': rows[0]['app_id'],
                 'ids': [row['message_id'] for row, _ in selected], 'payload': payload,
                 'reply_to': self.db.execute('SELECT event_key FROM chat_messages WHERE id=?', (selected[-1][0]['message_id'],)).fetchone()[0]}

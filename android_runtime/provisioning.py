@@ -9,6 +9,7 @@ from pathlib import Path
 from .engine import RuntimeFailure
 
 APPS = {
+    'via': {'name':'Via 浏览器','package':'mark.via','url':'https://res.viayoo.com/v1/via-release-cn.apk','page':'https://viayoo.com/zh-cn/'},
     'defaults': {'name':'中国大陆系统默认设置','package':'cn.haybot.wallpaper','url':'','page':''},
     'wallpaper': {'name':'HayBot 默认壁纸','package':'cn.haybot.wallpaper','url':'','page':''},
     'coolapk': {'name':'酷安','package':'com.coolapk.market','url':'https://dl.coolapk.com/down?pn=com.coolapk.market&id=NDU5OQ&h=46bb9d98&from=from-web','page':'https://www.coolapk.com/'},
@@ -18,6 +19,7 @@ APPS = {
     'chrome': {'name':'Chrome','package':'com.android.chrome','url':'','page':'https://play.google.com/store/apps/details?id=com.android.chrome'},
     'playstore': {'name':'Google Play Store','package':'com.android.vending','url':'','page':'https://support.google.com/googleplay/answer/1727131'},
 }
+INITIAL_APPS = ('via', 'playstore')
 GMS = ('com.google.android.gsf','com.google.android.gms','com.android.vending')
 
 
@@ -32,7 +34,7 @@ def parse_badging(text, app, abi):
 
 
 async def provision(engine, bot_id, device_id, app):
-    if app not in APPS: raise RuntimeFailure('未知应用')
+    if app not in INITIAL_APPS: raise RuntimeFailure('初始化仅支持 Via 浏览器和 Google 套件')
     async with engine.lock(device_id):
         engine.get(bot_id,device_id);engine.check_lease(device_id,'');engine.require_automation(device_id)
         serial=await engine.serial(device_id)
@@ -47,7 +49,7 @@ async def provision(engine, bot_id, device_id, app):
         if not local.exists():
             url=APPS[app]['url']
             if not url:
-                detail='请通过酷安或 Play Store 安装；也可在宿主 packages 目录导入对应官方 APK'
+                detail='请使用 Via 访问官方来源，或在宿主 packages 目录导入对应官方 APK'
                 if app=='playstore':detail='当前系统未配套 GMS。需部署兼容的 GMS 系统镜像，再由 owner 登录；不自动拼装 Google 服务包'
                 return save(engine,device_id,app,'needs_install',detail)
             save(engine,device_id,app,'downloading','正在下载官方安装包')
@@ -58,7 +60,7 @@ async def provision(engine, bot_id, device_id, app):
             proc=await asyncio.create_subprocess_exec(*args,stdout=asyncio.subprocess.DEVNULL,stderr=asyncio.subprocess.PIPE)
             try:
                 _,err=await proc.communicate()
-                if proc.returncode:raise RuntimeFailure('官方安装包下载失败，请检查网络或更新酷安下载入口')
+                if proc.returncode:raise RuntimeFailure('官方安装包下载失败，请检查网络或安装来源')
                 if not partial.exists() or partial.stat().st_size<1024:raise RuntimeFailure('下载内容不是有效安装包')
                 partial.replace(local)
             except BaseException:
@@ -103,23 +105,30 @@ def save(engine,device_id,app,state,detail,metadata=None):
 async def status(engine,bot_id,device_id,refresh=True):
     engine.get(bot_id,device_id)
     saved={r['app']:json.loads(r['data']) for r in engine.db.execute('SELECT * FROM provisioned WHERE device_id=?',(device_id,))}
-    installed=set()
+    installed=set(); checked=False
     try:
         if not refresh:raise RuntimeFailure('busy')
         async with engine.lock(device_id):
             serial=await engine.serial(device_id)
             raw=(await engine.command('adb','-s',serial,'shell','pm','list','packages')).decode()
             installed={line.removeprefix('package:').strip() for line in raw.splitlines()}
+            checked=True
     except RuntimeFailure: pass
     items=[]
-    for key,value in APPS.items():
+    for key in INITIAL_APPS:
+        value=APPS[key]
         item={'id':key,**value,**saved.get(key,{'state':'not_checked','detail':'尚未安装或检查'})}
         if key not in ('defaults','wallpaper') and any(p in installed for p in value.get('packages',[value['package']])):
             item.update(state='installed',detail='已安装；登录由 owner 自行完成')
         if key=='playstore':
-            missing=[p for p in GMS if p not in installed]
-            item['missing_services']=missing
-            if missing:item.update(state='needs_gms',detail='缺少配套 Google 服务；需兼容的 GMS 系统镜像，不能仅安装商店 APK')
+            item['name']='Google 套件（含 Play 商店）'
+            if checked:
+                missing=[p for p in GMS if p not in installed]
+                item['missing_services']=missing
+                if missing:item.update(state='needs_gms',detail='缺少配套 Google 服务；需兼容的 GMS 系统镜像，不能仅安装商店 APK')
+                else:item.update(state='installed',detail='Google 服务框架、Google Play 服务和 Play 商店均已安装；账号由 owner 登录')
+            else:item.update(state='not_checked',detail='手机运行后检查 Google 服务框架、Play 服务和商店是否齐全')
         items.append(item)
-    return {'apps':items}
+    from .desktop import status as desktop_status
+    return {'apps':items,'desktop':desktop_status(engine,bot_id,device_id)}
 

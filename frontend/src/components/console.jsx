@@ -16,7 +16,7 @@ export function Field({ label, id, hint, full, children }) {
 }
 
 export function Notice({ children, alert = false }) {
-  return <div className="notice" role={alert ? 'alert' : undefined}><CircleHelp size={16} /><div>{children}</div></div>
+  return <div className={`notice ${alert ? 'notice-alert' : ''}`} role={alert ? 'alert' : undefined}><CircleHelp size={16} /><div>{children}</div></div>
 }
 
 export function Logs({ logs, limit = 100 }) {

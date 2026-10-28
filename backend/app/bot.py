@@ -16,6 +16,11 @@ from .schedule import ScheduleService, ScheduleError, ScheduleChanged
 from .schedule_stream import schedule_response
 from .event_logs import exception_details
 from .memory_store import StaleMemory
+from .message_quotes import prepare_quote, message_text, conversation_text, scene_value, receipt_metadata
+from .reply_envelope import public_reply
+from .conversation_context import instruction as conversation_instruction, participants, sender_id, group_message
+from .group_chat import GroupParticipation, GROUP_EVENTS, is_group, explicitly_addressed
+from . import group_identity
 
 
 class Bot:
@@ -51,6 +56,12 @@ class Bot:
         from .napcat import NapCatTransport
         self.napcat = NapCatTransport(self)
         self.command_slots = asyncio.Semaphore(4)
+        self.platform_name = ''
+        self.platform_id = ''
+        self.group_identity = group_identity.GroupSelfIdentity(self)
+        self.group_chat = GroupParticipation(self)
+        from .diary import DiaryService
+        self.diary = DiaryService(self.store,self)
 
     @property
     def stats(self):
@@ -199,6 +210,7 @@ class Bot:
             with contextlib.suppress(asyncio.CancelledError):
                 await self.task
         await self.inbox.stop()
+        await self.group_chat.stop()
         await self.napcat.close()
         jobs = list(self.jobs)
         for job in jobs:
@@ -264,9 +276,12 @@ class Bot:
                                 if p.get('t') in ('READY', 'RESUMED'):
                                     if p['t'] == 'READY':
                                         self.session = d['session_id']
+                                        self.platform_name = (d.get('user') or {}).get('username', '')[:80]
+                                        self.platform_id = str((d.get('user') or {}).get('id') or '')[:128]
                                     self.state = 'connected'
                                     ready = True
                                     self.inbox.start()
+                                    self.group_chat.start()
                                     retries = 0
                                     self.store.log('info', 'QQ 官方 WebSocket 已连接', category='qq', event='qq.connected', details={'state': 'connected'})
                                 elif ready:
@@ -296,14 +311,15 @@ class Bot:
     def capture_incoming(self, payload, config=None):
         config = config or self.store.load()
         kind, data = payload.get('t'), payload.get('d', {})
-        if kind not in ('C2C_MESSAGE_CREATE', 'GROUP_AT_MESSAGE_CREATE'):
+        if kind not in ('C2C_MESSAGE_CREATE', *GROUP_EVENTS):
             return
         author = data.get('author', {})
         if author.get('bot'):
             return
-        sender = author.get('user_openid') or author.get('member_openid') or author.get('id')
-        target = data.get('group_openid') if kind == 'GROUP_AT_MESSAGE_CREATE' else sender
-        content = (data.get('content') or '').strip()
+        sender = sender_id(data, is_group(kind))
+        target = data.get('group_openid') if is_group(kind) else sender
+        prepare_quote(data, self.store.chat, config, is_group(kind), target)
+        content = (data.get('content') or '').strip() or self.message_text(data)
         attachments = image_attachments(data)
         if not sender or not target or not data.get('id') or len(content) > 12000 or (not content and not attachments):
             return
@@ -316,14 +332,20 @@ class Bot:
                 pass
         name = author.get('username') or author.get('nickname') or ''
         name = name.strip()[:80] if isinstance(name, str) else ''
-        self.store.chat.record(config.account_id, 'group' if kind == 'GROUP_AT_MESSAGE_CREATE' else 'user', target,
+        self.store.chat.record(config.account_id, 'group' if is_group(kind) else 'user', target,
                                'user', content, f'in:{config.account_id}:{target}:{data["id"]}',
                                sender_id=sender, sender_name=name, attachment_count=len(attachments),
-                               at=at, source='incoming', status='received')
+                               at=at, source='incoming', status='received', platform_id=str(data['id']),
+                               platform_index=scene_value(data, 'msg_idx'), quote_context=data.get('_quote'),
+                               participant_context={**participants(data), **({'addressed_to_self': explicitly_addressed(payload,self,config)} if is_group(kind) else {})})
 
     @staticmethod
     def message_text(data):
-        return re.sub(r'<@!?\d+>', '', data.get('content') or '').strip()
+        return message_text(data)
+
+    @staticmethod
+    def conversation_text(data):
+        return conversation_text(data)
 
     def is_command(self, text):
         from .android_qq import AndroidQQ
@@ -332,15 +354,16 @@ class Bot:
 
     async def receive(self, payload):
         c = self.store.load()
+        await self.group_identity.resolve(payload,c)
         self.capture_incoming(payload, c)
         kind, data = payload.get('t'), payload.get('d', {})
-        if kind not in ('C2C_MESSAGE_CREATE', 'GROUP_AT_MESSAGE_CREATE') or data.get('author', {}).get('bot'):
+        if kind not in ('C2C_MESSAGE_CREATE', *GROUP_EVENTS) or data.get('author', {}).get('bot'):
             return
-        group = kind == 'GROUP_AT_MESSAGE_CREATE'
+        group = is_group(kind)
         if not (c.qq.group_reply if group else c.qq.private_reply):
             return
         author = data.get('author', {})
-        user = author.get('user_openid') or author.get('member_openid') or author.get('id')
+        user = sender_id(data, group)
         target = data.get('group_openid') if group else user
         text = self.message_text(data)
         if not user or not target or not data.get('id') or len(text) > 12000 or not (text or image_attachments(data)):
@@ -350,6 +373,13 @@ class Bot:
         source = self.store.db.execute('SELECT * FROM chat_messages WHERE event_key=?', (f'in:{c.account_id}:{target}:{data["id"]}',)).fetchone()
         if not source or source['id'] <= owner['source_floor']:
             return
+        if group:
+            mode = c.group_chat.policy(c.account_id, target)['mode']
+            if mode == 'off' or (mode == 'mentions' and not explicitly_addressed(payload,self,c)):
+                return
+            if mode in ('natural','quiet') and not (explicitly_addressed(payload,self,c) and self.is_command(text)):
+                self.group_chat.enqueue(payload,owner,source)
+                return
         if self.is_command(text):
             async def command():
                 async with self.command_slots:
@@ -362,7 +392,7 @@ class Bot:
         if accepted and not group:
             self.store.remember_contact(c.account_id, user, time.time(), data['id'])
 
-    async def handle(self, payload, *, batch=None):
+    async def handle(self, payload, *, batch=None, group_turn=None):
         key = None
         claimed = False
         images_requested = False
@@ -370,18 +400,25 @@ class Bot:
         log_started = time.monotonic()
         try:
             c = self.store.load()
+            await self.group_identity.resolve(payload,c)
             if batch is None:
                 self.capture_incoming(payload, c)
             kind, d = payload.get('t'), payload.get('d', {})
-            group = kind == 'GROUP_AT_MESSAGE_CREATE'
-            if kind not in ('C2C_MESSAGE_CREATE', 'GROUP_AT_MESSAGE_CREATE'):
+            group = is_group(kind)
+            if kind not in ('C2C_MESSAGE_CREATE', *GROUP_EVENTS):
                 return
             if not (c.qq.group_reply if group else c.qq.private_reply) or d.get('author', {}).get('bot'):
                 return
+            if group and (c.group_chat.policy(c.account_id,d.get('group_openid'))['mode']=='off'
+                          or group_turn is None and not explicitly_addressed(payload,self,c)):
+                return
+            if group_turn is not None and not self.group_chat.live(group_turn):
+                return
             author = d.get('author', {})
-            user = author.get('user_openid') or author.get('member_openid') or author.get('id')
+            user = sender_id(d, group)
             target = d.get('group_openid') if group else user
-            text = re.sub(r'<@!?\d+>', '', d.get('content') or '').strip()
+            text = self.message_text(d)
+            context_text = self.conversation_text(d)
             attachments = image_attachments(d)
             if not target or not user or not d.get('id') or (not text and not attachments) or len(text) > 12000:
                 return
@@ -402,14 +439,14 @@ class Bot:
                 return
             if batch is None and incoming and incoming['id'] <= owner['source_floor']:
                 return
-            reset_action = self.reset.action(text)
+            reset_action = self.reset.action(text) if group_turn is None else None
             if reset_action is not None:
                 if self.schedule_reply_expired(d, command='重置') or not self.store.claim(f'{target}:{d["id"]}'):
                     return
                 await self.reset.handle(reset_action, sid, key, c, d, group, target)
                 return
-            schedule_command = text in ('/查看日程', '/重置日程')
-            memory_command = text == '/查看记忆' or text.startswith('/记住') or text.startswith('/忘记')
+            schedule_command = group_turn is None and text in ('/查看日程', '/重置日程')
+            memory_command = group_turn is None and (text == '/查看记忆' or text.startswith('/记住') or text.startswith('/忘记'))
             if schedule_command or memory_command:
                 if not self.store.claim(f'{target}:{d["id"]}'):
                     return
@@ -420,11 +457,11 @@ class Bot:
                     await day.sync_commitments()
                     await self.send_schedule_text(response, c, d, group, target, source='memory')
                 return
-            if self.android and await self.android.handle(self,text,c,d,group,target,user,sid,incoming['id'] if incoming else 0,batch,key):
+            if group_turn is None and self.android and await self.android.handle(self,text,c,d,group,target,user,sid,incoming['id'] if incoming else 0,batch,key):
                 return True
-            if key in self.pending or (batch is None and time.time() - self.last.get(key, 0) < c.rules.cooldown):
+            if key in self.pending or (batch is None and group_turn is None and time.time() - self.last.get(key, 0) < c.rules.cooldown):
                 return
-            if batch is None and not self.store.claim(f'{target}:{d["id"]}'):
+            if batch is None and group_turn is None and not self.store.claim(f'{target}:{d["id"]}'):
                 return
             self.pending.add(key)
             self.tasks_by_key[key] = asyncio.current_task()
@@ -433,7 +470,7 @@ class Bot:
                 self.store.log('info', f'合并 {len(batch["ids"])} 条用户消息，开始回复', category='message', event='message.batch_started')
             self.store.log('info', '开始处理群消息' if group else '开始处理单聊消息', category='message', event='message.received')
             images_requested = bool(attachments)
-            user_message = {'role': 'user', 'content': text}
+            user_message = {'role': 'user', 'content': context_text}
             if attachments:
                 provider = self.provider(c.ollama)
                 if not provider.vision:
@@ -448,26 +485,40 @@ class Bot:
                         raise ImageMessageError('当前模型不支持看图，请在配置平台选择支持视觉的模型。')
                 async with self.image_lock:
                     images, notes = await load_images(self.client, attachments)
-                user_message['content'] = text or '请看看这些图片或表情包，结合当前对话自然回复。'
+                user_message['content'] = context_text or '请看看这些图片或表情包，结合当前对话自然回复。'
                 if notes:
                     user_message['content'] += '\n' + '\n'.join(notes)
                 user_message['images'] = images
-            schedule_context = await day.context()
+            schedule_context = '' if group_turn else await day.context()
             schedule_stamp = day.stamp()
-            dialogue_instruction = day.dialogue.instruction()
-            memory_context = await self.memory.context(sid, text or '图片对话中的相关信息')
+            dialogue_instruction = '' if group_turn else day.dialogue.instruction()
+            memory_context = '' if group_turn else await self.memory.context(sid, context_text or '图片对话中的相关信息')
             memory_stamp = self.memory.stamp(sid)
-            old = self.store.history(key, c.rules.rounds)
-            meme_query = '\n'.join([*(m.get('content','') for m in old[-4:]), text])
-            meme_candidates = await self.memes.candidates(sid, meme_query)
+            old = [] if group_turn else self.store.history(key, c.rules.rounds)
+            meme_query = '\n'.join([*(m.get('content','') for m in old[-4:]), context_text])
+            meme_candidates = [] if group_turn else await self.memes.candidates(sid, meme_query)
             if (not day.matches(schedule_stamp) or not self.memory.matches(sid,memory_stamp)
                     or batch is not None and not self.inbox.live(batch)):
                 raise ScheduleChanged('对话状态已变化，已停止基于旧上下文的生成')
             meme_instruction = self.memes.instruction(meme_candidates, bool(dialogue_instruction))
             qzone = getattr(self, 'qzone', None)
-            qzone_context = qzone.chat_context(sid) if qzone else ''
+            qzone_context = qzone.chat_context(sid) if qzone and not group_turn else ''
+            diary_context = self.diary.chat_context(user,group)
             android_context = self.android.chat_context(self,user,group) if self.android else ''
-            messages = [{'role': 'system', 'content': c.rules.prompt + android_context + memory_context + schedule_context + qzone_context + dialogue_instruction + meme_instruction}, *old, user_message]
+            conversation_context = conversation_instruction(self.store, c, d, group, owner, incoming['id'] if incoming else 0, batch, bot=self)
+            if group:
+                user_message['content'] = group_message(d, user_message['content'], attribution=group_identity.attribution(self,c,d,explicitly_addressed(payload,self,c)))
+            persona = c.rules.prompt
+            if group:
+                persona = group_identity.persona(c, d)
+                persona += group_identity.context(self, c, d, explicitly_addressed(payload,self,c))
+            if group_turn:
+                persona += ('\n[用户填写的公开兴趣]\n' + c.group_chat.interests +
+                           '\n你正在自然参与群聊。根据本群公开背景回应本轮选中的消息，简洁自然，有具体内容再开口。'
+                           '不得引入私聊、手机任务或私人日程；不能声称实际操作了手机。不要朗读身份元数据。')
+                # Include the complete public burst, even when the selected speaker spoke first.
+                conversation_context += '\n[本轮群聊公开背景]\n' + json.dumps(self.group_chat.public_messages(c,target,group_turn['through_id'],group_turn['ids']),ensure_ascii=False)
+            messages = [{'role': 'system', 'content': persona + android_context + memory_context + schedule_context + qzone_context + diary_context + dialogue_instruction + meme_instruction + conversation_context}, *old, user_message]
             try:
                 answer = await self.generate(c.ollama, messages, max(2048, c.ollama.max_tokens) if dialogue_instruction or meme_instruction else c.ollama.max_tokens, thinking=self.provider(c.ollama).chat_thinking)
             except (ValueError, httpx.HTTPError):
@@ -478,7 +529,7 @@ class Bot:
             self.store.record_usage(answer)
             if not day.matches(schedule_stamp) or not self.memory.matches(sid, memory_stamp):
                 raise ScheduleChanged('日程已变化，已跳过基于旧安排生成的回复')
-            if qzone and qzone.chat_context(sid) != qzone_context:
+            if qzone and not group_turn and qzone.chat_context(sid) != qzone_context:
                 raise ScheduleChanged('空间动态或 Owner 已变化，已跳过基于旧动态生成的回复')
             content = (answer.get('message', {}).get('content') or '').strip()
             update, prepared, meme = None, None, None
@@ -502,9 +553,19 @@ class Bot:
                     meme = None
                     meme_fallback = False
                     self.store.log('warn', '模型返回的对话日程调整无效，已保留原安排')
+            try:
+                content = public_reply(content)
+            except ValueError:
+                if group_turn:
+                    raise
+                content = '这次回复没整理好，请再说一下。'
+                update, prepared, meme, meme_fallback = None, None, None, False
+                self.store.log('warn', '回复包含无效传输结构，已阻止原始内容发送', category='model', event='message.envelope_invalid')
             content = content[:c.rules.max_length]
             if not content:
                 raise ValueError('模型没有返回回答正文')
+            if group_turn is not None and not await self.group_chat.review(group_turn, content):
+                return
             # 统一保守地在五分钟以内回复，避免模型推理或补发事件超时。
             if d.get('timestamp'):
                 try:
@@ -516,24 +577,25 @@ class Bot:
                         return
                 except (ValueError, TypeError):
                     pass
-            history_text = text
+            history_text = context_text
             if attachments:
-                history_text = f'{text}\n[用户发送了 {len(attachments)} 张图片或表情包，原图仅供当轮识别。]'.strip()
+                history_text = f'{context_text}\n[用户发送了 {len(attachments)} 张图片或表情包，原图仅供当轮识别。]'.strip()
             from .reply_delivery import ReplyDelivery
-            delivery = ReplyDelivery(self, c, d, group, target, user, sid, key, day, schedule_stamp, memory_stamp, old, history_text, batch=batch)
+            delivery = ReplyDelivery(self, c, d, group, target, user, sid, key, day, schedule_stamp, memory_stamp, old, history_text, batch=batch, group_turn=group_turn)
+            delivery.diary_context = diary_context
             receipt = await delivery.send(content, prepared, update, meme=meme, meme_candidates=meme_candidates if meme_fallback else None)
             schedule_stamp = delivery.schedule_stamp
             if not isinstance(receipt, dict) or not receipt.get('id'):
                 self.store.log('warn', 'QQ 未确认回复送达，未保存回复与记忆')
                 return
-            if day.matches(schedule_stamp) and self.memory.matches(sid, memory_stamp):
+            if not group_turn and day.matches(schedule_stamp) and self.memory.matches(sid, memory_stamp):
                 self.store.save_history(key, [*old, {'role': 'user', 'content': history_text}, {'role': 'assistant', 'content': content + delivery.meme_context}], c.rules.rounds)
-            if self.memory.matches(sid, memory_stamp):
+            if not group_turn and self.memory.matches(sid, memory_stamp):
                 await day.dialogue.semantic.observe(old, history_text, '\n\n'.join(delivery.confirmed),
                     {'kind': 'group' if group else 'user', 'target': target, 'sender_id': user, 'message_id': d['id']},
                     schedule_stamp, memory_stamp)
                 schedule_stamp = day.stamp()
-            if self.memory.matches(sid, memory_stamp):
+            if not group_turn and self.memory.matches(sid, memory_stamp):
                 sources = [*(batch['ids'] if batch else [incoming['id']] if incoming else []), *delivery.source_ids]
                 self.memory.enqueue(sid, f'reply:{c.account_id}:{target}:{d["id"]}', sources)
             if self.memory.matches(sid, memory_stamp):
@@ -547,7 +609,7 @@ class Bot:
             self.store.log('warn', str(error))
         except ImageMessageError as e:
             self.store.record_result('errors', f'回复失败：{e}', category='message', event='message.image_failed', details=exception_details(e))
-            if claimed:
+            if claimed and group_turn is None:
                 try:
                     if batch is not None and not self.inbox.mark_sending(batch):
                         return
@@ -559,7 +621,8 @@ class Bot:
                         self.store.log('warn', 'QQ 未确认图片提示送达')
                         return
                     self.store.chat.record(c.account_id, 'group' if group else 'user', target, 'assistant', str(e),
-                                           f'reply:{c.account_id}:{target}:{d["id"]}', at=time.time(), source='image_notice')
+                                           f'reply:{c.account_id}:{target}:{d["id"]}', at=time.time(), source='image_notice',
+                                           **receipt_metadata(notice))
                     self.last[key] = time.time()
                     if len(self.last) > 500:
                         self.last.pop(next(iter(self.last)))
@@ -621,8 +684,9 @@ class Bot:
         if len(chunks) > 4:
             raise ValueError('日程显示内容过长，请在网页查看完整日程')
         for sequence, chunk in enumerate(chunks, first_sequence):
-            await self.api('POST', f'/v2/{path}/{quote(target, safe="")}/messages', json={
+            receipt = await self.api('POST', f'/v2/{path}/{quote(target, safe="")}/messages', json={
                 'msg_type': 0, 'content': chunk, 'msg_id': data['id'], 'msg_seq': sequence})
             self.store.chat.record(config.account_id, 'group' if group else 'user', target, 'assistant', chunk,
-                f'{source}:{config.account_id}:{target}:{data["id"]}:{sequence}', at=time.time(), source=source)
+                f'{source}:{config.account_id}:{target}:{data["id"]}:{sequence}', at=time.time(), source=source,
+                **receipt_metadata(receipt))
             self.store.record_result('sent', '日程指令回复已发送')

@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class RuntimeFailure(ValueError):
@@ -32,6 +32,19 @@ class DeviceCreate(BaseModel):
     google_play: bool = False
 
 
+class DeviceRename(BaseModel):
+    model_config = {'extra': 'forbid'}
+    name: str = Field(min_length=1, max_length=60)
+
+    @field_validator('name')
+    @classmethod
+    def valid_name(cls, value):
+        value = value.strip()
+        if not value or any(ord(char) < 32 or ord(char) == 127 for char in value):
+            raise ValueError('手机名称需为 1–60 个字符，不能包含换行或控制字符')
+        return value
+
+
 class Action(BaseModel):
     model_config = {'extra': 'forbid'}
     kind: Literal['tap', 'swipe', 'text', 'key', 'open', 'wait', 'launch']
@@ -43,7 +56,7 @@ class Action(BaseModel):
     text: str = Field(default='', max_length=2000)
     key: Literal['home', 'back', 'recent', 'enter', 'delete', 'wake'] = 'home'
     url: str = Field(default='', max_length=2048)
-    app: Literal['coolapk','playstore','douyin','bilibili','xiaohongshu','chrome'] = 'coolapk'
+    app: Literal['via','coolapk','playstore','douyin','bilibili','xiaohongshu','chrome'] = 'via'
 
     @model_validator(mode='after')
     def valid_action(self):
@@ -158,12 +171,22 @@ class AndroidEngine:
         if not row:
             raise RuntimeFailure('设备不存在或未绑定当前 Bot')
         result = dict(row); result['config'] = json.loads(result['config'])
+        # The inventory name is authoritative, including after a system rollback.
+        result['config']['name'] = result['name']
         result['busy'] = device_id in self.leases
         result['owner_login'] = self.login_active(device_id)
         return result
 
     def list(self, bot_id):
         return [self.get(bot_id, row['id']) for row in self.db.execute('SELECT id FROM devices WHERE bot_id=? ORDER BY created', (bot_id,))]
+
+    def rename(self, bot_id, device_id, name):
+        name = DeviceRename(name=name).name
+        self.get(bot_id, device_id)
+        # Metadata only: no lease changes, device commands or task interruption.
+        with self.db:
+            self.db.execute('UPDATE devices SET name=? WHERE id=? AND bot_id=?', (name, device_id, bot_id))
+        return self.get(bot_id, device_id)
 
     def state(self, device_id, state, error=''):
         with self.db:
@@ -284,10 +307,14 @@ class AndroidEngine:
                 if current['state']=='running':break
                 await asyncio.sleep(2)
             else:return current
-            for app in ('defaults','wallpaper','coolapk','douyin','bilibili'):
+            for app in ('via',):
                 if self.login_active(device_id):break
                 try:await self.provision(bot_id,device_id,app)
                 except Exception:pass  # each app retains its own progress/error; no data reset
+            if not self.login_active(device_id):
+                from .desktop import arrange
+                try:await arrange(self,bot_id,device_id,automatic=True)
+                except RuntimeFailure:pass  # desktop keeps its own result and backup
         return self.get(bot_id,device_id)
 
     async def _start(self, bot_id, device_id, automated=False, image_override=None):
@@ -493,9 +520,65 @@ class AndroidEngine:
             if automated or lease: self.require_automation(device_id)
             return {'image': base64.b64encode(image).decode(), 'hierarchy': tree, 'at': time.time()}
 
+    async def cleanup(self,bot_id,device_id,lease):
+        async with self.lock(device_id):
+            self.get(bot_id,device_id);self.check_lease(device_id,lease);self.require_automation(device_id)
+            serial=await self.serial(device_id)
+            from .provisioning import APPS
+            installed=(await self.command('adb','-s',serial,'shell','pm','list','packages')).decode().splitlines()
+            packages=sorted({p for k,v in APPS.items() if k not in ('defaults','wallpaper') for p in v.get('packages',[v['package']]) if 'package:'+p in installed})
+            await self.command('adb','-s',serial,'shell','input','keyevent','3')
+            for package in packages:
+                self.check_lease(device_id,lease)
+                await self.command('adb','-s',serial,'shell','am','force-stop',package)
+            raw=await self.u2(serial,{'kind':'cleanup'})
+            result=json.loads(raw)
+            self.check_lease(device_id,lease)
+            home=(await self.command('adb','-s',serial,'shell','cmd','package','resolve-activity','--brief','-a','android.intent.action.MAIN','-c','android.intent.category.HOME')).decode()
+            package=result.get('package','')
+            processes=(await self.command('adb','-s',serial,'shell','ps','-A')).decode().splitlines()
+            running={line.split()[-1].split(':')[0] for line in processes if line.split()}
+            stopped=not bool(running.intersection(packages))
+            recents=(await self.command('adb','-s',serial,'shell','dumpsys','activity','recents')).decode()
+            task_headers=re.findall(r'^\s*\* Recent #\d+:.*$',recents,re.M)
+            recents_empty='ACTIVITY MANAGER RECENT TASKS' in recents and all('type=home' in task for task in task_headers)
+            recents_cleared=bool(result.get('recents_cleared')) or recents_empty
+            self.check_lease(device_id,lease)
+            return {'home':bool(package and package+'/' in home),'background_cleared':stopped and recents_cleared,'stopped_packages':packages,'recents_cleared':recents_cleared,'recents_empty':recents_empty}
+
+    async def clipboard(self, bot_id, device_id, lease):
+        async with self.lock(device_id):
+            self.get(bot_id,device_id)
+            self.require_automation(device_id)
+            self.check_lease(device_id,lease)
+            serial=await self.serial(device_id)
+            raw=await self.u2(serial,{'kind':'clipboard'})
+            self.check_lease(device_id,lease)
+            self.require_automation(device_id)
+            text=json.loads(raw)
+            if not isinstance(text,str) or len(text)>16384:raise RuntimeFailure('剪贴板内容无效或过长')
+            # Only return public share URLs, never unrelated clipboard text.
+            links=re.findall(r'https?://(?:www\.)?(?:coolapk\.com/feed/\d+|bilibili\.com/video/(?:BV[A-Za-z0-9]+|av\d+)|b23\.tv/[A-Za-z0-9]+)(?=[/?#\s。，）)]|$)',text)
+            return {'links':list(dict.fromkeys(links))[:10]}
+
     async def u2(self, serial, payload):
         # Fixed helper; payload is base64 JSON, never interpreted as shell or Python source.
-        code = "import sys,json,base64,uiautomator2 as u; d=u.connect(sys.argv[1]); p=json.loads(base64.b64decode(sys.argv[2])); print(d.dump_hierarchy() if p['kind']=='hierarchy' else d.send_keys(p['text'],clear=False))"
+        code = """import sys,json,base64,time,uiautomator2 as u
+d=u.connect(sys.argv[1]);p=json.loads(base64.b64decode(sys.argv[2]))
+if p['kind']=='cleanup':
+    d.press('recent');time.sleep(.5);cleared=False
+    for attempt in range(5):
+        for label in ('全部清除','清除全部','全部关闭','CLEAR ALL','Clear all'):
+            item=d(text=label)
+            if item.exists:item.click();cleared=True;break
+        if cleared:break
+        d.swipe_ext('right',scale=.8);time.sleep(.2)
+    if not cleared:
+        cleared=any(d(text=label).exists for label in ('没有最近使用的应用','没有最近运行的应用','无最近任务','No recent items','No recent apps'))
+    d.press('home');time.sleep(.3)
+    print(json.dumps({'package':d.app_current().get('package',''),'recents_cleared':cleared}))
+else:print(d.dump_hierarchy() if p['kind']=='hierarchy' else json.dumps(d.clipboard or '') if p['kind']=='clipboard' else d.send_keys(p['text'],clear=False))
+"""
         return await self.command('/opt/haybot-u2/bin/python', '-c', code, serial, base64.b64encode(json.dumps(payload).encode()).decode(), timeout=45)
 
     async def action(self, bot_id, device_id, action, lease=''):

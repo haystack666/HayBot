@@ -17,7 +17,7 @@ def event(mid,text,user='alice',group=None):
 
 def make(tmp_path):
     s=Store(tmp_path);c=s.load();c.qq.app_id='111';c.qq.group_reply=True;c.rules.cooldown=0;c.rules.split_delay=0;c.rules.debounce_seconds=.2;c.rules.debounce_max_wait=1; s.save(c)
-    b=Bot(s);b.state='connected';b.generate=AsyncMock(return_value={'message':{'content':'我想听，快说说！'},'prompt_eval_count':10,'eval_count':5});b.api=AsyncMock(return_value={'id':'ok'})
+    b=Bot(s);b.group_identity.fetch=AsyncMock(return_value={});b.state='connected';b.generate=AsyncMock(return_value={'message':{'content':'我想听，快说说！'},'prompt_eval_count':10,'eval_count':5});b.api=AsyncMock(return_value={'id':'ok'})
     return s,b
 
 

@@ -309,7 +309,7 @@ async def test_two_bots_use_different_external_providers_concurrently(tmp_path):
         index = 1 if request.url.host == 'first.test' else 2
         assert request.headers['Authorization'] == f'Bearer key-{index}'
         payload = json.loads(request.content)
-        assert payload['model'] == f'model-{index}' and payload['messages'][0]['content'] == f'persona-{index}'
+        assert payload['model'] == f'model-{index}' and payload['messages'][0]['content'].split('\n\n[平台会话上下文]',1)[0] == f'persona-{index}'
         assert f'persona-{3-index}' not in str(payload)
         return httpx.Response(200, json=reply('openai_chat'))
     async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:

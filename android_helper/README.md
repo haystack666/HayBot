@@ -10,7 +10,9 @@ ANDROID_HOME=/path/to/android-sdk JAVA_HOME=/path/to/jdk python3 android_helper/
 
 The signing key stays in ignored `.android-runtime/wallpaper-signing.jks`; retain it when rebuilding for an existing deployment. No Google or other third-party APKs are bundled in the repository.
 
-New devices created through the web use initialization automatically. Each initializer records success separately and does not overwrite the wallpaper or system preferences again after successful application. Existing phones require an explicit initialization action. Other app packages can be placed in `.android-runtime/packages/<catalog-id>.apk`; installation checks the APK signature, package identity, transfer SHA-256 and device ABI. Existing app versions and account data are retained. Google Play requires an independently compatible GMS system image; the status page checks for the three required packages and does not claim readiness from a store APK alone.
+New devices created through the web now initialize only Via and the compatible Google system image. Existing apps and account data are retained; legacy social apps are no longer offered for automatic installation. Via can be imported as `.android-runtime/packages/via.apk`; installation checks signature, package identity, transfer SHA-256 and device ABI. Google readiness requires all three packages, not a store APK alone.
+
+The root-only `Desktop` entry point arranges the bundled AOSP Launcher3 with one Via shortcut, an empty dock and no search widget. It backs up launcher.db and launcher preferences under `/data/local/tmp/haybot-desktop-backups/<receipt>` before editing, disables new-app shortcuts, and uses a reversible resource overlay for the fixed search bar. It does not replace the launcher or clear installed app data. The runtime verifies the visible home screen and restores the backup on failure. Automatic initialization runs it once; later manual desktop changes are retained unless the user explicitly chooses to arrange again.
 
 Optional Google Play (Android 12 ARM64, independently tested):
 

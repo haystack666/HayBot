@@ -1,3 +1,4 @@
+import { usePageTabs, Section } from './components/PageTabs'
 import { useCallback, useEffect, useState } from 'react'
 import { Dialog } from 'radix-ui'
 import { CalendarDays, Clock3, LoaderCircle, MapPin, RefreshCw, Shirt, Sparkles } from 'lucide-react'
@@ -57,11 +58,12 @@ function ScopedSchedule({ config, update, active, busy, dirty, api, notify, mode
   const working = generating || snapshot?.busy || snapshot?.updating
   const current = plan?.activities[snapshot.current_index]
   const minute = snapshot?.now?.slice(11, 16) || '00:00'
+  const tabs = usePageTabs([['today','今日日程'],['history','历史与变更'],['settings','日程设置']])
   return <div className="schedule-page space-y-5">
-    <Panel title="角色的日常生活" subtitle="生活设定作为生成模板；每位用户拥有独立日程、穿着、事件与约定。">
+    {tabs.tabs}<Section show={tabs.value === 'settings'}><Panel title="角色的日常生活" subtitle="生活设定作为生成模板；每位用户拥有独立日程、穿着、事件与约定。">
       <div className="toggle-row !pt-0"><div><b>启用每日日程</b><p>让活动、穿着和已经发生的事件参与聊天；对话中确认的改约会实时同步到日程，无需报出具体时刻。</p></div><Switch aria-label="启用每日日程" checked={config.enabled} disabled={active || !!busy} onCheckedChange={value => update('enabled', value)} /></div>
       <fieldset disabled={active || !!busy} className="form-grid border-0 m-0 p-0 mt-5">
-        <Field label="生活设定" id="schedule-premise" full hint="填写身份、工作日与周末安排、作息和穿衣偏好。人格沿用「回复策略」，模型沿用当前 Bot 的选择。">
+        <Field label="生活设定" id="schedule-premise" full hint="填写身份、工作日与周末安排、作息和穿衣偏好。人格沿用「身份与私聊」，模型沿用当前 Bot 的选择。">
           <Textarea id="schedule-premise" rows={5} maxLength={6000} value={config.premise} onChange={e => update('premise', e.target.value)} placeholder="例如：经管系大一学生，周一到周五在学校上课，住校；周末回家。喜欢早起，晚上去图书馆，穿衣偏休闲。" />
         </Field>
         <Field label="日程时区" id="schedule-timezone" full hint="按此时区每天 00:00 更新；默认北京时间，与主动消息时区分别配置。">
@@ -72,9 +74,9 @@ function ScopedSchedule({ config, update, active, busy, dirty, api, notify, mode
       <p className="schedule-model">生成模型：<span>{model || '请先选择模型'}</span></p>
       <div className="schedule-commands"><div><code>/查看日程</code><span>在 QQ 查看今天的完整安排</span></div><div><code>/重置日程</code><span>重新生成今天的日程并立即生效</span></div></div>
     </Panel>
-    {dirty && <Notice>请先保存生活设定，再生成或重置日程。已有日程按保存的配置运行。</Notice>}
+    </Section>{dirty && <Notice>请先保存生活设定，再生成或重置日程。已有日程按保存的配置运行。</Notice>}
     {(error || snapshot?.error) && <Notice alert>{error || snapshot.error}。已有日程会保留，可检查模型后重试。</Notice>}
-    <Panel title="今日日程" subtitle={snapshot ? `${snapshot.date} · ${snapshot.timezone} · 当前 ${minute}` : '正在读取当天安排…'} action={<div className="action-row schedule-actions">
+    <Section show={tabs.value === 'today'}><Panel title="今日日程" subtitle={snapshot ? `${snapshot.date} · ${snapshot.timezone} · 当前 ${minute}` : '正在读取当天安排…'} action={<div className="action-row schedule-actions">
       <Button variant="outline" size="sm" disabled={working} onClick={() => refresh().catch(e => setError(e.message))} aria-label="刷新日程"><RefreshCw size={14} /></Button>
       <Button size="sm" variant={plan ? 'outline' : 'default'} disabled={!scopeId || !config.enabled || dirty || working || !!busy || !snapshot} onClick={() => plan ? setConfirmReset(true) : generate()}>
         {working ? <LoaderCircle size={14} className="spin" /> : plan ? <RefreshCw size={14} /> : <Sparkles size={14} />}
@@ -104,7 +106,7 @@ function ScopedSchedule({ config, update, active, busy, dirty, api, notify, mode
       {snapshot?.enabled && <p className="schedule-footer">下次更新：{new Date(snapshot.next_refresh * 1000).toLocaleString('zh-CN', { timeZone: snapshot.timezone, hour12: false })}（{snapshot.timezone}）。平台运行期间自动更新，重启后补齐当天日程。随机事件仅在发生后进入聊天上下文。</p>}
     </Panel>
     {!!plan?.commitment_conflicts?.length && <Notice alert>以下约定时间有冲突，请在记忆页面核对：{plan.commitment_conflicts.map(item => item.content).join('；')}</Notice>}
-    <ScheduleChanges {...{snapshot, api, notify}} />
+    </Section><Section show={tabs.value === 'history'}><ScheduleChanges {...{snapshot, api, notify}} /></Section>
     <Dialog.Root open={confirmReset} onOpenChange={setConfirmReset}><Dialog.Portal><Dialog.Overlay className="sheet-overlay" /><Dialog.Content className="bot-dialog"><Dialog.Title>重置当日日程</Dialog.Title><Dialog.Description>重新生成今天的全部安排、穿着和随机事件。成功后立即替换，生成失败会保留原日程；聊天记录不受影响。</Dialog.Description><div className="action-row mt-6"><Dialog.Close asChild><Button variant="outline">取消</Button></Dialog.Close><Button disabled={working || dirty} onClick={() => { setConfirmReset(false); generate(true) }}>重新生成</Button></div></Dialog.Content></Dialog.Portal></Dialog.Root>
   </div>
 }

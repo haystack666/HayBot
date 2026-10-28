@@ -9,6 +9,8 @@ function NotFound() {
 }
 function BotPage() {
   const { botId, page } = useParams()
+  if (page === 'providers') return <Navigate to={`/bots/${botId}/qq?view=models`} replace />
+  if (page === 'qzone') return <Navigate to={`/bots/${botId}/proactive?view=qzone`} replace />
   if (page === 'ollama') return <Navigate to={`/bots/${botId}/providers`} replace />
   return pages.some(item => item.id === page) ? <App key={botId} page={page} /> : <NotFound />
 }

@@ -24,6 +24,7 @@ async def setup_bridge(tmp_path):
     async def gateway(method,path,body=None,**kwargs):
         if path.endswith('/devices'):return {'devices':[{'id':'0'*32,'state':'running'}]}
         if path.endswith('/claim'):return {'lease':body['lease']}
+        if path.split('?')[0].endswith('/cleanup'):return {'home':True,'background_cleared':True}
         if path.split('?')[0].endswith('/observe'):return {'image':png(),'hierarchy':''}
         return {'ok':True}
     tasks.gateway.request=gateway
@@ -150,6 +151,7 @@ async def test_reset_during_screenshot_capture_prevents_image_send(tmp_path):
     original=tasks.gateway.request
     async def gateway(method,path,body=None,**kw):
         value=await original(method,path,body,**kw)
+        if path.split('?')[0].endswith('/cleanup'):return {'home':True,'background_cleared':True}
         if path.split('?')[0].endswith('/observe'):
             with bot.store.db:bot.store.db.execute('UPDATE user_scopes SET source_floor=999999')
         return value
@@ -247,3 +249,32 @@ async def test_login_during_official_upload_blocks_final_screenshot_send(tmp_pat
     await bot.handle(payload('/手机截图'))
     assert not any(call.args[1].endswith('/messages') for call in bot.api.await_args_list)
     await tasks.close();await manager.close()
+
+@pytest.mark.asyncio
+async def test_web_task_requested_owner_delivery_has_receipt_and_does_not_repeat(tmp_path):
+    manager,tasks,bridge,bot=await setup_bridge(tmp_path)
+    result='找到的帖子：https://www.coolapk.com/feed/74612141'
+    tasks.decide=AsyncMock(return_value={'done':True,'result':result})
+    try:
+        task=tasks.submit('default','0'*32,'收集酷安分享链接发给主人');await tasks.jobs[task['id']]
+        assert tasks.get('default',task['id'])['notification']=='sent'
+        assert bot.api.call_args.kwargs['json']['content']==result
+        assert '/10001/' in bot.api.call_args.args[1]
+        before=bot.api.call_count
+        await bridge.notify('default',task['id'])
+        assert bot.api.call_count==before
+        plain=tasks.submit('default','0'*32,'返回桌面');await tasks.jobs[plain['id']]
+        assert bot.api.call_count==before
+    finally:await tasks.close();await manager.close()
+
+@pytest.mark.asyncio
+async def test_web_owner_delivery_is_fenced_when_owner_changes(tmp_path):
+    manager,tasks,bridge,bot=await setup_bridge(tmp_path)
+    tasks.run=AsyncMock()
+    try:
+        task=tasks.submit('default','0'*32,'收集链接发给主人');await tasks.jobs[task['id']]
+        tasks.update(task['id'],state='completed',result='https://www.coolapk.com/feed/12345')
+        cfg=tasks.config('default');cfg.qq_owner_id='10003';tasks.save_config('default',cfg)
+        await bridge.notify('default',task['id'])
+        bot.api.assert_not_called()
+    finally:await tasks.close();await manager.close()

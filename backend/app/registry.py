@@ -118,7 +118,8 @@ class BotRuntime:
                 except asyncio.TimeoutError:
                     pass
         self.tasks = [asyncio.create_task(restore()), asyncio.create_task(self.proactive.run()),
-                      asyncio.create_task(self.bot.schedule.run()), asyncio.create_task(self.bot.memory.run()),asyncio.create_task(self.qzone.run())]
+                      asyncio.create_task(self.bot.schedule.run()), asyncio.create_task(self.bot.memory.run()),
+                      asyncio.create_task(self.qzone.run()),asyncio.create_task(self.bot.diary.run())]
 
     def request_start(self):
         self.store.set_enabled(True)
@@ -285,7 +286,7 @@ class BotManager:
                 if android_reference or provider_id in (config.ollama.provider_id, config.memory.embedding.provider_id, config.memory.rerank.provider_id,
                                    config.memes.embedding.provider_id,config.memes.rerank.provider_id):
                     references.append({**profile, 'state': runtime.bot.state if runtime else 'stopped',
-                                       'busy': bool(android and android.busy(profile['id']) or runtime and (runtime.proactive.busy or runtime.bot.jobs or runtime.bot.schedule.lock.locked()
+                                       'busy': bool(android and android.busy(profile['id']) or runtime and (runtime.proactive.busy or runtime.bot.jobs or runtime.bot.schedule.lock.locked() or runtime.bot.diary.lock.locked()
                                                                 or getattr(runtime.bot, 'memory', None) and runtime.bot.memory.busy
                                                                 or runtime.bot.memes.lock.locked()))})
             finally:

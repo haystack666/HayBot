@@ -6,7 +6,7 @@ export function pointOnScreen(clientX, clientY, rect, width, height) {
 }
 export function androidConfigPayload(config) {
   const result = { ...config }
-  for (const [key, label, max] of [['max_steps', '最多操作步数', 60], ['timeout_minutes', '任务时限', 20]]) {
+  for (const [key, label, max] of [['max_steps', '阶段最多操作步数', 10000], ['timeout_minutes', '阶段任务时限', 1440]]) {
     if (String(config[key]).trim() === '' || !Number.isInteger(Number(config[key])) || Number(config[key]) < 1 || Number(config[key]) > max) throw new Error(`${label}请填写1–${max}的整数`)
     result[key] = Number(config[key])
   }
@@ -18,6 +18,7 @@ export function androidConfigPayload(config) {
     }
     c.frame_interval_seconds = numeric(c.frame_interval_seconds, '采样间隔', 1, 10)
     c.batch_frames = numeric(c.batch_frames, '每批画面数', 3, 8)
+    c.buffering_wait_seconds = numeric(c.buffering_wait_seconds ?? 120, '视频缓冲等待', 30, 600)
     for (const p of Object.values(c.platforms || {})) {
       p.cooldown_minutes = numeric(p.cooldown_minutes, '评论冷却', 0, 1440)
       p.daily_limit = numeric(p.daily_limit, '每日评论上限', 1, 100)

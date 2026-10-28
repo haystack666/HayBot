@@ -12,6 +12,7 @@ from .memes import semantic_text
 from .retrieval import embed, rerank
 from .schedule_dialogue import DialogueReply
 from .event_logs import exception_details
+from .reply_envelope import extract_envelope, public_reply
 
 
 def requested(query):
@@ -22,16 +23,16 @@ def requested(query):
 
 
 def decode_reply(raw, candidates):
-    text = re.sub(r'^```(?:json)?\s*|\s*```$', '', raw.strip(), flags=re.I)
-    try: value = json.loads(text)
-    except ValueError:
-        if text.startswith(('{', '[')): raise ValueError('回复结构不完整') from None
+    parsed = extract_envelope(raw, expected=True)
+    if parsed is None:
+        if raw.strip().startswith(('{', '[')):raise ValueError('回复结构无效')
         return raw, None, None
+    value = dict(parsed.value)
     if not isinstance(value, dict) or 'reply' not in value: raise ValueError('回复结构无效')
     mid = value.pop('meme_id', None)
     envelope = DialogueReply.model_validate(value)
     chosen = next((c for c in candidates if c['id'] == mid), None) if isinstance(mid, str) else None
-    return envelope.reply.strip(), envelope.schedule_update, chosen
+    return public_reply(envelope.reply), None if parsed.mixed else envelope.schedule_update, chosen
 
 
 class MemeService:
@@ -145,8 +146,10 @@ class MemeService:
 
     def needs_choice(self, raw, candidates):
         try:
-            value=json.loads(re.sub(r'^```(?:json)?\s*|\s*```$', '', raw.strip(), flags=re.I))
+            parsed=extract_envelope(raw,expected=True)
         except ValueError:return True
+        if parsed is None or not parsed.complete:return True
+        value=parsed.value
         return not (isinstance(value,dict) and 'reply' in value and 'meme_id' in value
             and (value['meme_id'] is None or any(i['id']==value['meme_id'] for i in candidates)))
 

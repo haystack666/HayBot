@@ -34,10 +34,17 @@ class ChatArchive:
         if 'meme_id' not in columns:
             with self.db:
                 self.db.execute("ALTER TABLE chat_messages ADD COLUMN meme_id TEXT NOT NULL DEFAULT ''")
+        with self.db:
+            for column in ('platform_id', 'platform_index', 'quote_context', 'participant_context'):
+                if column not in columns:
+                    self.db.execute(f"ALTER TABLE chat_messages ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+            self.db.execute('CREATE INDEX IF NOT EXISTS chat_platform_id ON chat_messages(conversation_id,platform_id)')
+            self.db.execute('CREATE INDEX IF NOT EXISTS chat_platform_index ON chat_messages(conversation_id,platform_index)')
         self.db.execute('CREATE INDEX IF NOT EXISTS chat_reply_parent ON chat_messages(conversation_id,reply_to,id)')
 
     def _record(self, app_id, kind, target, role, content, event_key, *, sender_id='', sender_name='',
-                attachment_count=0, at=None, source='reply', status='sent', historical=False, activity_at=None, reply_to='', meme_id=''):
+                attachment_count=0, at=None, source='reply', status='sent', historical=False, activity_at=None, reply_to='', meme_id='',
+                platform_id='', platform_index='', quote_context=None, participant_context=None):
         if not content and not attachment_count:
             return False
         if self.db.execute('SELECT 1 FROM chat_messages WHERE event_key=?', (event_key,)).fetchone():
@@ -55,9 +62,12 @@ class ChatArchive:
         self.db.execute('INSERT OR IGNORE INTO chat_conversations VALUES (?,?,?,?,?,?)',
                         (conversation_id, app_id, kind, target, title, activity))
         self.db.execute('''INSERT INTO chat_messages
-            (conversation_id,event_key,role,sender_id,sender_name,content,attachment_count,at,recorded_at,source,status,historical,reply_to,meme_id)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
-            (conversation_id, event_key, role, sender_id, sender_name, content, attachment_count, at, now, source, status, int(historical), reply_to,meme_id))
+            (conversation_id,event_key,role,sender_id,sender_name,content,attachment_count,at,recorded_at,source,status,historical,reply_to,meme_id,
+             platform_id,platform_index,quote_context,participant_context)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+            (conversation_id, event_key, role, sender_id, sender_name, content, attachment_count, at, now, source, status, int(historical), reply_to,meme_id,
+             platform_id, platform_index, json.dumps(quote_context, ensure_ascii=False) if quote_context else '',
+             json.dumps(participant_context, ensure_ascii=False) if participant_context else ''))
         self.db.execute('UPDATE chat_conversations SET updated=MAX(updated,?) WHERE id=?', (activity, conversation_id))
         if kind == 'user' and role == 'user' and sender_name:
             self.db.execute('UPDATE chat_conversations SET title=? WHERE id=?', (title, conversation_id))
@@ -66,6 +76,73 @@ class ChatArchive:
     def record(self, *args, **kwargs):
         with self.db:
             return self._record(*args, **kwargs)
+
+    def recent_group(self, app_id, target, *, before, floor=0, limit=12):
+        """Public, attributed messages only; respect reset/forget and clear-history barriers."""
+        cleared = self.db.execute("SELECT value FROM chat_meta WHERE key='history_floor'").fetchone()
+        floor = max(floor, int(cleared['value']) if cleared else 0)
+        rows = self.db.execute('''SELECT m.*, p.id parent_id, p.sender_id parent_sender,
+                    p.platform_id parent_platform_id
+            FROM chat_messages m JOIN chat_conversations c ON c.id=m.conversation_id
+            LEFT JOIN chat_messages p ON p.conversation_id=m.conversation_id AND p.event_key=m.reply_to
+            LEFT JOIN user_scopes s ON s.app_id=c.app_id AND s.kind='group' AND s.target=c.target_id
+                AND s.sender_id=CASE WHEN m.role='user' THEN m.sender_id ELSE p.sender_id END
+            WHERE c.app_id=? AND c.kind='group' AND c.target_id=? AND m.id<? AND m.id>?
+                AND m.recorded_at>? AND m.historical=0
+                AND ((m.role='user' AND m.status='received' AND m.source='incoming')
+                    OR (m.role='assistant' AND m.status='sent' AND p.id>?))
+                AND CASE WHEN m.role='user' THEN m.id ELSE p.id END > COALESCE(s.source_floor,0)
+            ORDER BY m.id DESC LIMIT ?''',
+            (app_id, target, before, floor, time.time()-1800, floor, max(0,min(limit,20)))).fetchall()
+        result, budget = [], 6000
+        from .reply_envelope import public_reply
+        for row in rows:
+            content = row['content']
+            if row['role'] == 'assistant':
+                try:
+                    content = public_reply(content)
+                except ValueError:
+                    content = '[此前一次回复格式异常，正文不可用]'
+            item = {'message_id': row['platform_id'] or str(row['id']), 'role': row['role'],
+                    'sender_id': row['sender_id'] if row['role']=='user' else '',
+                    'sender_name': row['sender_name'] if row['role']=='user' else '当前机器人',
+                    'content': content[:1000], 'attachment_count': row['attachment_count']}
+            if len(content)>1000:
+                item['truncated'] = True
+            if row['role']=='assistant':
+                item['reply_to_sender_id'] = row['parent_sender']
+                item['reply_to_message_id'] = row['parent_platform_id']
+            if row['participant_context']:
+                item['participants'] = json.loads(row['participant_context'])
+            cost = len(json.dumps(item,ensure_ascii=False))
+            if cost > budget:
+                break
+            result.append(item)
+            budget -= cost
+        return list(reversed(result))
+
+    def find_platform(self, app_id, kind, target, reference):
+        if not reference:
+            return None
+        # Message IDs and reference indexes are only meaningful inside this bot/account and chat.
+        row = self.db.execute('''SELECT m.* FROM chat_messages m
+            JOIN chat_conversations c ON c.id=m.conversation_id
+            WHERE c.app_id=? AND c.kind=? AND c.target_id=?
+              AND (m.platform_id=? OR m.platform_index=? OR m.event_key=?)
+            ORDER BY m.id DESC LIMIT 1''',
+            (app_id, kind, target, reference, reference, f'in:{app_id}:{target}:{reference}')).fetchone()
+        return dict(row) if row else None
+
+    @staticmethod
+    def quote_body(row):
+        result = {'content': row['content'][:4000], 'sender_id': row['sender_id'],
+                  'sender_name': row['sender_name'] or ('当前机器人' if row['role'] == 'assistant' else ''),
+                  'is_bot': row['role'] == 'assistant'}
+        if row['attachment_count']:
+            result.update(attachment_count=row['attachment_count'], attachment_note='原消息含附件，原图或文件未读取。')
+        if len(row['content']) > 4000:
+            result['truncated'] = True
+        return result
 
     def import_legacy(self, app_id):
         if self.db.execute("SELECT 1 FROM chat_meta WHERE key='legacy_imported'").fetchone():
@@ -126,7 +203,7 @@ class ChatArchive:
             FROM chat_conversations c WHERE id=? AND app_id=?''', (conversation_id, app_id)).fetchone()
         if not conversation:
             return None
-        sql = 'SELECT id,role,sender_id,sender_name,content,attachment_count,at,source,status,historical,meme_id FROM chat_messages WHERE conversation_id=?'
+        sql = 'SELECT id,role,sender_id,sender_name,content,attachment_count,at,source,status,historical,meme_id,quote_context FROM chat_messages WHERE conversation_id=?'
         args = [conversation_id]
         if before is not None:
             sql += ' AND id<?'; args.append(before)
@@ -135,6 +212,8 @@ class ChatArchive:
         sql += ' ORDER BY id ' + ('ASC' if after is not None else 'DESC') + ' LIMIT ?'
         rows = self.db.execute(sql, (*args, limit + 1)).fetchall()
         items = [dict(row) for row in rows[:limit]]
+        for item in items:
+            item['quote_context'] = json.loads(item['quote_context']) if item['quote_context'] else None
         if app_id.startswith('napcat:'):
             for item in items:
                 if item['meme_id']:item['meme_original']=True
