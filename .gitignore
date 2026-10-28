@@ -25,3 +25,4 @@ frontend/dist/
 /docs/
 .superpowers/
 .android-runtime/
+.browser-runtime/
