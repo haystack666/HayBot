@@ -5,7 +5,7 @@
 2026-10-29 补充：仅支持 Google Chrome；进入浏览器运行时页面自动检测环境，缺失时提醒安装，安装入口固定为 `https://www.google.cn/chrome/`。取代此前“进入后直接自动安装”的流程；仍保留用户主动触发的辅助安装作为实现候选。
 
 安卓基线：`feature/android-runtime`，提交 `5c864e1`，已推送 GitHub。
-浏览器工作分支：`codex/browser-runtime`，从上述基线继续。
+浏览器工作分支：`feature/browser-runtime`，从上述基线继续。
 
 ## 1. 目标与本轮边界
 
