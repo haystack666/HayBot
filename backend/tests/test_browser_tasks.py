@@ -6,7 +6,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from app.main import create_app
-from app.browser_tasks import BrowsingConfig, BrowseDecision, parse_object, unsupported_interactions
+from app.browser_tasks import BrowsingConfig, ViewingConfig, BrowseDecision, parse_object, unsupported_interactions
 from app.browser_qq import BrowserQQ
 
 
@@ -39,6 +39,32 @@ def test_config_scoped_strict_and_explicit_interest_migration(client):
     assert client.post('/api/bots/default/browser/douyin/tasks', json={'goal': ' '}).status_code == 422
 
 
+def test_viewing_settings_persist_per_bot_and_validate_relationships(client):
+    endpoint='/api/bots/default/browser/douyin/config'
+    old=client.get(endpoint).json()['config']
+    assert old['viewing']==ViewingConfig().model_dump()
+    custom={'preview_enabled':True,'preview_after_minutes':2,'max_video_minutes':45,'segment_seconds':8,'skip_seconds':90}
+    assert client.put(endpoint,json={**old,'viewing':custom}).status_code==200
+    assert client.get(endpoint).json()['config']['viewing']==custom
+    other=client.post('/api/bots',json={'name':'separate viewing'}).json()['id']
+    assert client.get(f'/api/bots/{other}/browser/douyin/config').json()['config']['viewing']==ViewingConfig().model_dump()
+    for invalid in ({'segment_seconds':0},{'skip_seconds':-1},{'max_video_minutes':121},{'preview_after_minutes':46},{'segment_seconds':True},{'skip_seconds':'60'}):
+        assert client.put(endpoint,json={**old,'viewing':{**custom,**invalid}}).status_code==422
+    assert client.put(endpoint,json={**old,'viewing':{**custom,'preview_enabled':False,'max_video_minutes':1}}).status_code==200
+
+
+def test_legacy_config_without_viewing_gets_defaults(client):
+    tasks=client.app.state.browser_tasks
+    async def legacy():
+        config=BrowsingConfig(character_interests='保留我的兴趣').model_dump()
+        del config['viewing']
+        with tasks.db:
+            tasks.db.execute('INSERT OR REPLACE INTO browser_config VALUES (?,?,?)',('default','legacy',json.dumps(config)))
+    client.portal.call(legacy)
+    saved=client.get('/api/bots/default/browser/douyin/config').json()['config']
+    assert saved['character_interests']=='保留我的兴趣' and saved['viewing']==ViewingConfig().model_dump()
+
+
 def test_strict_decisions_and_share_intention():
     for raw in ('{"op":"next","op":"finish","reason":"x"}', '{"op":"next","reason":"x"} {"op":"finish"}', 'xx {"op":"next","reason":"x"}'):
         with pytest.raises(ValueError):
@@ -54,7 +80,7 @@ def test_strict_decisions_and_share_intention():
         with pytest.raises(ValueError):
             BrowseDecision.model_validate({'op': 'watch', 'reason': '看', 'seconds': seconds})
     assert BrowseDecision.model_validate({'op':'watch','reason':'跳看','start_at':0}).start_at == 0
-    for position in (True,-1,3600,'120'):
+    for position in (True,-1,7200,'120'):
         with pytest.raises(ValueError):
             BrowseDecision.model_validate({'op':'watch','reason':'跳看','start_at':position})
     with pytest.raises(ValueError):
@@ -71,7 +97,7 @@ class Host:
             return {'state': 'ready'}
         if path.endswith('/douyin/begin'):
             self.token = body['runId']
-            return {'token': self.token}
+            return {'token': self.token, 'viewing': body.get('viewing')}
         if path.endswith('/douyin/end'):
             self.token = None
             return {'stopped': True}
@@ -324,3 +350,31 @@ def test_model_selected_preview_position_reaches_runtime_including_zero(client, 
     watches=[body for _,path,body in host.calls if path.endswith('/act') and body['op']=='watch']
     assert watches[0]['start_at']==0 and watches[-1]['start_at']==240.5
     assert 'start_at' not in watches[1] and watches[1]['continue_segment']  # Do not rewind or choose a new segment while buffering.
+
+
+def test_viewing_configuration_reaches_runtime_model_and_task_evidence(client,monkeypatch):
+    tasks,host,contexts=setup(client,monkeypatch,iter([
+        {'op':'home','reason':'找视频'}, {'op':'watch','reason':'看一段','seconds':15},
+        {'op':'finish','reason':'看到了片段','note':'这次跳着看了一小段。'}]))
+    custom=ViewingConfig(preview_after_minutes=2,max_video_minutes=90,segment_seconds=6,skip_seconds=75)
+    client.portal.call(tasks.save_config,'default',BrowsingConfig(enabled=True,viewing=custom))
+    task=run_task(client,tasks,'看你喜欢的视频')
+    assert task['state']=='completed'
+    begin=next(body for _,path,body in host.calls if path.endswith('/begin'))
+    assert begin['viewing']==custom.model_dump()
+    assert all(json.loads(messages[1]['content'])['viewing']==custom.model_dump() for messages in contexts)
+    assert all(s['viewing']==custom.model_dump() for s in task['steps'])
+
+
+def test_old_runtime_cannot_silently_ignore_user_viewing_settings(client,monkeypatch):
+    tasks,host,_=setup(client,monkeypatch,iter([]))
+    request=host.request
+    async def legacy(method,path,body=None):
+        value=await request(method,path,body)
+        if path.endswith('/begin'):value.pop('viewing',None)
+        return value
+    monkeypatch.setattr(tasks.browser.gateway,'request',legacy)
+    task=run_task(client,tasks,'看看你喜欢的')
+    assert task['state']=='blocked' and '观看策略' in task['result']
+    assert not any(path.endswith('/act') for _,path,_ in host.calls)
+    assert host.token is None

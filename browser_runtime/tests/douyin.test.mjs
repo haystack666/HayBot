@@ -2,7 +2,21 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { BrowserEngine } from '../src/engine.mjs'
-import { contentItems, mergeRanges, playbackRanges, watchPolicy, previewPosition } from '../src/douyin.mjs'
+import { contentItems, mergeRanges, playbackRanges, watchPolicy, previewPosition, viewingConfig } from '../src/douyin.mjs'
+
+test('per-run viewing settings control thresholds, disabled preview and fixed skip intervals',()=>{
+ const settings=viewingConfig({preview_after_minutes:2,max_video_minutes:90,segment_seconds:6,skip_seconds:75})
+ assert.equal(watchPolicy(120,settings).mode,'normal')
+ assert.equal(watchPolicy(120.1,settings).mode,'preview')
+ assert.equal(watchPolicy(5400,settings).mode,'preview')
+ assert.equal(watchPolicy(5400.1,settings).mode,'skip')
+ assert.equal(watchPolicy(600,viewingConfig({preview_enabled:false})).mode,'normal')
+ assert.equal(previewPosition(600,[],6,undefined,75),0)
+ assert.equal(previewPosition(600,[[0,6]],6,undefined,75),81)
+ assert.equal(previewPosition(600,[[0,6],[81,87]],6,undefined,75),162)
+ assert.equal(previewPosition(600,[[500,550]],6,undefined,75),null)
+ for(const invalid of [{segment_seconds:0},{skip_seconds:'10'},{preview_enabled:1},{preview_after_minutes:61},{max_video_minutes:121},{unexpected:1},null])assert.throws(()=>viewingConfig(invalid),{code:'invalid_viewing'})
+})
 
 test('duration boundaries use exact seconds: 3 minutes normal, 60 minutes preview, longer skipped',()=>{
  for(const duration of [0,null,undefined,NaN,Infinity])assert.equal(watchPolicy(duration).mode,'unknown')

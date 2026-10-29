@@ -5,13 +5,27 @@ const platform = value => { try { const u = new URL(value); return u.protocol ==
 const videoId = value => typeof value === 'string' && /^\d{6,30}$/.test(value)
 const text = (value, limit = 500) => typeof value === 'string' ? value.slice(0, limit) : ''
 
-export function watchPolicy(duration) {
-  if (!Number.isFinite(duration) || duration <= 0) return { mode:'unknown', duration:null }
-  return { mode:duration>3600?'skip':duration>180?'preview':'normal', duration }
+export const defaultViewing = Object.freeze({preview_enabled:true,preview_after_minutes:3,max_video_minutes:60,segment_seconds:15,skip_seconds:0})
+
+export function viewingConfig(value = {}) {
+  if (!value || typeof value!=='object' || Array.isArray(value) || Object.keys(value).some(key=>!Object.hasOwn(defaultViewing,key))) throw new RuntimeError('invalid_viewing','观看策略格式不正确',400)
+  const config={...defaultViewing,...value}
+  if(typeof config.preview_enabled!=='boolean' || ![['preview_after_minutes',1,120],['max_video_minutes',1,120],['segment_seconds',3,30],['skip_seconds',0,3600]].every(([key,min,max])=>Number.isInteger(config[key])&&config[key]>=min&&config[key]<=max) || config.preview_enabled&&config.preview_after_minutes>config.max_video_minutes)throw new RuntimeError('invalid_viewing','请检查观看策略范围，跳看起始时长不能大于最长视频时长',400)
+  return Object.freeze(config)
 }
 
-export function previewPosition(duration, coverage, seconds, requested) {
+export function watchPolicy(duration, config = defaultViewing) {
+  if (!Number.isFinite(duration) || duration <= 0) return { mode:'unknown', duration:null }
+  return { mode:duration>config.max_video_minutes*60?'skip':config.preview_enabled&&duration>config.preview_after_minutes*60?'preview':'normal', duration }
+}
+
+export function previewPosition(duration, coverage, seconds, requested, skipSeconds = 0) {
   if (requested !== undefined) return Math.min(requested, duration - 3)
+  if(skipSeconds>0) {
+    if(!coverage.length)return 0
+    const next=Math.max(...coverage.map(([,end])=>end))+skipSeconds
+    return next<=duration-3?next:null
+  }
   // A default spread supports exploration without dictating what the model
   // must watch. It may choose another position or leave after any segment.
   return [0, duration/3, duration*2/3, Math.max(0,duration-seconds)]
@@ -65,7 +79,7 @@ export class DouyinAutomation {
     const token = input.runId || randomUUID()
     if (typeof token !== 'string' || !/^[a-zA-Z0-9-]{16,64}$/.test(token)) throw new RuntimeError('invalid_run', '任务标识无效', 400)
     if (this.ended.has(token)) throw new RuntimeError('automation_revoked', '本次任务已停止')
-    const run = { token, page, tab: session.active, items: new Map(), currentItems: new Map(), coverage: new Map(), pending: new Set(), cancelled: false }
+    const run = { token, page, tab: session.active, viewing:viewingConfig(input.viewing), items: new Map(), currentItems: new Map(), coverage: new Map(), pending: new Set(), cancelled: false }
     run.response = response => {
       let url
       try { url = new URL(response.url()) } catch { return }
@@ -85,7 +99,7 @@ export class DouyinAutomation {
     }
     page.on('response', run.response); session.automation = run; this.engine.changed(session)
     this.renew(session, run)
-    return { token: run.token }
+    return { token: run.token, viewing: run.viewing }
   }
   renew(session, run) {
     clearTimeout(run.expiryTimer)
@@ -137,9 +151,9 @@ export class DouyinAutomation {
       if (op === 'open') {
         if (!videoId(input.id) || !run.items.has(input.id)) throw new RuntimeError('unobserved_video', '只能打开当前任务真实观察到的视频', 400)
         const candidate = run.items.get(input.id)
-        if (watchPolicy(candidate.duration).mode === 'skip') {
+        if (watchPolicy(candidate.duration,run.viewing).mode === 'skip') {
           await this.pause(session,run)
-          return {...await this.snapshot(session,run), skipped:{id:candidate.id,title:candidate.title,duration:candidate.duration,reason:'超过 60 分钟，未打开观看'}}
+          return {...await this.snapshot(session,run), skipped:{id:candidate.id,title:candidate.title,duration:candidate.duration,reason:`超过 ${run.viewing.max_video_minutes} 分钟，未打开观看`}}
         }
         url += 'video/' + input.id
       }
@@ -164,15 +178,16 @@ export class DouyinAutomation {
       let before = await this.snapshot(session, run)
       if (before.blocked) return before
       const policy = before.watchPolicy
+      const seconds = policy.mode==='preview' ? run.viewing.segment_seconds : input.seconds
       if (policy.mode === 'skip') {
         await this.pause(session,run)
-        return {...await this.snapshot(session,run), skipped:{id:before.current?.id,duration:policy.duration,reason:'超过 60 分钟，已跳过观看'}}
+        return {...await this.snapshot(session,run), skipped:{id:before.current?.id,duration:policy.duration,reason:`超过 ${run.viewing.max_video_minutes} 分钟，已跳过观看`}}
       }
-      if (input.start_at !== undefined && (typeof input.start_at !== 'number' || !Number.isFinite(input.start_at) || input.start_at < 0 || input.start_at >= (policy.duration || 0) || policy.mode !== 'preview')) throw new RuntimeError('invalid_position', '仅对超过 3 分钟、最长 60 分钟的视频指定有效跳看位置', 400)
+      if (input.start_at !== undefined && (typeof input.start_at !== 'number' || !Number.isFinite(input.start_at) || input.start_at < 0 || input.start_at >= (policy.duration || 0) || policy.mode !== 'preview')) throw new RuntimeError('invalid_position', '仅对当前观看策略允许跳看的视频指定有效位置', 400)
       const key = before.current?.id ? before.current.id + ':' + (before.playback?.source || '') : null
       let seek = null
       if (policy.mode === 'preview' && input.continue_segment !== true) {
-        const target=previewPosition(policy.duration,key?run.coverage.get(key)||[]:[],input.seconds,input.start_at)
+        const target=previewPosition(policy.duration,key?run.coverage.get(key)||[]:[],seconds,run.viewing.skip_seconds>0?undefined:input.start_at,run.viewing.skip_seconds)
         if (target === null) {
           await this.pause(session,run)
           return {...before, previewComplete:true, hint:'默认分段预览已结束；可换视频，或在有具体理由时用 start_at 查看其他片段。分段预览不代表看完。'}
@@ -206,14 +221,14 @@ export class DouyinAutomation {
       })
       images = []; const samples = [], ranges = []; let previous = before.playback
       for (let i = 0; i < 3; i++) {
-        if (!previous?.ended) await this.wait(session, run, Math.round(input.seconds * 1000 / 3))
+        if (!previous?.ended) await this.wait(session, run, Math.round(seconds * 1000 / 3))
         const shot = await this.snapshot(session, run)
         if (shot.blocked) return shot
         if (before.current?.id && shot.current?.id && before.current.id !== shot.current.id) throw new RuntimeError('stale_observation', '页面已变化，请重新观察')
         samples.push(shot.playback)
         const current = shot.playback
         if (previous && current && previous.source !== current.source) throw new RuntimeError('stale_observation', '页面已变化，请重新观察')
-        ranges.push(...playbackRanges(previous,current,input.seconds/3))
+        ranges.push(...playbackRanges(previous,current,seconds/3))
         previous = current
         this.guard(session, run)
         const image = await page.screenshot({ type: 'jpeg', quality: 55, scale: 'css', timeout: 3000 })
@@ -224,7 +239,7 @@ export class DouyinAutomation {
       if (key) run.coverage.set(key,coverageRanges)
       while(run.coverage.size>200)run.coverage.delete(run.coverage.keys().next().value)
       const fullDuration=previous?.duration || before.current?.duration || null
-      playback = { requestedSeconds: input.seconds, advancedSeconds: Math.round(ranges.reduce((sum,[a,b])=>sum+b-a,0)*10)/10,
+      playback = { requestedSeconds: seconds, advancedSeconds: Math.round(ranges.reduce((sum,[a,b])=>sum+b-a,0)*10)/10,
         sampledRanges, coverageRanges, fullDuration, partial: !fullDuration || coverageRanges.length!==1 || coverageRanges[0][0]>0.25 || coverageRanges[0][1]<fullDuration-0.25,
         mode:policy.mode, seek, ended:!!previous?.ended, samples, visualOnly: true, audioAvailable: false }
     }
@@ -281,7 +296,7 @@ export class DouyinAutomation {
     const current = currentId ? run.items.get(currentId) || { id:currentId, url:'https://www.douyin.com/video/'+currentId, title:data.detail?.title || '', author:data.detail?.author || '' } : null
     if (current) run.items.set(current.id,current)
     const blocked = data.challenge || /验证码|安全验证|完成验证|拖动滑块|验证后继续/.test(data.modal) ? 'captcha' : data.loginForm || /登录后(?:即可|查看|搜索)|扫码登录|手机号登录/.test(data.modal) ? 'login' : ''
-    const policy=watchPolicy(data.playback?.duration || current?.duration)
-    return { platform:'douyin', generation, url, blocked, body:blocked ? '' : data.body, items:blocked ? [] : [...run.currentItems.values()].slice(-40).map(item=>({...item,watchPolicy:watchPolicy(item.duration)})), current:blocked ? null : current, playback:blocked ? null : data.playback, watchPolicy:blocked ? watchPolicy(null) : policy }
+    const policy=watchPolicy(data.playback?.duration || current?.duration,run.viewing)
+    return { platform:'douyin', generation, url, blocked, viewing:run.viewing, body:blocked ? '' : data.body, items:blocked ? [] : [...run.currentItems.values()].slice(-40).map(item=>({...item,watchPolicy:watchPolicy(item.duration,run.viewing)})), current:blocked ? null : current, playback:blocked ? null : data.playback, watchPolicy:blocked ? watchPolicy(null) : policy }
   }
 }

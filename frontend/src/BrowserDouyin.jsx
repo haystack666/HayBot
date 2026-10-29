@@ -3,6 +3,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Panel, Field, Notice } from './components/console'
+import { viewingDefaults, viewingFields, viewingError } from './lib/browser-viewing.mjs'
 
 const labels = { queued:'等待开始', running:'浏览中', completed:'已完成', blocked:'需要处理', paused:'进度已保存', failed:'未完成', interrupted:'已中断', cancelled:'已停止', unknown:'状态待核对' }
 const active = t => ['queued','running'].includes(t.state)
@@ -31,7 +32,9 @@ export default function BrowserDouyin({ api, notify }) {
   useEffect(()=>{let alive=true;api('/browser/douyin/config').then(v=>{if(alive){setConfig(v.config);setBound(v.qq_account_bound)}}).catch(e=>{if(alive)setError(e.message)});refresh();const timer=setInterval(refresh,3000);return()=>{alive=false;clearInterval(timer)}},[api,refresh])
   const current=tasks.find(active)
   const update=(key,value)=>setConfig(c=>({...c,[key]:value}))
-  const save=async()=>{setBusy(true);try{setConfig(await api('/browser/douyin/config','PUT',config));setBound(true);notify?.('抖音设置已保存')}catch(e){setError(e.message)}finally{setBusy(false)}}
+  const viewing={...viewingDefaults,...config?.viewing}
+  const updateViewing=(key,value)=>setConfig(c=>({...c,viewing:{...viewingDefaults,...c.viewing,[key]:value}}))
+  const save=async()=>{const invalid=viewingError(viewing);if(invalid){setError(invalid);return}setBusy(true);try{setConfig(await api('/browser/douyin/config','PUT',{...config,viewing}));setBound(true);setError('');notify?.('抖音设置已保存')}catch(e){setError(e.message)}finally{setBusy(false)}}
   const start=async e=>{e.preventDefault();setBusy(true);try{await api('/browser/douyin/tasks','POST',{goal});setGoal('');await refresh()}catch(e){setError(e.message)}finally{setBusy(false)}}
   const stop=async id=>{setBusy(true);try{await api(`/browser/douyin/tasks/${id}/stop`,'POST',{});await refresh()}catch(e){setError(e.message)}finally{setBusy(false)}}
   return <Panel title="抖音自主浏览" action={<Button size="sm" variant="outline" aria-expanded={settings} onClick={()=>setSettings(v=>!v)}>{settings?'收起设置':'设置'}</Button>}>
@@ -46,6 +49,11 @@ export default function BrowserDouyin({ api, notify }) {
         <Field label="内容筛选要求" id="browser-constraints" full><Textarea id="browser-constraints" value={config.content_constraints} maxLength={2000} disabled={!!current||busy} onChange={e=>update('content_constraints',e.target.value)}/></Field>
         {[['timeout_minutes','每次时间上限（分钟）',1,120],['max_steps','步骤上限',5,300],['buffering_wait_seconds','缓冲等待（秒）',30,600]].map(([key,label,min,max])=><Field key={key} label={label} id={`browser-${key}`}><Input id={`browser-${key}`} type="number" min={min} max={max} value={config[key]} disabled={!!current||busy} onChange={e=>update(key,Number(e.target.value))}/></Field>)}
       </div>
+      <fieldset className="browser-viewing-settings" disabled={!!current||busy}>
+        <legend>观看策略</legend>
+        <label><input type="checkbox" checked={viewing.preview_enabled} onChange={e=>updateViewing('preview_enabled',e.target.checked)}/> 长视频分段跳看</label>
+        <div className="form-grid">{viewingFields.map(([key,label,min,max])=><Field key={key} label={label} id={`browser-viewing-${key}`}><Input id={`browser-viewing-${key}`} type="number" min={min} max={max} step={1} value={viewing[key]} disabled={!viewing.preview_enabled&&key!=='max_video_minutes'} onChange={e=>updateViewing(key,e.target.value===''?'':Number(e.target.value))}/></Field>)}</div>
+      </fieldset>
       {!bound&&config.qq_enabled&&<Notice>保存后，QQ 授权会绑定当前接入账号。</Notice>}
       <div><Button size="sm" disabled={!!current||busy} onClick={save}>保存设置</Button></div>
     </div>}

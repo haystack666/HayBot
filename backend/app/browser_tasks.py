@@ -16,6 +16,20 @@ from .android_decisions import public_body, unique_object
 from .android_intent import interest_scope, explicit_links
 
 
+class ViewingConfig(StrictModel):
+    preview_enabled: bool = True
+    preview_after_minutes: int = Field(default=3, ge=1, le=120, strict=True)
+    max_video_minutes: int = Field(default=60, ge=1, le=120, strict=True)
+    segment_seconds: int = Field(default=15, ge=3, le=30, strict=True)
+    skip_seconds: int = Field(default=0, ge=0, le=3600, strict=True)
+
+    @model_validator(mode='after')
+    def ordered(self):
+        if self.preview_enabled and self.preview_after_minutes > self.max_video_minutes:
+            raise ValueError('跳看起始时长不能大于最长视频时长')
+        return self
+
+
 class BrowsingConfig(StrictModel):
     enabled: bool = False
     qq_enabled: bool = False
@@ -27,6 +41,7 @@ class BrowsingConfig(StrictModel):
     buffering_wait_seconds: int = Field(default=120, ge=30, le=600)
     max_steps: int = Field(default=60, ge=5, le=300)
     timeout_minutes: int = Field(default=15, ge=1, le=120)
+    viewing: ViewingConfig = Field(default_factory=ViewingConfig)
 
 
 class BrowseDecision(StrictModel):
@@ -35,7 +50,7 @@ class BrowseDecision(StrictModel):
     query: str = Field(default='', max_length=100)
     id: str = Field(default='', max_length=30)
     seconds: int = Field(default=15, ge=3, le=30, strict=True)
-    start_at: float | None = Field(default=None, ge=0, lt=3600, strict=True)
+    start_at: float | None = Field(default=None, ge=0, lt=7200, strict=True)
     note: str = Field(default='', max_length=1500)
 
     @model_validator(mode='after')
@@ -78,7 +93,7 @@ INSTRUCTION = '''你在独立 Chrome 中实际操作抖音网页版。当前用�
 目前工具支持搜索、浏览、观看、读评论，不支持发布评论、真实@、点赞、关注或站内私信。不要谎称这些动作成功。"分享给我"通常指平台@，只有明确要链接才整理链接；要求了不支持的互动时可先浏览，最后必须 blocked 明确说明未完成，不能以链接替代@。
 finish/blocked 需 note：只写可由真实观察支持的自然中文结果；可结合看过内容说感想，避免采集报告口吻。不声称未发生的发送、登录或互动成功。'''
 
-INSTRUCTION += '\n当前请求的主题优先，兴趣用于挑选主题内的内容，不要将所有主题都改成教程或幕后。watch 返回 sampledRanges 是实际播放区间，coverageRanges 是同一视频本任务累计播放区间，partial=true 表示未完整播放；抽样画面不能证明理解全部细节。模型思考时视频暂停，watch 才继续播放。只看了一部分就如实描述，不必为了完成任务强行看完每条。\n观看时长约束：视频超过 60 分钟直接跳过，不能因此结束整个浏览任务；不超过 3 分钟正常观看，仍可按兴趣提前离开；超过 3 分钟且不超过 60 分钟分段跳看。watchPolicy 是工具识别的策略，mode=preview 时 watch 默认选择尚未看过的分散片段，也可以按内容线索用 start_at 指定秒数，确认跳转后才计入观看；跳过的时间不算观看。previewComplete 只表示默认预览片段结束，不代表完整观看；可继续找其他视频，有必要再指定片段。skipped、seekFailed 不代表看过，不是缓冲，不得反复重试同一失败操作。\n严格按以下 JSON Schema 输出一个操作，不要输出其他文字；不适用的可选字段请省略，不能填 null：\n' + json.dumps(BrowseDecision.model_json_schema(), ensure_ascii=False) + '\n示例：{"op":"watch","reason":"想看看角色动作和灯光如何配合","seconds":15}；{"op":"search","reason":"继续找本次主题内有兴趣的内容","query":"二次元 cos"}'
+INSTRUCTION += '\n当前请求的主题优先，兴趣用于挑选主题内的内容，不要将所有主题都改成教程或幕后。watch 返回 sampledRanges 是实际播放区间，coverageRanges 是同一视频本任务累计播放区间，partial=true 表示未完整播放；抽样画面不能证明理解全部细节。模型思考时视频暂停，watch 才继续播放。只看了一部分就如实描述，不必为了完成任务强行看完每条。\n观看策略由用户配置 viewing 决定：超过 max_video_minutes 直接跳过，不能因此结束整个浏览任务；开启 preview_enabled 时，超过 preview_after_minutes 的视频分段跳看，每段由 segment_seconds 指定，skip_seconds 是两段之间跳过的秒数，0 表示自动分散选段；关闭跳看或不超过起始时长时正常观看，仍可按兴趣提前离开。用户配置优先于模型建议的观看时长。watchPolicy 是工具识别的策略，mode=preview 时 watch 默认选择尚未看过的分散片段，自动选段时可以按内容线索用 start_at 指定秒数，固定跳过间隔时使用用户间隔，确认跳转后才计入观看；跳过的时间不算观看。previewComplete 只表示默认预览片段结束，不代表完整观看；可继续找其他视频，有必要再指定片段。skipped、seekFailed 不代表看过，不是缓冲，不得反复重试同一失败操作。\n严格按以下 JSON Schema 输出一个操作，不要输出其他文字；不适用的可选字段请省略，不能填 null：\n' + json.dumps(BrowseDecision.model_json_schema(), ensure_ascii=False) + '\n示例：{"op":"watch","reason":"想看看角色动作和灯光如何配合","seconds":15}；{"op":"search","reason":"继续找本次主题内有兴趣的内容","query":"二次元 cos"}'
 
 
 class BrowserTasks:
@@ -302,9 +317,11 @@ class BrowserTasks:
                 raise HTTPException(409, '本次任务授权已失效')
             token = uuid.uuid4().hex
             self.tokens[task_id] = token
-            grant = await self.browser.gateway.request('POST', path + '/douyin/begin', {'runId': token})
+            grant = await self.browser.gateway.request('POST', path + '/douyin/begin', {'runId': token, 'viewing': cfg.viewing.model_dump()})
             if grant['token'] != token:
                 raise HTTPException(409, '运行时任务授权不匹配，请升级运行时')
+            if grant.get('viewing') != cfg.viewing.model_dump():
+                raise HTTPException(409, '运行时未确认观看策略，请升级或重新连接运行时')
             if not self.valid(task):
                 raise HTTPException(409, '本次任务授权已失效')
             state = await self.browser.gateway.request('GET', path)
@@ -337,7 +354,7 @@ class BrowserTasks:
                 recent = [{k: step.get(k) for k in ('op', 'reason', 'note', 'current', 'watch', 'skipped', 'seekFailed', 'previewComplete')} for step in steps[-12:]]
                 view = {**observation, 'body': observation.get('body', '')[:7000],
                     'items': [{**item, 'title': item.get('title', '')[:240]} for item in observation.get('items', [])[-20:]]}
-                context = {'current_request': task['goal'], **interests, 'elapsed_seconds': round(elapsed),
+                context = {'current_request': task['goal'], **interests, 'viewing': cfg.viewing.model_dump(), 'elapsed_seconds': round(elapsed),
                     'remaining_seconds': max(0, round(cfg.timeout_minutes * 60 - elapsed)),
                     'remaining_steps': max(0, cfg.max_steps - len(steps)), 'progress': recent, 'observation': view}
                 message = {'role': 'user', 'content': json.dumps(context, ensure_ascii=False)}
@@ -399,7 +416,7 @@ class BrowserTasks:
                     watch = observation.get('watch')
                     evidence = {'op': decision.op, 'reason': decision.reason, 'note': decision.note, 'at': time.time(),
                         'url': observation.get('url', ''), 'current': observation.get('current'),
-                        'items': observation.get('items', []), 'watch': watch}
+                        'items': observation.get('items', []), 'watch': watch, 'viewing': cfg.viewing.model_dump()}
                     evidence.update({k:observation[k] for k in ('skipped', 'seekFailed', 'previewComplete') if k in observation})
                     steps.append(evidence)
                     self.update(task_id, steps=steps)
