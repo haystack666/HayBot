@@ -145,3 +145,114 @@ async def test_dm_model_and_send_run_without_video_decision_queue(client):
         assert all('/douyin/dm' in path for path,op in calls)
     finally:
         main_blocker.cancel();await asyncio.gather(main_blocker,return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_dm_accepts_natural_text_from_persona_without_dropping_message(client):
+    import asyncio
+    t=client.app.state.browser_tasks
+    cfg=t.config('default');cfg.interactions.messages_enabled=True;t.save_config('default',cfg)
+    t,bot=seed(client,state='running')
+    view={'generation':0,'version':1,'account':{'id':'platform-self','verified':True},
+        'conversation':{'id':'peer-sec','nickname':'朋友','handle':'friend','follows_me':True},
+        'messages':[{'id':'incoming-real-1','direction':'inbound','text':'在吗'}], 'pendingUnread':[]}
+    sent=[];observes=0
+    async def gateway(method,path,body):
+        nonlocal observes
+        if body['op']=='observe':
+            observes+=1
+            if observes>2:raise asyncio.CancelledError()
+            return view
+        sent.append(body['authorization']['text'])
+        return {**view,'interaction':{'status':'confirmed','message_id':'outbound-real-1'}}
+    t.browser.gateway.request=gateway
+    t.model=AsyncMock(return_value='在呀，刚刚看到你的消息。')
+    with pytest.raises(asyncio.CancelledError):await t.dm.run(t.get('default','journal-one'),cfg,'capability')
+    assert sent==['在呀，刚刚看到你的消息。']
+    assert t.dm.events('journal-one')[0]['state']=='confirmed'
+
+
+@pytest.mark.asyncio
+async def test_dm_repairs_malformed_json_and_logs_bounded_diagnostics(client):
+    import asyncio
+    t=client.app.state.browser_tasks
+    cfg=t.config('default');cfg.interactions.messages_enabled=True;t.save_config('default',cfg)
+    t,bot=seed(client,state='running')
+    view={'generation':0,'version':1,'account':{'id':'platform-self','verified':True},
+        'conversation':{'id':'peer-sec','nickname':'朋友','handle':'friend','follows_me':True},
+        'messages':[{'id':'incoming-real-1','direction':'inbound','text':'在吗'}], 'pendingUnread':[]}
+    sent=[];observes=0
+    async def gateway(method,path,body):
+        nonlocal observes
+        if body['op']=='observe':
+            observes+=1
+            if observes>2:raise asyncio.CancelledError()
+            return view
+        sent.append(body['authorization']['text'])
+        return {**view,'interaction':{'status':'confirmed','message_id':'outbound-real-1'}}
+    t.browser.gateway.request=gateway
+    t.model=AsyncMock(side_effect=['```json\n{"reply":"少一个括号"\n```','{"reply":"在呀。"}'])
+    with pytest.raises(asyncio.CancelledError):await t.dm.run(t.get('default','journal-one'),cfg,'capability')
+    assert sent==['在呀。'] and t.model.await_count==2
+    log=next(item for item in bot.store.logs() if item['event']=='browser.dm_format_invalid')
+    assert log['details']['stage']=='browser_dm' and '少一个括号' not in json.dumps(log,ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+async def test_dm_keeps_failed_inbound_and_recovers_after_unread_badge_is_gone(client):
+    import asyncio
+    from app.douyin_interactions import DouyinPerson
+    t=client.app.state.browser_tasks
+    cfg=t.config('default');cfg.interactions.messages_enabled=True
+    cfg.interactions.whitelist=[DouyinPerson(handle='friend',nickname='朋友')];t.save_config('default',cfg)
+    t,bot=seed(client,state='running')
+    view={'generation':0,'version':1,'account':{'id':'platform-self','verified':True},
+        'conversation':{'id':'peer-sec','nickname':'朋友','handle':'friend','follows_me':True},
+        'conversations':[{'id':'peer-sec','nickname':'朋友','unread':False}],
+        'messages':[{'id':'incoming-real-1','direction':'inbound','text':'在吗'}], 'pendingUnread':[]}
+    t.browser.gateway.request=AsyncMock(return_value=view)
+    t.model=AsyncMock(return_value='```json\n{"reply":\n```')
+    await t.dm.run(t.get('default','journal-one'),cfg,'first-capability')
+    assert t.dm.pending(t.get('default','journal-one'),view)[0]['message_id']=='incoming-real-1'
+
+    seed(client,'journal-two',state='running')
+    empty={**view,'conversation':None,'messages':[]}
+    sent=[];observes=0
+    async def gateway(method,path,body):
+        nonlocal observes
+        if body['op']=='observe':
+            observes+=1
+            if observes==1:return empty
+            if observes>2:raise asyncio.CancelledError()
+            return view
+        if body['op']=='conversation':return view
+        sent.append(body['authorization']['text'])
+        return {**view,'interaction':{'status':'confirmed','message_id':'outbound-real-1'}}
+    t.browser.gateway.request=gateway;t.model=AsyncMock(return_value='{"reply":"在呀。"}')
+    with pytest.raises(asyncio.CancelledError):await t.dm.run(t.get('default','journal-two'),cfg,'second-capability')
+    assert sent==['在呀。'] and not t.dm.pending(t.get('default','journal-two'),view)
+
+
+@pytest.mark.asyncio
+async def test_dm_never_treats_unknown_direction_as_already_replied(client):
+    import asyncio
+    from app.douyin_interactions import DouyinPerson
+    t=client.app.state.browser_tasks
+    cfg=t.config('default');cfg.interactions.messages_enabled=True
+    cfg.interactions.whitelist=[DouyinPerson(handle='friend',nickname='朋友')];t.save_config('default',cfg)
+    t,bot=seed(client,state='running')
+    view={'generation':0,'version':1,'account':{'id':'platform-self','verified':True},
+        'conversation':{'id':'peer-sec','nickname':'朋友','handle':'friend','follows_me':True},
+        'conversations':[{'id':'peer-sec','nickname':'朋友','unread':False}],
+        'messages':[{'id':'incoming-real-1','direction':'unknown','text':'在吗'}], 'pendingUnread':[]}
+    t.dm.remember(t.get('default','journal-one'),view,view['conversation'],view['messages'][0])
+    calls=0
+    async def gateway(method,path,body):
+        nonlocal calls
+        calls+=1
+        if calls>2:raise asyncio.CancelledError()
+        return view
+    t.browser.gateway.request=gateway
+    with pytest.raises(asyncio.CancelledError):await t.dm.run(t.get('default','journal-one'),cfg,'capability')
+    assert t.dm.pending(t.get('default','journal-one'),view)
+    assert t.dm.events('journal-one')[0]['detail']=='无法确认会话最近一条消息的发送方向，已保留待处理状态'
