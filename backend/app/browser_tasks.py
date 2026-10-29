@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 from typing import Literal
 
 from fastapi import HTTPException
-from pydantic import Field, model_validator
+from pydantic import Field, ValidationError, model_validator
 from .config import StrictModel
 from .android_decisions import public_body, unique_object
 from .android_intent import interest_scope, explicit_links
@@ -34,7 +34,7 @@ class BrowseDecision(StrictModel):
     reason: str = Field(min_length=1, max_length=800)
     query: str = Field(default='', max_length=100)
     id: str = Field(default='', max_length=30)
-    seconds: int = Field(default=15, ge=3, le=30)
+    seconds: int = Field(default=15, ge=3, le=30, strict=True)
     note: str = Field(default='', max_length=1500)
 
     @model_validator(mode='after')
@@ -50,8 +50,9 @@ class BrowseDecision(StrictModel):
 
 def parse_object(raw):
     raw = public_body(raw)
-    if raw.startswith('```json\n') and raw.endswith('```'):
-        raw = raw[8:-3].strip()
+    fence = re.fullmatch(r'```(?:json)?\s*\n([\s\S]*?)\n?```', raw, re.IGNORECASE)
+    if fence:
+        raw = fence[1].strip()
     if len(raw) > 12000:
         raise ValueError('模型输出过长')
     value = json.loads(raw, object_pairs_hook=unique_object)
@@ -74,6 +75,8 @@ INSTRUCTION = '''你在独立 Chrome 中实际操作抖音网页版。当前用�
 目前工具支持搜索、浏览、观看、读评论，不支持发布评论、真实@、点赞、关注或站内私信。不要谎称这些动作成功。"分享给我"通常指平台@，只有明确要链接才整理链接；要求了不支持的互动时可先浏览，最后必须 blocked 明确说明未完成，不能以链接替代@。
 finish/blocked 需 note：只写可由真实观察支持的自然中文结果；可结合看过内容说感想，避免采集报告口吻。不声称未发生的发送、登录或互动成功。'''
 
+INSTRUCTION += '\n当前请求的主题优先，兴趣用于挑选主题内的内容，不要将所有主题都改成教程或幕后。watch 返回 sampledRanges 是实际播放区间，coverageRanges 是同一视频本任务累计播放区间，partial=true 表示未完整播放；抽样画面不能证明理解全部细节。模型思考时视频暂停，watch 才继续播放。只看了一部分就如实描述，不必为了完成任务强行看完每条。\n严格按以下 JSON Schema 输出一个操作，不要输出其他文字；不适用的可选字段请省略，不能填 null：\n' + json.dumps(BrowseDecision.model_json_schema(), ensure_ascii=False) + '\n示例：{"op":"watch","reason":"想看看角色动作和灯光如何配合","seconds":15}；{"op":"search","reason":"继续找本次主题内有兴趣的内容","query":"二次元 cos"}'
+
 
 class BrowserTasks:
     def __init__(self, manager, browser, directory):
@@ -85,6 +88,9 @@ class BrowserTasks:
           CREATE TABLE IF NOT EXISTS browser_tasks(id TEXT PRIMARY KEY, bot_id TEXT NOT NULL, goal TEXT NOT NULL,
             state TEXT NOT NULL, result TEXT NOT NULL DEFAULT '', steps TEXT NOT NULL DEFAULT '[]',
             origin TEXT NOT NULL DEFAULT '{}', notification TEXT NOT NULL DEFAULT '', created REAL NOT NULL, updated REAL NOT NULL);
+          CREATE TABLE IF NOT EXISTS browser_decision_errors(task_id TEXT NOT NULL, sequence INTEGER NOT NULL,
+            attempt INTEGER NOT NULL, error TEXT NOT NULL, response TEXT NOT NULL, at REAL NOT NULL,
+            PRIMARY KEY(task_id,sequence));
         ''')
         with self.db:
             self.db.execute("UPDATE browser_tasks SET state='interrupted',result='服务重启，浏览进度已保存，请查看后重新发起任务',updated=? WHERE state IN ('queued','running')", (time.time(),))
@@ -123,7 +129,13 @@ class BrowserTasks:
         return self.db.execute("SELECT 1 FROM browser_tasks WHERE bot_id=? AND state IN ('queued','running')", (bot_id,)).fetchone() is not None
 
     def list(self, bot_id):
-        return [self.unpack(row) for row in self.db.execute('SELECT * FROM browser_tasks WHERE bot_id=? ORDER BY created DESC LIMIT 30', (bot_id,))]
+        return [self.with_diagnostics(row) for row in self.db.execute('SELECT * FROM browser_tasks WHERE bot_id=? ORDER BY created DESC LIMIT 30', (bot_id,))]
+
+    def with_diagnostics(self, row):
+        value = self.unpack(row)
+        value['decision_errors'] = [dict(r) for r in self.db.execute(
+            'SELECT sequence,attempt,error,response,at FROM browser_decision_errors WHERE task_id=? ORDER BY sequence', (value['id'],))]
+        return value
 
     @staticmethod
     def unpack(row):
@@ -136,7 +148,7 @@ class BrowserTasks:
         row = self.db.execute('SELECT * FROM browser_tasks WHERE bot_id=? AND id=?', (bot_id, task_id)).fetchone()
         if not row:
             raise HTTPException(404, '抖音任务不存在')
-        return self.unpack(row)
+        return self.with_diagnostics(row)
 
     def update(self, task_id, **values):
         values['updated'] = time.time()
@@ -236,6 +248,44 @@ class BrowserTasks:
         runtime.store.record_usage(result)
         return public_body(result.get('message', {}).get('content', ''))
 
+    async def decide(self, runtime, task, messages, deadline):
+        """Repair a rejected decision with real validation feedback, without browser effects."""
+        messages = list(messages)
+        deadline = min(deadline, time.monotonic() + 65)
+        for attempt in range(1, 4):
+            if not self.valid(task):
+                raise HTTPException(409, '本次任务授权已失效')
+            async with asyncio.timeout(max(0.01, deadline - time.monotonic())):
+                with runtime.store.events.context(stage='browser_decision', trace_id=task['id'], attempt=attempt):
+                    raw = await self.model(runtime, messages)
+            if not self.valid(task):
+                raise HTTPException(409, '本次任务授权已失效')
+            try:
+                return BrowseDecision.model_validate(parse_object(raw))
+            except ValueError as error:
+                if isinstance(error, ValidationError):
+                    detail = '; '.join('.'.join(map(str, e['loc'])) + ': ' + e['msg'] for e in error.errors(include_input=False, include_context=False, include_url=False))
+                elif isinstance(error, json.JSONDecodeError):
+                    detail = f'JSON 语法错误：{error.msg}（第 {error.lineno} 行，第 {error.colno} 列）'
+                else:
+                    detail = str(error)
+                # Keep diagnostics private to the authenticated task API. Never
+                # store frame data, credentials or the runtime capability.
+                def redact(value, limit):
+                    for secret in (self.tokens.get(task['id']), self.browser.gateway.token, runtime.bot.provider(runtime.store.load().ollama).api_key):
+                        if secret:
+                            value = value.replace(secret, '[已隐藏]')
+                    return runtime.store.events.text(value, limit)
+                detail, response = redact(detail, 1500), redact(raw, 4000)
+                with self.db:
+                    sequence = self.db.execute('SELECT count(*) FROM browser_decision_errors WHERE task_id=?', (task['id'],)).fetchone()[0] + 1
+                    self.db.execute('INSERT INTO browser_decision_errors VALUES (?,?,?,?,?,?)', (task['id'], sequence, attempt, detail, response, time.time()))
+                runtime.store.log('warn', '抖音操作格式校验未通过，正在纠正', category='model', event='browser.decision_rejected',
+                    details={'stage': 'browser_decision', 'trace_id': task['id'], 'attempt': attempt, 'reason': detail})
+                messages = messages + [{'role': 'assistant', 'content': response}, {'role': 'user', 'content':
+                    '上个操作未执行。校验错误：' + detail + '\n请根据原始任务和观察修正格式，只返回一个符合系统 JSON Schema 的操作；不要重新执行或声称已经执行。'}]
+        raise HTTPException(409, '操作格式经 3 次校验和纠正仍未通过，已保存浏览进度；可展开任务查看具体错误')
+
     async def run(self, bot_id, task_id):
         runtime = self.manager.get(bot_id)
         task, cfg = self.get(bot_id, task_id), self.config(bot_id)
@@ -290,18 +340,9 @@ class BrowserTasks:
                 message = {'role': 'user', 'content': json.dumps(context, ensure_ascii=False)}
                 if images:
                     message['images'] = images
-                async with asyncio.timeout(min(65, max(1, cfg.timeout_minutes * 60 - elapsed))):
-                    raw = await self.model(runtime, [{'role': 'system', 'content': INSTRUCTION}, message])
+                decision = await self.decide(runtime, task, [{'role': 'system', 'content': INSTRUCTION}, message], started + cfg.timeout_minutes * 60)
                 if not self.valid(task):
                     raise HTTPException(409, '任务授权已失效')
-                try:
-                    decision = BrowseDecision.model_validate(parse_object(raw))
-                except ValueError:
-                    steps.append({'op': 'invalid', 'reason': '模型操作格式不正确，未执行', 'at': time.time()})
-                    self.update(task_id, steps=steps)
-                    if sum(s['op'] == 'invalid' for s in steps[-3:]) == 3:
-                        raise HTTPException(409, '模型连续返回无效操作，请检查所选模型')
-                    continue
                 state = await self.browser.gateway.request('GET', path)
                 if state.get('owner_login') or state.get('state') != 'ready' or not state.get('automation'):
                     raise HTTPException(409, '主人已接管、暂停登录或停止浏览器，任务已停止')
@@ -361,7 +402,7 @@ class BrowserTasks:
                         stagnant = 0
                     elif watch:
                         stagnant += watch['requestedSeconds']
-                    if not watch or observation.get('blocked') or watched and watch['advancedSeconds'] >= 1 or stagnant >= cfg.buffering_wait_seconds or time.monotonic() - started >= cfg.timeout_minutes * 60:
+                    if not watch or observation.get('blocked') or watch.get('ended') or watch['advancedSeconds'] >= 1 or stagnant >= cfg.buffering_wait_seconds or time.monotonic() - started >= cfg.timeout_minutes * 60:
                         break
                     body = {'token': token, 'generation': observation['generation'], 'op': 'watch', 'seconds': 15}
                     if len(steps) >= cfg.max_steps:

@@ -2,7 +2,16 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { BrowserEngine } from '../src/engine.mjs'
-import { contentItems } from '../src/douyin.mjs'
+import { contentItems, mergeRanges, playbackRanges } from '../src/douyin.mjs'
+
+test('watch ranges preserve gaps, merge overlaps and distinguish loops from seeks or changed sources',()=>{
+ assert.deepEqual(mergeRanges([[5,8],[0,3],[2,4],[6,9]]),[[0,4],[5,9]])
+ const sample=(currentTime,source='one')=>({currentTime,source,duration:10})
+ assert.deepEqual(playbackRanges(sample(8),sample(1),3),[[8,10],[0,1]])
+ assert.deepEqual(playbackRanges(sample(2),sample(8),3),[])
+ assert.deepEqual(playbackRanges(sample(2),sample(3,'two'),3),[])
+ assert.deepEqual(playbackRanges(sample(3),sample(3),3),[])
+})
 
 test('Douyin content parsing retains stable IDs and excludes ads, live, secrets and signed media URLs', () => {
  const payload={data:[{aweme_info:{aweme_id:'1234567890123456789',desc:'猫咪玩玩具',author:{nickname:'猫猫',uid:'private'},video:{duration:25000,play_addr:{url_list:['private-signed-url']}}}},

@@ -82,6 +82,7 @@ test('formal workbench through Docker relay: login, gestures, privacy, Bot switc
     await target.locator('#range').waitFor()
     await target.evaluate(() => { localStorage.setItem('mode-test', 'preserved') })
     await viewer.getByRole('button', { name: '停止', exact: true }).click()
+    await viewer.getByRole('button', { name: '启动浏览器', exact: true }).waitFor()
     await viewer.reload()
     await viewer.getByText('环境就绪', { exact: true }).waitFor()
     await viewer.getByRole('button', { name: '启动浏览器', exact: true }).click()
@@ -125,6 +126,16 @@ test('formal workbench through Docker relay: login, gestures, privacy, Bot switc
     await viewer.keyboard.press('Escape')
     await viewer.getByRole('button', { name: '放大画面', exact: true }).waitFor()
     assert.equal(await viewer.getByLabel('网页地址').isEnabled(), true, 'Escape retains control')
+    await viewer.route('**/api/bots/*/browser/douyin/tasks', route=>route.fulfill({json:{tasks:[{
+      id:'diagnostic-fixture',goal:'二次元cos',state:'blocked',created:1793260055,origin:{source:'web'},result:'操作格式未通过，进度已保存',
+      steps:[{op:'watch',reason:'观察动作与灯光',current:{title:'角色拍摄片段'},watch:{advancedSeconds:15,samples:[{}, {}, {}],coverageRanges:[[2,17]],fullDuration:105,partial:true}}],
+      decision_errors:[{sequence:1,attempt:1,error:'seconds: Input should be greater than or equal to 3',response:'<img src=x onerror="window.unexpectedExecution=true">'}]
+    }]}}))
+    await viewer.locator('.browser-task > summary').click()
+    assert.match(await viewer.locator('.browser-task small').innerText(),/累计播放：2–17 秒.*未完整播放/)
+    await viewer.getByText('操作格式诊断（1）',{exact:true}).click()
+    assert.match(await viewer.locator('.browser-decision-errors pre').innerText(),/<img src=x/)
+    assert.equal(await viewer.evaluate(()=>window.unexpectedExecution),undefined)
     await viewer.evaluate(() => document.documentElement.classList.add('dark'))
     assert.equal(await viewer.getByLabel('网页地址').isEnabled(), true, 'dark theme retains control')
     await viewer.screenshot({ path: path.join(process.env.HAYBOT_SCREENSHOT_DIR || directory, 'browser-workbench-dark.png'), fullPage: true })

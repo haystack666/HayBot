@@ -5,6 +5,26 @@ const platform = value => { try { const u = new URL(value); return u.protocol ==
 const videoId = value => typeof value === 'string' && /^\d{6,30}$/.test(value)
 const text = (value, limit = 500) => typeof value === 'string' ? value.slice(0, limit) : ''
 
+export function mergeRanges(ranges) {
+  const result = []
+  for (const [start, end] of ranges.filter(([a,b]) => Number.isFinite(a) && Number.isFinite(b) && b > a).sort((a,b) => a[0]-b[0])) {
+    const previous = result.at(-1)
+    if (previous && start <= previous[1] + 0.15) previous[1] = Math.max(previous[1], end)
+    else result.push([start,end])
+  }
+  return result.map(pair => pair.map(n => Math.round(n * 100) / 100))
+}
+
+export function playbackRanges(previous, current, seconds) {
+  if (!previous || !current || previous.source !== current.source) return []
+  const start=previous.currentTime,end=current.currentTime,duration=current.duration
+  if (end > start && end-start <= seconds+1) return [[start,end]]
+  // A natural loop is progress, not buffering. Only accept a plausible wrap;
+  // arbitrary seeking must not become evidence of watching skipped content.
+  if (end < start && duration > 0 && duration-start+end <= seconds+1) return [[start,duration],[0,end]]
+  return []
+}
+
 // Only content fields from responses requested by the real page are retained.
 // No cookies, signed URLs, user messages or arbitrary API execution enter the model.
 export function contentItems(payload) {
@@ -32,7 +52,7 @@ export class DouyinAutomation {
     const token = input.runId || randomUUID()
     if (typeof token !== 'string' || !/^[a-zA-Z0-9-]{16,64}$/.test(token)) throw new RuntimeError('invalid_run', '任务标识无效', 400)
     if (this.ended.has(token)) throw new RuntimeError('automation_revoked', '本次任务已停止')
-    const run = { token, page, tab: session.active, items: new Map(), currentItems: new Map(), pending: new Set(), cancelled: false }
+    const run = { token, page, tab: session.active, items: new Map(), currentItems: new Map(), coverage: new Map(), pending: new Set(), cancelled: false }
     run.response = response => {
       let url
       try { url = new URL(response.url()) } catch { return }
@@ -129,28 +149,45 @@ export class DouyinAutomation {
       this.guard(session, run)
       await page.locator('video').evaluateAll(videos => {
         const video = videos.filter(v => {const r=v.getBoundingClientRect();return r.width>100&&r.height>100&&r.bottom>0&&r.top<innerHeight}).sort((a,b)=>b.getBoundingClientRect().width*b.getBoundingClientRect().height-a.getBoundingClientRect().width*a.getBoundingClientRect().height)[0]
-        if (video) { video.muted = true; video.play().catch(()=>{}) }
+        if (video && !video.ended) { video.muted = true; video.play().catch(()=>{}) }
       })
-      images = []; const samples = []; let advancedSeconds = 0, previous = before.playback
+      images = []; const samples = [], ranges = []; let previous = before.playback
       for (let i = 0; i < 3; i++) {
-        await this.wait(session, run, Math.round(input.seconds * 1000 / 3))
+        if (!previous?.ended) await this.wait(session, run, Math.round(input.seconds * 1000 / 3))
         const shot = await this.snapshot(session, run)
         if (shot.blocked) return shot
         if (before.current?.id && shot.current?.id && before.current.id !== shot.current.id) throw new RuntimeError('stale_observation', '页面已变化，请重新观察')
         samples.push(shot.playback)
         const current = shot.playback
-        if (previous && current && previous.source === current.source && current.currentTime > previous.currentTime) advancedSeconds += Math.min(input.seconds / 3 + 1, current.currentTime - previous.currentTime)
+        if (previous && current && previous.source !== current.source) throw new RuntimeError('stale_observation', '页面已变化，请重新观察')
+        ranges.push(...playbackRanges(previous,current,input.seconds/3))
         previous = current
         this.guard(session, run)
         const image = await page.screenshot({ type: 'jpeg', quality: 55, scale: 'css', timeout: 3000 })
         this.guard(session, run); images.push(image.toString('base64'))
+        if (current?.ended) break
       }
-      playback = { requestedSeconds: input.seconds, advancedSeconds: Math.round(advancedSeconds * 10) / 10, samples, visualOnly: true, audioAvailable: false }
+      const key = before.current?.id ? before.current.id + ':' + (before.playback?.source || '') : null
+      const sampledRanges=mergeRanges(ranges), coverageRanges=mergeRanges([...(key ? run.coverage.get(key) || [] : []),...ranges])
+      if (key) run.coverage.set(key,coverageRanges)
+      while(run.coverage.size>200)run.coverage.delete(run.coverage.keys().next().value)
+      const fullDuration=previous?.duration || before.current?.duration || null
+      playback = { requestedSeconds: input.seconds, advancedSeconds: Math.round(ranges.reduce((sum,[a,b])=>sum+b-a,0)*10)/10,
+        sampledRanges, coverageRanges, fullDuration, partial: !fullDuration || coverageRanges.length!==1 || coverageRanges[0][0]>0.25 || coverageRanges[0][1]<fullDuration-0.25,
+        ended:!!previous?.ended, samples, visualOnly: true, audioAvailable: false }
     }
+    // Finish playback mutations within the same serialized operation as the
+    // watch. Owner input is queued after it; revoked actions never pause later.
+    await this.pause(session,run)
     const result = await this.snapshot(session, run)
     if (playback) result.watch = playback
     if (images) result.images = images
     return result
+  }
+  async pause(session, run) {
+    this.guard(session,run)
+    await run.page.locator('video').evaluateAll(videos => { for (const video of videos) video.pause() })
+    this.guard(session,run)
   }
   async wait(session, run, milliseconds) {
     const deadline = Date.now() + milliseconds

@@ -49,6 +49,10 @@ def test_strict_decisions_and_share_intention():
     assert unsupported_interactions('看看猫猫，@我')
     assert not unsupported_interactions('看看猫猫，把链接发我')
     assert not unsupported_interactions('看看猫猫，不要点赞，不要评论')
+    assert parse_object('```\n{"op":"next","reason":"继续"}\n```')['op'] == 'next'
+    for seconds in (True, 10.5, '15', None):
+        with pytest.raises(ValueError):
+            BrowseDecision.model_validate({'op': 'watch', 'reason': '看', 'seconds': seconds})
 
 
 class Host:
@@ -205,3 +209,73 @@ def test_explicit_links_come_from_watched_evidence_and_no_title_only_completion(
     assert any(s['op'] == 'invalid' and '播放推进' in s['reason'] for s in task['steps'])
     assert 'https://www.douyin.com/video/1234567890123456789' in task['result']
     assert 'example.invalid' not in task['result']
+
+
+def test_rejected_decision_is_repaired_with_feedback_and_does_not_consume_action_budget(client, monkeypatch):
+    decisions = iter([{'op': 'home', 'reason': '先打开抖音'}, {'op': 'watch', 'seconds': 0, 'reason': '观察'},
+        {'op': 'watch', 'seconds': 15, 'reason': '纠正观看时长'},
+        {'op': 'finish', 'reason': '这一段看到了有趣的画面', 'note': '刚才看了猫咪搭积木的一小段。'}])
+    tasks, host, contexts = setup(client, monkeypatch, decisions)
+    task = run_task(client, tasks, '看猫咪')
+    assert task['state'] == 'completed'
+    assert len(task['decision_errors']) == 1
+    error = task['decision_errors'][0]
+    assert 'seconds' in error['error'] and 'greater' in error['error']
+    assert contexts[2][-2]['role'] == 'assistant'
+    assert 'seconds' in contexts[2][-1]['content'] and '未执行' in contexts[2][-1]['content']
+    assert host.watches == 2 and len(task['steps']) == 3
+    assert all(s['op'] != 'invalid' for s in task['steps'])
+
+
+def test_repair_exhaustion_keeps_watch_evidence_and_redacts_diagnostics(client, monkeypatch):
+    tasks, host, contexts = setup(client, monkeypatch, iter([]))
+    calls = 0
+    async def model(runtime, messages, tokens=1600):
+        nonlocal calls
+        calls += 1
+        contexts.append(messages)
+        if calls == 1:
+            return '{"op":"home","reason":"先打开抖音"}'
+        if calls == 2:
+            return '{"op":"watch","reason":"实际看一段","seconds":15}'
+        return json.dumps({'op': 'publish', 'reason': tasks.tokens[next(iter(tasks.tokens))] + ' ' + tasks.browser.gateway.token})
+    monkeypatch.setattr(tasks, 'model', model)
+    task = run_task(client, tasks, '二次元cos')
+    assert task['state'] == 'blocked' and '3 次' in task['result']
+    assert len(task['decision_errors']) == 3 and len(task['steps']) == 3
+    assert task['steps'][-1]['watch']['advancedSeconds'] == 12
+    assert tasks.browser.gateway.token not in json.dumps(task)
+    assert '[已隐藏]' in task['decision_errors'][0]['response']
+    assert [e['attempt'] for e in task['decision_errors']] == [1, 2, 3]
+    assert host.token is None
+    assert len(contexts[-1]) == 6
+
+
+def test_ended_video_is_not_retried_as_buffering(client, monkeypatch):
+    tasks, host, _ = setup(client, monkeypatch, iter([
+        {'op': 'home', 'reason': '打开抖音'}, {'op': 'watch', 'seconds': 15, 'reason': '看这一段'},
+        {'op': 'blocked', 'reason': '此前已经结束', 'note': '当前视频已经结束，本轮未取得播放证据。'}]))
+    request = host.request
+    async def ended(method, path, body=None):
+        value = await request(method, path, body)
+        if body and body.get('op') == 'watch':
+            value['watch']['ended'] = True
+        return value
+    monkeypatch.setattr(tasks.browser.gateway, 'request', ended)
+    task = run_task(client, tasks, '看猫咪')
+    assert host.watches == 1 and task['state'] == 'blocked'
+
+
+def test_browser_model_events_have_task_trace_and_stage(client, monkeypatch):
+    tasks, host, _ = setup(client, monkeypatch, iter([]))
+    runtime = client.portal.call(client.app.state.manager.get, 'default')
+    seen = []
+    async def generate(selection, messages, max_tokens, **kwargs):
+        seen.append(dict(runtime.store.events.current.get()))
+        return {'message': {'content': '{"op":"blocked","reason":"测试观察已完成","note":"本次只检查决策日志，没有播放视频。"}'}}
+    monkeypatch.setattr(runtime.bot, 'generate', generate)
+    # Use the real BrowserTasks.model, replaced by setup for other tests.
+    monkeypatch.setattr(tasks, 'model', tasks.__class__.model.__get__(tasks))
+    task = run_task(client, tasks, '看看抖音')
+    assert task['state'] == 'blocked'
+    assert seen == [{'stage': 'browser_decision', 'trace_id': task['id'], 'attempt': 1}]
