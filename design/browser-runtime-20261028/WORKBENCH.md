@@ -2,6 +2,8 @@
 
 2026-10-29，`feature/browser-runtime`，在原项目 `/Volumes/Samsung2T/PJFiles/hayqqbot` 开发。磁盘短暂离线期间创建的临时恢复副本已不存在；实际改动和验收都在原项目进行。
 
+同日后续新增普通模式默认值和实验性 headless 开关，最新行为与新增验收见 [MODES.md](MODES.md)。下方数字记录工作台首次接入时的验证。
+
 ## 实现范围
 
 - 新增后台 `/api/bots/{bot_id}/browser` 状态、环境、生命周期、控制、登录隔离和只读 live 接口。

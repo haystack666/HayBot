@@ -41,6 +41,7 @@ test('real macOS Chrome: hidden launch, streaming, controls, tabs, media and per
   try {
     const report = await engine.prepare(); assert.equal(report.state, 'ready', JSON.stringify(report))
     t.diagnostic(`Chrome ${report.chrome.version}; Node ${process.versions.node}; ${process.platform}/${process.arch}`)
+    for (const id of ['a', 'b']) await engine.configure(id, { headless: true, acknowledgeHeadlessRisk: true })
     await Promise.all([engine.start('a'), engine.start('a')]); assert.equal(engine.sessions.size, 1)
     const session = engine.get('a'), page = session.tabs.get(session.active)
     // Browser.getVersion confirms the actual branded browser; launch options are not the evidence.

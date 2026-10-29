@@ -19,6 +19,11 @@ class ControlBody(ViewerBody):
     lease: str = Field(min_length=1, max_length=64)
 
 
+class BrowserSettingsBody(StrictModel):
+    headless: bool = Field(strict=True)
+    acknowledgeHeadlessRisk: bool = Field(default=False, strict=True)
+
+
 def register_browser_routes(app, scoped_runtime):
     def service():
         return app.state.browser
@@ -39,6 +44,15 @@ def register_browser_routes(app, scoped_runtime):
     @app.api_route('/api/bots/{bot_id}/browser/environment', methods=['GET', 'POST'])
     async def environment(request: Request, runtime=Depends(scoped_runtime)):
         return await service().gateway.request(request.method, '/api/environment')
+
+    @app.post('/api/bots/{bot_id}/browser/settings')
+    async def settings(body: BrowserSettingsBody, request: Request, runtime=Depends(scoped_runtime)):
+        s = service()
+        async with s.lock(runtime.id):
+            authorization(request, runtime)
+            if body.headless and not body.acknowledgeHeadlessRisk:
+                raise HTTPException(400, '开启实验性无头模式前，请确认访问异常、登录验证及风控拦截等风险')
+            return await s.gateway.request('POST', s.path(runtime.id) + '/settings', body.model_dump())
 
     @app.post('/api/bots/{bot_id}/browser/{operation}')
     async def lifecycle(operation: str, request: Request, runtime=Depends(scoped_runtime)):

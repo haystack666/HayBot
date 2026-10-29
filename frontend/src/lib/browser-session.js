@@ -95,6 +95,9 @@ export function createBrowserSession({ api, botId, canvas, mode, change, report 
     open: () => run(refresh),
     setReady(value) { ready = value; if (!ready) input.cancel(); notify() },
     start: () => run(async () => { state = await api('/browser/start', 'POST', {}); if (!disposed) connect() }),
+    configure: options => run(async () => {
+      apply(await api('/browser/settings', 'POST', options))
+    }),
     stop: () => run(async () => { apply(await api('/browser/stop', 'POST', {})); lease = null; clearFrame() }),
     reconnect: () => run(async () => { ++epoch; socket?.close(); lease = null; connected = false; clearFrame(); await refresh() }),
     claim: () => run(async () => {

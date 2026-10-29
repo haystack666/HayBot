@@ -94,6 +94,28 @@ def test_browser_rejects_cross_bot_controls_and_malformed_identity(client):
         service.viewers.clear()
 
 
+def test_browser_settings_are_authorized_strict_and_scoped_to_catalog_bot(client):
+    c = client
+    assert c.post('/api/bots/default/browser/settings', json={'headless': False}).status_code == 401
+    login(c)
+    seen = []
+
+    def handler(request):
+        seen.append((request.url.path, json.loads(request.content)))
+        return httpx.Response(200, json={'state': 'stopped', 'options': {'headless': True}})
+
+    mock_gateway(c, handler)
+    assert c.post('/api/bots/default/browser/settings', json={'headless': True}).status_code == 400
+    assert c.post('/api/bots/default/browser/settings', json={'headless': 'false'}).status_code == 422
+    assert c.post('/api/bots/default/browser/settings', json={'headless': False, 'args': []}).status_code == 422
+    assert c.post('/api/bots/default/browser/settings', json={'headless': False}, headers={'origin': 'http://evil.test'}).status_code == 403
+    assert c.post('/api/bots/missing/browser/settings', json={'headless': False}).status_code == 404
+    assert not seen
+    result = c.post('/api/bots/default/browser/settings', json={'headless': True, 'acknowledgeHeadlessRisk': True})
+    assert result.status_code == 200
+    assert seen == [('/api/sessions/bot-default/settings', {'headless': True, 'acknowledgeHeadlessRisk': True})]
+
+
 @contextmanager
 def host_socket():
     started, finished, stop = threading.Event(), threading.Event(), threading.Event()

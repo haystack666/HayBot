@@ -8,6 +8,8 @@ data
 .venv
 
 .android-runtime
+.browser-runtime
+.worktrees
 .superpowers
 docs
 .playwright-mcp

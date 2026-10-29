@@ -4,6 +4,8 @@ import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { chromium } from 'playwright'
 import { Environment, RuntimeError } from './environment.mjs'
+import { BrowserOptions, DEFAULT_OPTIONS } from './options.mjs'
+import { xiaohongshuAccessIssue } from './access-issues.mjs'
 
 const validId = id => typeof id === 'string' && /^[a-zA-Z0-9_-]{1,64}$/.test(id)
 export function navigationURL(value) {
@@ -16,6 +18,7 @@ export function navigationURL(value) {
 export class BrowserEngine extends EventEmitter {
   constructor(directory, { environment = new Environment(directory), browserType = chromium } = {}) {
     super(); this.directory = directory; this.environment = environment; this.browserType = browserType
+    this.options = new BrowserOptions(directory); this.configuring = new Set()
     this.sessions = new Map(); this.starting = new Map(); this.stopping = new Set(); this.environmentJob = null; this.closed = false
   }
   async prepare({ force = false } = {}) {
@@ -32,16 +35,17 @@ export class BrowserEngine extends EventEmitter {
     const temporary = await fs.mkdtemp(path.join(this.directory, 'launch-check-'))
     let context
     try {
-      context = await this.launch(temporary)
+      // The short environment probe stays hidden regardless of the Bot's mode.
+      context = await this.launch(temporary, { headless: true })
       await context.newPage(); this.environment.setLaunch(report, true)
     } catch { this.environment.setLaunch(report, false) }
     finally { await context?.close().catch(() => {}); await fs.rm(temporary, { recursive: true, force: true }) }
     return report
   }
-  launch(profile) {
+  launch(profile, options = DEFAULT_OPTIONS) {
     return this.browserType.launchPersistentContext(profile, {
       channel: 'chrome', executablePath: this.environment.cached?.chrome.executable || undefined,
-      headless: true, viewport: { width: 1280, height: 800 },
+      headless: options.headless, viewport: { width: 1280, height: 800 },
       acceptDownloads: false, timeout: 30000,
       args: ['--no-first-run', '--no-default-browser-check'],
     })
@@ -54,17 +58,32 @@ export class BrowserEngine extends EventEmitter {
   }
   state(id) {
     const session = this.sessions.get(id)
-    if (!session) return { id, state: 'stopped', tabs: [], activeTab: null, generation: 0 }
-    return { id, state: session.context ? session.lease ? 'owner_control' : 'ready' : 'stopped', owner_login: !!session.ownerLogin, controller: session.controller || null, generation: session.generation, activeTab: session.active, tabs: [...session.tabs].map(([tabId, page]) => ({ id: tabId, title: session.titles.get(tabId) || '新标签页', url: page.url() })) }
+    const options = { ...(session?.options || this.options.values.get(id) || DEFAULT_OPTIONS) }
+    if (!session) return { id, state: 'stopped', tabs: [], activeTab: null, generation: 0, options, access_issue: null }
+    return { id, state: session.context ? session.lease ? 'owner_control' : 'ready' : 'stopped', owner_login: !!session.ownerLogin, controller: session.controller || null, generation: session.generation, activeTab: session.active, options, access_issue: session.accessIssues?.get(session.active) || null, tabs: [...session.tabs].map(([tabId, page]) => ({ id: tabId, title: session.titles.get(tabId) || '新标签页', url: page.url() })) }
+  }
+  async settings(id) { return this.options.get(id) }
+  async configure(id, input) {
+    this.options.filename(id)
+    if (this.closed || this.starting.has(id) || this.stopping.has(id) || this.configuring.has(id) || this.sessions.get(id)?.context) throw new RuntimeError('settings_busy', '请先停止浏览器再修改启动模式；登录资料会保留')
+    this.configuring.add(id)
+    try {
+      const options = await this.options.save(id, input)
+      const session = this.sessions.get(id)
+      if (session) session.options = options
+      this.emit('state', this.state(id))
+      return this.state(id)
+    } finally { this.configuring.delete(id) }
   }
   async start(id) {
     if (!validId(id)) throw new RuntimeError('invalid_session', '浏览器会话标识无效', 400)
-    if (this.closed || this.stopping.has(id)) throw new RuntimeError('busy', '运行时正在停止')
+    if (this.closed || this.stopping.has(id) || this.configuring.has(id)) throw new RuntimeError('busy', '运行时正在停止或保存设置，请稍后重试')
     if (this.starting.has(id)) return this.starting.get(id)
     if (this.sessions.get(id)?.context) return this.state(id)
     const job = this.startOnce(id).finally(() => this.starting.delete(id)); this.starting.set(id, job); return job
   }
   async startOnce(id) {
+    const options = await this.settings(id)
     const report = await this.prepare()
     if (report.state !== 'ready') throw new RuntimeError(report.state, '请先完成环境检测并安装或修复 Google Chrome')
     const profile = path.join(this.directory, 'profiles', id)
@@ -73,24 +92,27 @@ export class BrowserEngine extends EventEmitter {
     try { ownerLogin = JSON.parse(await fs.readFile(path.join(profile, 'haybot-login.json'), 'utf8')).paused !== false }
     catch (error) { if (error.code !== 'ENOENT') ownerLogin = true }
     let context
-    try { context = await this.launch(profile) } catch { throw new RuntimeError('launch_failed', 'Chrome 启动失败，资料可能已被另一进程占用') }
+    try { context = await this.launch(profile, options) } catch { throw new RuntimeError('launch_failed', 'Chrome 启动失败，请检查桌面环境与资料目录占用；不会自动切换启动模式') }
     if (this.closed || this.stopping.has(id)) { await context.close(); throw new RuntimeError('closed', '运行时正在停止') }
-    const session = { id, context, ownerLogin, tabs: new Map(), titles: new Map(), active: null, generation: 1, lease: null, stream: null, streamJob: Promise.resolve(), operation: Promise.resolve(), observers: 0, frame: 0 }
+    const session = { id, context, options, ownerLogin, accessIssues: new Map(), tabs: new Map(), titles: new Map(), active: null, generation: 1, lease: null, stream: null, streamJob: Promise.resolve(), operation: Promise.resolve(), observers: 0, frame: 0 }
     this.sessions.set(id, session)
     const register = page => {
       if ([...session.tabs.values()].includes(page)) return
       this.cancelPointer(session)
       const tabId = randomUUID(); session.tabs.set(tabId, page); session.active = tabId; session.generation++
+      page.on('domcontentloaded', () => { this.inspectAccessIssue(session, page).catch(() => {}) })
+      page.on('load', () => { this.inspectAccessIssue(session, page).catch(() => {}) })
       page.on('dialog', dialog => dialog.dismiss().catch(() => {}))
       page.on('framenavigated', frame => {
         if (frame !== page.mainFrame()) return
         this.cancelPointer(session)
         session.generation++; this.changed(session)
+        this.recordAccessIssue(session, page, xiaohongshuAccessIssue(page.url()))
         page.title().then(title => { session.titles.set(tabId, title); this.changed(session) }).catch(() => {})
       })
       page.on('close', () => {
         this.cancelPointer(session)
-        session.tabs.delete(tabId); session.titles.delete(tabId)
+        session.tabs.delete(tabId); session.titles.delete(tabId); session.accessIssues.delete(tabId)
         if (session.active === tabId) session.active = session.tabs.keys().next().value || null
         session.generation++; this.changed(session); this.refreshStream(session)
       })
@@ -107,6 +129,23 @@ export class BrowserEngine extends EventEmitter {
     return this.state(id)
   }
   changed(session) { this.emit('state', this.state(session.id)); this.refreshStream(session) }
+  recordAccessIssue(session, page, issue) {
+    const tabId = [...session.tabs].find(([, candidate]) => candidate === page)?.[0]
+    if (!session.context || !tabId || JSON.stringify(session.accessIssues.get(tabId) || null) === JSON.stringify(issue)) return
+    if (issue) session.accessIssues.set(tabId, issue)
+    else session.accessIssues.delete(tabId)
+    this.changed(session)
+  }
+  async inspectAccessIssue(session, page) {
+    const address = page.url(), generation = session.generation
+    const fromURL = xiaohongshuAccessIssue(address)
+    if (fromURL) { this.recordAccessIssue(session, page, fromURL); return }
+    let host
+    try { host = new URL(address).hostname } catch { return }
+    if (host !== 'xiaohongshu.com' && !host.endsWith('.xiaohongshu.com') || session.ownerLogin) return
+    const text = await page.locator('body').innerText({ timeout: 1500 })
+    if (!session.ownerLogin && session.context && generation === session.generation && address === page.url()) this.recordAccessIssue(session, page, xiaohongshuAccessIssue(address, text))
+  }
   async stop(id) {
     this.stopping.add(id)
     try {
@@ -265,6 +304,8 @@ export class BrowserEngine extends EventEmitter {
       if (!['Enter', 'Tab', 'Shift+Tab', 'Escape', 'Backspace', 'Delete', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'ControlOrMeta+A'].includes(input.key)) throw new RuntimeError('invalid_key', '不支持此按键', 400)
       await page.keyboard.press(input.key)
     } else throw new RuntimeError('invalid_action', '不支持此操作', 400)
+    // Do not read the document on each pointer move or keystroke.
+    if (['navigate', 'back', 'forward', 'reload'].includes(kind)) await this.inspectAccessIssue(session, page).catch(() => {})
     this.changed(session); return this.state(session.id)
   }
   async observe(id) {
@@ -275,6 +316,8 @@ export class BrowserEngine extends EventEmitter {
     const aria = (await page.locator('body').ariaSnapshot()).slice(0, 24000)
     this.requireObservation(session)
     if (!session.context || generation !== session.generation || page !== session.tabs.get(session.active)) throw new RuntimeError('stale_observation', '页面已变化，请重新观察')
+    const issue = xiaohongshuAccessIssue(page.url(), aria)
+    if (issue) throw new RuntimeError('site_access_blocked', issue.message)
     return { ...this.state(id), aria, viewport: page.viewportSize() }
   }
   requireObservation(session) {
