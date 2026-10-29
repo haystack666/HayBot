@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { RuntimeError } from './environment.mjs'
+import { DouyinSocial, writeOps } from './douyin-social.mjs'
 
 const platform = value => { try { const u = new URL(value); return u.protocol === 'https:' && (u.hostname === 'douyin.com' || u.hostname === 'www.douyin.com') } catch { return false } }
 const videoId = value => typeof value === 'string' && /^\d{6,30}$/.test(value)
@@ -69,7 +70,7 @@ export function contentItems(payload) {
 }
 
 export class DouyinAutomation {
-  constructor(engine) { this.engine = engine; this.ended = new Set() }
+  constructor(engine) { this.engine = engine; this.ended = new Set(); this.social = new DouyinSocial(this) }
   begin(id, input = {}) {
     const session = this.engine.get(id)
     this.engine.requireObservation(session)
@@ -79,18 +80,20 @@ export class DouyinAutomation {
     const token = input.runId || randomUUID()
     if (typeof token !== 'string' || !/^[a-zA-Z0-9-]{16,64}$/.test(token)) throw new RuntimeError('invalid_run', '任务标识无效', 400)
     if (this.ended.has(token)) throw new RuntimeError('automation_revoked', '本次任务已停止')
-    const run = { token, page, tab: session.active, viewing:viewingConfig(input.viewing), items: new Map(), currentItems: new Map(), coverage: new Map(), pending: new Set(), cancelled: false }
+    const run = { token, page, tab: session.active, viewing:viewingConfig(input.viewing), items: new Map(), currentItems: new Map(), coverage: new Map(), pending: new Set(), social:input.interactions || {}, people:new Map(), comments:new Map(), account:null, messageBaselines:new Map(), peer:'', cancelled: false }
+    run.published=new Map((input.published||[]).filter(p=>typeof p.cid==='string'&&videoId(p.video_id)&&typeof p.account_id==='string').map(p=>[p.cid,p]))
     run.response = response => {
       let url
       try { url = new URL(response.url()) } catch { return }
-      if (!platform(url.href) || !/\/aweme\/v\d+\/web\/(?:tab\/feed|module\/feed|aweme\/detail|general\/search|search\/item)/.test(url.pathname)) return
+      if (!platform(url.href) || !/\/aweme\/v\d+\/web\/(?:tab\/feed|module\/feed|aweme\/detail|general\/search|search\/item|user\/profile\/(?:self|other)|comment\/list)/.test(url.pathname)) return
       if (!/json/i.test(response.headers()['content-type'] || '') || Number(response.headers()['content-length']) > 2000000) return
       const generation = session.generation
       const work = (async () => {
         try {
           const body = await response.text()
           if (body.length > 2000000 || session.automation !== run || session.generation !== generation || !platform(page.url())) return
-          for (const item of contentItems(JSON.parse(body))) { run.items.set(item.id, item); run.currentItems.set(item.id,item) }
+          const payload=JSON.parse(body); this.social.ingest(run,url,payload)
+          for (const item of contentItems(payload)) { run.items.set(item.id, item); run.currentItems.set(item.id,item) }
           while (run.items.size > 200) run.items.delete(run.items.keys().next().value)
           while (run.currentItems.size > 60) run.currentItems.delete(run.currentItems.keys().next().value)
         } catch { /* An incomplete response is not content evidence. */ }
@@ -99,7 +102,7 @@ export class DouyinAutomation {
     }
     page.on('response', run.response); session.automation = run; this.engine.changed(session)
     this.renew(session, run)
-    return { token: run.token, viewing: run.viewing }
+    return { token: run.token, viewing: run.viewing, interactions:run.social }
   }
   renew(session, run) {
     clearTimeout(run.expiryTimer)
@@ -139,18 +142,32 @@ export class DouyinAutomation {
     this.guard(session, run)
     this.renew(session, run)
     const page = run.page, op = input.op
-    if (!['observe', 'home', 'search', 'open', 'next', 'scroll', 'watch', 'comments'].includes(op)) throw new RuntimeError('invalid_action', '不支持此抖音操作', 400)
+    if (!['observe', 'home', 'search', 'open', 'next', 'scroll', 'watch', 'comments', 'account', 'inbox', 'profile', 'owner_profile', 'conversation', 'stickers', ...writeOps].includes(op)) throw new RuntimeError('invalid_action', '不支持此抖音操作', 400)
     if (input.generation !== session.generation) throw new RuntimeError('stale_observation', '页面已变化，请重新观察')
-    if (!['home', 'search'].includes(op) && !platform(page.url())) throw new RuntimeError('wrong_platform', '当前已离开抖音，请先返回抖音')
-    if (op === 'home' || op === 'search' || op === 'open') {
+    if (!['home', 'search', 'account', 'inbox'].includes(op) && !platform(page.url())) throw new RuntimeError('wrong_platform', '当前已离开抖音，请先返回抖音')
+    if(writeOps.has(op)) {
+      const before=await this.snapshot(session,run)
+      if(before.blocked)return before
+      const interaction=await this.social.perform(session,run,input,before)
+      await this.pause(session,run)
+      return {...await this.snapshot(session,run),interaction}
+    }
+    if(['account','inbox','profile','owner_profile','conversation','stickers'].includes(op)) {
+      if(platform(page.url())) {
+        const before=await this.snapshot(session,run)
+        if(before.blocked)return before
+      }
+      await this.social.navigate(session,run,input)
+    } else if (op === 'home' || op === 'search' || op === 'open') {
       let url = 'https://www.douyin.com/'
       if (op === 'search') {
         if (typeof input.query !== 'string' || !input.query.trim() || input.query.length > 100) throw new RuntimeError('invalid_query', '搜索关键词须为 1–100 字', 400)
         url += 'search/' + encodeURIComponent(input.query.trim()) + '?type=video'
       }
       if (op === 'open') {
-        if (!videoId(input.id) || !run.items.has(input.id)) throw new RuntimeError('unobserved_video', '只能打开当前任务真实观察到的视频', 400)
-        const candidate = run.items.get(input.id)
+        const previous=[...run.published.values()].find(p=>p.video_id===input.id&&p.account_id===run.account?.id)
+        if (!videoId(input.id) || !run.items.has(input.id)&&!previous) throw new RuntimeError('unobserved_video', '只能打开实际观察或自己已发表评论的视频', 400)
+        const candidate = run.items.get(input.id)||{id:input.id,duration:null}
         if (watchPolicy(candidate.duration,run.viewing).mode === 'skip') {
           await this.pause(session,run)
           return {...await this.snapshot(session,run), skipped:{id:candidate.id,title:candidate.title,duration:candidate.duration,reason:`超过 ${run.viewing.max_video_minutes} 分钟，未打开观看`}}
@@ -297,6 +314,9 @@ export class DouyinAutomation {
     if (current) run.items.set(current.id,current)
     const blocked = data.challenge || /验证码|安全验证|完成验证|拖动滑块|验证后继续/.test(data.modal) ? 'captcha' : data.loginForm || /登录后(?:即可|查看|搜索)|扫码登录|手机号登录/.test(data.modal) ? 'login' : ''
     const policy=watchPolicy(data.playback?.duration || current?.duration,run.viewing)
-    return { platform:'douyin', generation, url, blocked, viewing:run.viewing, body:blocked ? '' : data.body, items:blocked ? [] : [...run.currentItems.values()].slice(-40).map(item=>({...item,watchPolicy:watchPolicy(item.duration,run.viewing)})), current:blocked ? null : current, playback:blocked ? null : data.playback, watchPolicy:blocked ? watchPolicy(null) : policy }
+    const social=blocked?{}:await this.social.read(session,run)
+    if(!blocked)run.lastSocial=social
+    const watched=!!current&&[...run.coverage.entries()].some(([key,ranges])=>key.startsWith(current.id+':')&&ranges.reduce((n,[a,b])=>n+b-a,0)>=1)
+    return { ...social, watched:!blocked&&watched, platform:'douyin', generation, url, blocked, viewing:run.viewing, body:blocked ? '' : data.body, items:blocked ? [] : [...run.currentItems.values()].slice(-40).map(item=>({...item,watchPolicy:watchPolicy(item.duration,run.viewing)})), current:blocked ? null : current, playback:blocked ? null : data.playback, watchPolicy:blocked ? watchPolicy(null) : policy }
   }
 }

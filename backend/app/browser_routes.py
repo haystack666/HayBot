@@ -51,7 +51,7 @@ def register_browser_routes(app, scoped_runtime):
 
     @app.get('/api/bots/{bot_id}/browser/douyin/tasks')
     async def browsing_tasks(runtime=Depends(scoped_runtime)):
-        return {'tasks': app.state.browser_tasks.list(runtime.id)}
+        return {'tasks': app.state.browser_tasks.list(runtime.id), 'operations': app.state.browser_tasks.interactions.history(runtime.id)}
 
     @app.post('/api/bots/{bot_id}/browser/douyin/tasks')
     async def start_browsing(body: BrowserTaskBody, request: Request, runtime=Depends(scoped_runtime)):

@@ -176,4 +176,4 @@ class BrowserQQ:
         import json
         jobs = [{'goal': t['goal'], 'state': t['state'], 'result': t['result']} for t in self.tasks.list(runtime.id)
             if t['origin'].get('source') == 'qq' and self.tasks.valid(t)][:3]
-        return '\n[真实浏览器能力]你能通过独立Chrome搜索、浏览和观看抖音。明确操作委托由独立任务执行；不要在聊天中虚构操作结果。目前不能发布评论、真实@、点赞、关注或私信。平台验证/登录由主人接管。最近真实浏览结果：' + json.dumps(jobs, ensure_ascii=False) + '\n'
+        return '\n[真实浏览器能力]你能通过独立Chrome搜索、浏览和观看抖音。明确操作委托由独立任务执行；不要在聊天中虚构操作结果。评论、真实@、点赞、私信回复、站内分享由抖音设置与额度控制，未开启时不能执行。分享给主人默认走抖音站内分享给 Owner 抖音号，要求@则真实评论@。不能主动私信陌生人，关注尚不支持。平台验证/登录由主人接管。最近真实浏览结果：' + json.dumps(jobs, ensure_ascii=False) + '\n'

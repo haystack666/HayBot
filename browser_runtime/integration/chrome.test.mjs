@@ -58,7 +58,7 @@ test('real macOS Chrome: hidden launch, streaming, controls, tabs, media and per
     await once(ws, 'open')
     await page.waitForTimeout(1400)
     assert.ok(frames.length >= 3, `received ${frames.length} frames`)
-    assert.equal(frames[0].viewportWidth, 1280); assert.equal(frames[0].viewportHeight, 800)
+    assert.equal(frames[0].viewportWidth, 1600); assert.equal(frames[0].viewportHeight, 900)
     assert.equal(Buffer.from(frames[0].data, 'base64').readUInt16BE(0), 0xffd8)
     const frameCount = frames.length
     const claimed = await fetch(runtime.origin + '/api/sessions/a/claim', { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ connectionId: viewerConnection }) })

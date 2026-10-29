@@ -3,6 +3,8 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Panel, Field, Notice } from './components/console'
+import DouyinInteractionSettings from './DouyinInteractionSettings'
+import {interactionDefaults,interactionError} from './lib/douyin-interactions.mjs'
 import { viewingDefaults, viewingFields, viewingError } from './lib/browser-viewing.mjs'
 
 const labels = { queued:'等待开始', running:'浏览中', completed:'已完成', blocked:'需要处理', paused:'进度已保存', failed:'未完成', interrupted:'已中断', cancelled:'已停止', unknown:'状态待核对' }
@@ -13,6 +15,7 @@ function TaskProgress({ task }) {
   return <>
     <ol>{task.steps.map((step,i)=><li key={i}>
       <span>{step.reason}</span>{step.current?.title&&<p>{step.current.title}</p>}
+      {step.interaction&&<p>{({confirmed:'已确认',failed:'未成功',unknown:'结果待核对，请勿重发'})[step.interaction.status]}{step.interaction.reason?` · ${step.interaction.reason}`:''}</p>}
       {step.skipped&&<p>{step.skipped.title&&`${step.skipped.title} · `}{step.skipped.reason}</p>}
       {step.seekFailed&&<p>跳转未确认，未播放该片段</p>}
       {step.previewComplete&&<p>默认分段预览已结束，未完整观看</p>}
@@ -27,14 +30,15 @@ function TaskProgress({ task }) {
   </>
 }
 export default function BrowserDouyin({ api, notify }) {
-  const [config,setConfig]=useState(null),[bound,setBound]=useState(true),[tasks,setTasks]=useState([]),[goal,setGoal]=useState(''),[settings,setSettings]=useState(false),[busy,setBusy]=useState(false),[error,setError]=useState('')
-  const refresh = useCallback(async () => { try { const value=await api('/browser/douyin/tasks');setTasks(value.tasks);setError('') } catch(e){setError(e.message)} },[api])
+  const [config,setConfig]=useState(null),[bound,setBound]=useState(true),[tasks,setTasks]=useState([]),[goal,setGoal]=useState(''),[settings,setSettings]=useState(false),[busy,setBusy]=useState(false),[error,setError]=useState(''),[operations,setOperations]=useState([])
+  const refresh = useCallback(async () => { try { const value=await api('/browser/douyin/tasks');setTasks(value.tasks);setOperations(value.operations||[]);setError('') } catch(e){setError(e.message)} },[api])
   useEffect(()=>{let alive=true;api('/browser/douyin/config').then(v=>{if(alive){setConfig(v.config);setBound(v.qq_account_bound)}}).catch(e=>{if(alive)setError(e.message)});refresh();const timer=setInterval(refresh,3000);return()=>{alive=false;clearInterval(timer)}},[api,refresh])
   const current=tasks.find(active)
   const update=(key,value)=>setConfig(c=>({...c,[key]:value}))
   const viewing={...viewingDefaults,...config?.viewing}
+  const interactions={...interactionDefaults,...config?.interactions,owner:{...interactionDefaults.owner,...config?.interactions?.owner}}
   const updateViewing=(key,value)=>setConfig(c=>({...c,viewing:{...viewingDefaults,...c.viewing,[key]:value}}))
-  const save=async()=>{const invalid=viewingError(viewing);if(invalid){setError(invalid);return}setBusy(true);try{setConfig(await api('/browser/douyin/config','PUT',{...config,viewing}));setBound(true);setError('');notify?.('抖音设置已保存')}catch(e){setError(e.message)}finally{setBusy(false)}}
+  const save=async()=>{const invalid=viewingError(viewing)||interactionError(interactions);if(invalid){setError(invalid);return}setBusy(true);try{setConfig(await api('/browser/douyin/config','PUT',{...config,viewing,interactions}));setBound(true);setError('');notify?.('抖音设置已保存')}catch(e){setError(e.message)}finally{setBusy(false)}}
   const start=async e=>{e.preventDefault();setBusy(true);try{await api('/browser/douyin/tasks','POST',{goal});setGoal('');await refresh()}catch(e){setError(e.message)}finally{setBusy(false)}}
   const stop=async id=>{setBusy(true);try{await api(`/browser/douyin/tasks/${id}/stop`,'POST',{});await refresh()}catch(e){setError(e.message)}finally{setBusy(false)}}
   return <Panel title="抖音自主浏览" action={<Button size="sm" variant="outline" aria-expanded={settings} onClick={()=>setSettings(v=>!v)}>{settings?'收起设置':'设置'}</Button>}>
@@ -54,12 +58,14 @@ export default function BrowserDouyin({ api, notify }) {
         <label><input type="checkbox" checked={viewing.preview_enabled} onChange={e=>updateViewing('preview_enabled',e.target.checked)}/> 长视频分段跳看</label>
         <div className="form-grid">{viewingFields.map(([key,label,min,max])=><Field key={key} label={label} id={`browser-viewing-${key}`}><Input id={`browser-viewing-${key}`} type="number" min={min} max={max} step={1} value={viewing[key]} disabled={!viewing.preview_enabled&&key!=='max_video_minutes'} onChange={e=>updateViewing(key,e.target.value===''?'':Number(e.target.value))}/></Field>)}</div>
       </fieldset>
+      <DouyinInteractionSettings value={interactions} onChange={v=>update('interactions',v)} disabled={!!current||busy}/>
       {!bound&&config.qq_enabled&&<Notice>保存后，QQ 授权会绑定当前接入账号。</Notice>}
       <div><Button size="sm" disabled={!!current||busy} onClick={save}>保存设置</Button></div>
     </div>}
     {config&&!config.enabled&&<Notice>在设置中开启后，可从这里或 Owner 私聊发起抖音任务。</Notice>}
     <form className="action-row" onSubmit={start}><Input aria-label="抖音浏览任务" placeholder="去抖音看看你感兴趣的内容" value={goal} maxLength={3000} disabled={busy||!!current||!config?.enabled} onChange={e=>setGoal(e.target.value)}/><Button type="submit" disabled={busy||!!current||!config?.enabled||!goal.trim()}>开始浏览</Button>{current&&<Button type="button" variant="outline" disabled={busy} onClick={()=>stop(current.id)}>停止</Button>}</form>
-    <p className="browser-task-capability">支持搜索、刷推荐、观看和读取评论；评论发布、@、点赞与私信尚未接入。</p>
+    <p className="browser-task-capability">评论、@、点赞、私信回复与站内分享按设置执行。</p>
+    {!!operations.length&&<details><summary>最近互动（{operations.length}）</summary><div className="douyin-operation-list">{operations.map(item=><div key={item.id}><span>{({comment:'新评论',reply_comment:'评论回复',reply_dm:'私信回复',like:'点赞',share:'站内分享',share_note:'分享附言'})[item.op]}</span><span>{({confirmed:'已确认',failed:'未成功',unknown:'待核对',pending:'提交中'})[item.status]}</span><time>{new Date(item.created*1000).toLocaleString()}</time></div>)}</div></details>}
     <div className="browser-task-list">{tasks.slice(0,10).map(task=><details key={task.id} className="browser-task"><summary><span>{labels[task.state]||task.state}</span><strong>{task.goal}</strong><time>{new Date(task.created*1000).toLocaleString('zh-CN',{hour12:false})}</time></summary>{task.result&&<p>{task.result}</p>}{task.origin.source==='qq'&&<p>QQ 回报：{({sent:'已收到发送回执',unknown:'发送结果未确认',skipped:'授权或回复时效已变化'})[task.notification]||'尚未发送'}</p>}<TaskProgress task={task}/></details>)}</div>
   </Panel>
 }

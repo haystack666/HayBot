@@ -46,7 +46,7 @@ export class BrowserEngine extends EventEmitter {
   launch(profile) {
     return this.browserType.launchPersistentContext(profile, {
       channel: 'chrome', executablePath: this.environment.cached?.chrome.executable || undefined,
-      headless: true, viewport: { width: 1280, height: 800 },
+      headless: true, viewport: { width: 1600, height: 900 },
       acceptDownloads: false, timeout: 30000,
       args: ['--no-first-run', '--no-default-browser-check', '--mute-audio'],
     })

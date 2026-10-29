@@ -89,9 +89,9 @@ test('cancellation before begin finishes cannot resurrect the task; in-flight wa
  assert.equal(session.automation,null)
 })
 
-test('automation exposes only read/browse operations and only previously observed video IDs',async()=>{
+test('automation rejects arbitrary actions and unobserved video IDs',async()=>{
  const {engine}=fixture(),grant=engine.douyin.begin('one')
- await assert.rejects(engine.douyin.act('one',{token:grant.token,generation:1,op:'comment',text:'no'}),{code:'invalid_action'})
+  await assert.rejects(engine.douyin.act('one',{token:grant.token,generation:1,op:'arbitrary_script',text:'no'}),{code:'invalid_action'})
  await assert.rejects(engine.douyin.act('one',{token:grant.token,generation:1,op:'open',id:'1234567890123456789'}),{code:'unobserved_video'})
  await assert.rejects(engine.douyin.act('one',{token:grant.token,generation:0,op:'next'}),{code:'stale_observation'})
  engine.douyin.end('one',grant.token)

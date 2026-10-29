@@ -378,3 +378,27 @@ def test_old_runtime_cannot_silently_ignore_user_viewing_settings(client,monkeyp
     assert task['state']=='blocked' and '观看策略' in task['result']
     assert not any(path.endswith('/act') for _,path,_ in host.calls)
     assert host.token is None
+
+
+def test_confirmed_like_integrates_durable_policy_and_completion(client,monkeypatch):
+    decisions=iter([{'op':'watch','reason':'先看内容','seconds':3},{'op':'like','id':'1234567890123456789','reason':'动作有趣'},
+        {'op':'finish','reason':'本轮已完成','note':'看了这一段，也点了赞。'}])
+    tasks,host,_=setup(client,monkeypatch,decisions)
+    config=tasks.config('default');config.interactions.likes_enabled=True
+    client.portal.call(tasks.save_config,'default',config)
+    original=host.request
+    async def request(method,path,body=None):
+        result=await original(method,path,body)
+        if path.endswith('/douyin/begin'):result['interactions']=body['interactions']
+        if path.endswith('/douyin/act'):
+            result.update(account={'id':'self-sec','verified':True},watched=True)
+            if body['op']=='like':
+                assert body['authorization']['account_id']=='self-sec'
+                result['interaction']={'op':'like','status':'confirmed','submitted':True}
+        return result
+    monkeypatch.setattr(tasks.browser.gateway,'request',request)
+    result=run_task(client,tasks,'刷抖音并点赞')
+    assert result['state']=='completed'
+    assert any(s.get('interaction',{}).get('status')=='confirmed' for s in result['steps'])
+    assert tasks.interactions.count('self-sec','like')==1
+    assert 'operation_id' not in json.dumps(result)

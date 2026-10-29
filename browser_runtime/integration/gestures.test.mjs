@@ -27,7 +27,7 @@ test('viewer gestures: scaled drag, nested wheel, swipe, touch, expanded coordin
     await target.waitForTimeout(500)
     await viewer.waitForFunction(generation => {
       const screen = document.querySelector('#screen')
-      return screen.dataset.frameGeneration === String(generation) && screen.dataset.viewportWidth === '1280' && screen.dataset.viewportHeight === '800'
+      return screen.dataset.frameGeneration === String(generation) && screen.dataset.viewportWidth === '1600' && screen.dataset.viewportHeight === '900'
     }, session.generation, { timeout: 5000 })
     const requests = []
     viewer.on('request', request => { if (request.url().endsWith('/action')) { const { kind, phase, x, y } = JSON.parse(request.postData()); requests.push({ kind, phase, x, y }) } })
