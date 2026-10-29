@@ -8,7 +8,7 @@ class FakeEngine extends EventEmitter {
   constructor() { super(); this.calls = 0; this.environment = { public: value => value }; this.report = { state: 'needs_install', checks: [], installUrl: 'https://www.google.cn/chrome/' } }
   prepare() { this.calls++; return this.report }
   state() { return { state: 'stopped' } }
-  async settings() { return { headless: false } }
+  async settings() { return { headless: true } }
   async close() {}
 }
 test('runtime rejects anonymous, cross-origin, and oversized mutations; HTTP cookie is protected', async () => {
@@ -50,7 +50,7 @@ test('Chinese input survives UTF-8 characters split across request chunks', asyn
   } finally { await runtime.close() }
 })
 
-test('runtime settings require authentication and explicit headless risk acknowledgement', async () => {
+test('runtime settings require authentication and reject old headed requests', async () => {
   const { promises: fs } = await import('node:fs')
   const os = await import('node:os'), path = await import('node:path')
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'haybot-settings-api-'))
@@ -58,13 +58,13 @@ test('runtime settings require authentication and explicit headless risk acknowl
   const request = (method, value, headers = { Authorization: `Bearer ${token}` }) => fetch(runtime.origin + '/api/sessions/one/settings', { method, headers, body: value === undefined ? undefined : JSON.stringify(value) })
   try {
     assert.equal((await request('GET', undefined, {})).status, 401)
-    assert.deepEqual(await (await request('GET')).json(), { headless: false })
-    assert.equal((await request('POST', { headless: true })).status, 400)
+    assert.deepEqual(await (await request('GET')).json(), { headless: true })
+    assert.equal((await request('POST', { headless: true })).status, 200)
     assert.equal((await request('POST', { headless: 'false' })).status, 400)
     const result = await request('POST', { headless: true, acknowledgeHeadlessRisk: true })
     assert.equal(result.status, 200); assert.equal((await result.json()).options.headless, true)
     const state = await fetch(runtime.origin + '/api/sessions/one', { headers: { Authorization: `Bearer ${token}` } })
     assert.equal((await state.json()).options.headless, true)
-    assert.equal((await request('POST', { headless: false })).status, 200)
+    assert.equal((await request('POST', { headless: false })).status, 400)
   } finally { await runtime.close(); await fs.rm(directory, { recursive: true, force: true }) }
 })

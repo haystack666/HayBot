@@ -50,8 +50,8 @@ def register_browser_routes(app, scoped_runtime):
         s = service()
         async with s.lock(runtime.id):
             authorization(request, runtime)
-            if body.headless and not body.acknowledgeHeadlessRisk:
-                raise HTTPException(400, '开启实验性无头模式前，请确认访问异常、登录验证及风控拦截等风险')
+            if not body.headless:
+                raise HTTPException(400, '当前仅支持无头模式；实时查看与接管仍可使用，请刷新管理页面')
             return await s.gateway.request('POST', s.path(runtime.id) + '/settings', body.model_dump())
 
     @app.post('/api/bots/{bot_id}/browser/{operation}')

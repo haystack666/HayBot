@@ -14,9 +14,9 @@ export default function AndroidCompanion({ value, onChange, disabled }) {
     <Field label="内容筛选要求" id="android-content-constraints" hint="例如：跳过带货、标题党和搬运；优先实际演示。"><Textarea id="android-content-constraints" maxLength={2000} value={c.content_constraints || ''} disabled={disabled} onChange={e => update({ content_constraints: e.target.value })} /></Field>
     <Field label="视频缓冲等待（秒）" id="android-buffer-wait" hint="后台持续观察播放恢复，默认等 120 秒；期间不因两次短等待就换片。"><Input id="android-buffer-wait" type="number" min={30} max={600} value={c.buffering_wait_seconds ?? 120} disabled={disabled} onChange={e => update({ buffering_wait_seconds: e.target.value })} /></Field>
     <Field label="公开评论风格" id="android-public-persona" hint="仅用于公开评论，不会读取私人聊天人格、记忆或日程；原有配置保留。"><Textarea id="android-public-persona" maxLength={1000} rows={3} value={c.public_persona} disabled={disabled} placeholder="例如：简短自然，结合具体画面，不写套话。" onChange={e => update({ public_persona: e.target.value })} /></Field>
-    {['douyin','bilibili','xiaohongshu'].map((id,index) => {
+    {['douyin','bilibili'].map((id,index) => {
       const p = { comments: false, mentions: false, owner_id: '', owner_name: '', cooldown_minutes: 30, daily_limit: 5, ...c.platforms?.[id] }
-      return <details className="android-task" key={id}><summary>{['抖音','bilibili','小红书'][index]} · {p.comments ? '允许自主评论' : '未开启评论'}</summary><div className="page-stack pt-4">
+      return <details className="android-task" key={id}><summary>{['抖音','bilibili'][index]} · {p.comments ? '允许自主评论' : '未开启评论'}</summary><div className="page-stack pt-4">
         <label className="setting-toggle"><span>允许自主评论，无需逐条确认</span><Switch checked={p.comments} disabled={disabled} onCheckedChange={v => platform(id, { comments: v })} /></label>
         <label className="setting-toggle"><span>看到有意思的内容可以 @ owner</span><Switch checked={p.mentions} disabled={disabled || !p.comments} onCheckedChange={v => platform(id, { mentions: v })} /></label>
         <Field label="Bot 登录的平台账号 ID" id={`${id}-posting-account-id`} hint="填写手机里实际发表评论的账号 ID；多个 Bot 使用同一账号时填写相同值，用于跨 Bot 去重。留空兼容原有账号分组。"><Input id={`${id}-posting-account-id`} maxLength={128} value={p.posting_account_id || ''} disabled={disabled} onChange={e => platform(id, { posting_account_id: e.target.value })} /></Field>

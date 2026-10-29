@@ -29,7 +29,7 @@ test('real macOS Chrome: hidden launch, streaming, controls, tabs, media and per
     const processes = (await execFile('/bin/ps', ['-axo', 'pid=,command='])).stdout
     const command = processes.split('\n').find(line => line.includes('--user-data-dir=' + path.join(directory, 'profiles', id)) && line.includes('Contents/MacOS/Google Chrome'))
     assert.ok(command, 'identify only the test-owned browser process')
-    assert.match(command, /--headless(?:\s|=)/); assert.match(command, /--remote-debugging-pipe/)
+    assert.match(command, /--headless(?:\s|=)/); assert.match(command, /--remote-debugging-pipe/); assert.match(command, /--mute-audio/)
     const pid = Number(command.trim().split(/\s+/)[0])
     const native = JSON.parse((await execFile(inspector, [String(pid)])).stdout)
     assert.equal(native.activationPolicy, 2, 'prohibited application activation: no Dock or app-switcher entry')
