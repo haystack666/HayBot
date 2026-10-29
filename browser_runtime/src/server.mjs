@@ -9,11 +9,11 @@ import { RuntimeError } from './environment.mjs'
 
 const publicRoot = fileURLToPath(new URL('../public/', import.meta.url))
 function equal(a, b) { const x = Buffer.from(a || ''), y = Buffer.from(b || ''); return x.length === y.length && timingSafeEqual(x, y) }
-async function body(request) {
+async function body(request, limit = 32768) {
   const parts = []; let size = 0
   for await (const part of request) {
     size += part.length
-    if (size > 32768) throw new RuntimeError('body_too_large', '请求过大', 413)
+    if (size > limit) throw new RuntimeError('body_too_large', '请求过大', 413)
     parts.push(part)
   }
   try {
@@ -60,7 +60,7 @@ export async function createRuntimeServer({ directory, token, engine = new Brows
         if (operation === 'settings' && method === 'GET') return json(response, 200, await engine.settings(id))
         if (operation === 'observe' && method === 'GET') return json(response, 200, await engine.observe(id))
         if (method !== 'POST') throw new RuntimeError('method_not_allowed', '请求方法无效', 405)
-        const input = await body(request)
+        const input = await body(request, operation === 'douyin/begin' ? 131072 : 32768)
         if (operation === 'douyin/begin') return json(response, 200, engine.douyin.begin(id, input))
         if (operation === 'douyin/end') return json(response, 200, engine.douyin.end(id, input.token))
         if (operation === 'douyin/act') return json(response, 200, await engine.douyin.act(id, input))
