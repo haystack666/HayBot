@@ -76,14 +76,17 @@ export class BrowserEngine extends EventEmitter {
     this.sessions.set(id, session)
     const register = page => {
       if ([...session.tabs.values()].includes(page)) return
+      this.cancelPointer(session)
       const tabId = randomUUID(); session.tabs.set(tabId, page); session.active = tabId; session.generation++
       page.on('dialog', dialog => dialog.dismiss().catch(() => {}))
       page.on('framenavigated', frame => {
         if (frame !== page.mainFrame()) return
+        this.cancelPointer(session)
         session.generation++; this.changed(session)
         page.title().then(title => { session.titles.set(tabId, title); this.changed(session) }).catch(() => {})
       })
       page.on('close', () => {
+        this.cancelPointer(session)
         session.tabs.delete(tabId); session.titles.delete(tabId)
         if (session.active === tabId) session.active = session.tabs.keys().next().value || null
         session.generation++; this.changed(session); this.refreshStream(session)
@@ -92,6 +95,7 @@ export class BrowserEngine extends EventEmitter {
     }
     context.on('page', register)
     context.on('close', () => {
+      this.cancelPointer(session)
       session.context = null; session.lease = null; session.controller = null; session.tabs.clear(); session.active = null; session.generation++
       this.changed(session)
     })
@@ -105,19 +109,92 @@ export class BrowserEngine extends EventEmitter {
     try {
       await this.starting.get(id)?.catch(() => {})
       const session = this.sessions.get(id)
-      if (session?.context) { session.lease = null; session.generation++; await session.context.close() }
+      if (session?.context) { this.cancelPointer(session); session.lease = null; session.generation++; await session.context.close() }
       return this.state(id)
     } finally { this.stopping.delete(id) }
   }
   claim(id, controller = null) {
     this.requireReady()
-    const session = this.get(id); session.lease = randomUUID(); session.controller = controller; session.generation++; this.changed(session)
+    const session = this.get(id); this.cancelPointer(session); session.lease = randomUUID(); session.controller = controller; session.generation++; this.changed(session)
     return { lease: session.lease, generation: session.generation }
   }
   release(id, lease) {
     const session = this.get(id)
     if (lease !== session.lease) throw new RuntimeError('stale_control', '操作权限已失效，请重新接管')
-    session.lease = null; session.controller = null; session.generation++; this.changed(session); return this.state(id)
+    this.cancelPointer(session); session.lease = null; session.controller = null; session.generation++; this.changed(session); return this.state(id)
+  }
+  point(page, input) {
+    const viewport = page.viewportSize()
+    if (!Number.isFinite(input.x) || !Number.isFinite(input.y) || input.x < 0 || input.y < 0 || input.x >= viewport.width || input.y >= viewport.height) throw new RuntimeError('invalid_coordinates', '操作位置超出当前画面', 400)
+    return { x: input.x, y: input.y }
+  }
+  async liftPointer(pointer, cancelled = false) {
+    clearTimeout(pointer.timer)
+    if (pointer.mode !== 'drag') return
+    try {
+      // Release outside the page on cancellation to avoid turning a lost tap into a click.
+      if (cancelled) await pointer.page.mouse.move(-1, -1)
+      await pointer.page.mouse.up()
+    } catch { /* A closed/crashed page has already released its native input. */ }
+  }
+  cancelPointer(session) {
+    const pointer = session.pointer
+    if (!pointer) return
+    session.pointer = null; clearTimeout(pointer.timer)
+    // Queue the release after an in-flight mouse.down, before the next owner's input.
+    session.operation = session.operation.catch(() => {}).then(() => this.liftPointer(pointer, true))
+  }
+  async pointerInput(session, page, input) {
+    const { phase, gestureId } = input
+    if (!validId(gestureId) || !['start', 'move', 'end', 'cancel'].includes(phase)) throw new RuntimeError('invalid_pointer', '手势参数无效', 400)
+    const point = phase === 'cancel' ? null : this.point(page, input)
+    let pointer = session.pointer
+    if (phase === 'start') {
+      if (!['drag', 'swipe'].includes(input.mode)) throw new RuntimeError('invalid_pointer', '手势模式无效', 400)
+      if (pointer) throw new RuntimeError('pointer_busy', '前一次手势尚未结束')
+      pointer = { id: gestureId, page, mode: input.mode, last: point, start: point, moved: false }
+      session.pointer = pointer
+      try {
+        await page.mouse.move(point.x, point.y)
+        if (session.pointer !== pointer) throw new RuntimeError('stale_control', '手势已取消，请重新操作')
+        if (pointer.mode === 'drag') await page.mouse.down()
+      } catch (error) {
+        if (session.pointer === pointer) { session.pointer = null; await this.liftPointer(pointer, true) }
+        throw error
+      }
+    } else {
+      if (!pointer || pointer.id !== gestureId || pointer.page !== page) throw new RuntimeError('stale_pointer', '手势已结束或取消，请重新操作')
+      if (phase === 'cancel') { session.pointer = null; await this.liftPointer(pointer, true); return }
+      clearTimeout(pointer.timer)
+      try {
+        if (pointer.mode === 'drag') await page.mouse.move(point.x, point.y)
+        else {
+          if (Math.hypot(point.x - pointer.start.x, point.y - pointer.start.y) >= 4) pointer.moved = true
+          // A swipe scrolls the desktop page under the original finger position.
+          // Keeping the anchor fixed also routes scrolling into nested scroll containers.
+          if (pointer.moved) {
+            await page.mouse.move(pointer.start.x, pointer.start.y)
+            if (session.pointer !== pointer) throw new RuntimeError('stale_control', '手势已取消，请重新操作')
+            await page.mouse.wheel(pointer.last.x - point.x, pointer.last.y - point.y)
+          }
+        }
+        if (session.pointer !== pointer) throw new RuntimeError('stale_control', '手势已取消，请重新操作')
+        pointer.last = point
+        if (phase === 'end') {
+          session.pointer = null
+          await this.liftPointer(pointer)
+          if (pointer.mode === 'swipe' && !pointer.moved) await page.mouse.click(point.x, point.y)
+          return
+        }
+      } catch (error) {
+        if (session.pointer === pointer) { session.pointer = null; await this.liftPointer(pointer, true) }
+        throw error
+      }
+    }
+    if (session.pointer === pointer) {
+      clearTimeout(pointer.timer)
+      pointer.timer = setTimeout(() => this.cancelPointer(session), 10000); pointer.timer.unref()
+    }
   }
   watch(id, delta) {
     const session = this.get(id); session.observers = Math.max(0, session.observers + delta); this.refreshStream(session)
@@ -150,9 +227,19 @@ export class BrowserEngine extends EventEmitter {
     this.requireReady()
     const { lease, generation, tabId, kind } = input || {}
     if (!session.context || !session.lease || lease !== session.lease || generation !== session.generation || tabId !== session.active) throw new RuntimeError('stale_control', '页面或操作权限已变化，请等待最新画面后重试')
-    if (kind === 'new_tab') { await session.context.newPage(); this.changed(session); return this.state(session.id) }
+    if (kind === 'new_tab') {
+      if (session.pointer) { const pointer = session.pointer; session.pointer = null; await this.liftPointer(pointer, true) }
+      await session.context.newPage(); this.changed(session); return this.state(session.id)
+    }
     const page = session.tabs.get(tabId)
     if (!page) throw new RuntimeError('tab_closed', '标签页已关闭')
+    if (kind === 'pointer') {
+      await this.pointerInput(session, page, input)
+      return this.state(session.id)
+    }
+    if (session.pointer) {
+      const pointer = session.pointer; session.pointer = null; await this.liftPointer(pointer, true)
+    }
     if (kind === 'navigate') await page.goto(navigationURL(input.url), { waitUntil: 'domcontentloaded', timeout: 20000 })
     else if (kind === 'back') await page.goBack({ waitUntil: 'domcontentloaded', timeout: 20000 })
     else if (kind === 'forward') await page.goForward({ waitUntil: 'domcontentloaded', timeout: 20000 })
@@ -162,11 +249,11 @@ export class BrowserEngine extends EventEmitter {
       session.active = input.target; session.generation++; await session.tabs.get(input.target).bringToFront(); await this.refreshStream(session)
     } else if (kind === 'close_tab') await page.close()
     else if (kind === 'click') {
-      const viewport = page.viewportSize()
-      if (!Number.isFinite(input.x) || !Number.isFinite(input.y) || input.x < 0 || input.y < 0 || input.x >= viewport.width || input.y >= viewport.height) throw new RuntimeError('invalid_coordinates', '点击位置超出当前画面', 400)
-      await page.mouse.click(input.x, input.y)
+      const point = this.point(page, input)
+      await page.mouse.click(point.x, point.y)
     } else if (kind === 'scroll') {
       if (![input.deltaX, input.deltaY].every(value => Number.isFinite(value) && Math.abs(value) <= 3000)) throw new RuntimeError('invalid_scroll', '滚动参数无效', 400)
+      if (input.x !== undefined || input.y !== undefined) { const point = this.point(page, input); await page.mouse.move(point.x, point.y) }
       await page.mouse.wheel(input.deltaX, input.deltaY)
     } else if (kind === 'text') {
       if (typeof input.text !== 'string' || input.text.length > 5000) throw new RuntimeError('invalid_text', '输入文字过长', 400)

@@ -1,8 +1,16 @@
+import { bindScreenInput } from './input.js'
 const $ = id => document.getElementById(id)
 let environment, state = { state: 'stopped', tabs: [] }, lease = null, socket, epoch = 0, session = 'prototype-a', busy = false, drawing = false, pendingFrame, viewport, lastFrameAt = 0, expanded = false, connected = false
 let actionQueue = Promise.resolve(), connectionId = null
 const controls = document.querySelectorAll('[data-control]')
 function notice(message = '') { $('notice').textContent = message }
+function applyState(next) {
+  if (state.generation !== next.generation || state.activeTab !== next.activeTab || state.id !== next.id) {
+    pendingFrame = null; viewport = null; lastFrameAt = 0; delete $('screen').dataset.frameGeneration
+    $('stream-state').textContent = '等待最新画面…'
+  }
+  state = next; render()
+}
 async function api(url, method = 'GET', value, token) {
   let response
   try { response = await fetch('/api' + url, { method, headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) }, body: value === undefined ? undefined : JSON.stringify(value) }) }
@@ -12,6 +20,7 @@ async function api(url, method = 'GET', value, token) {
   return data
 }
 function render() {
+  screenInput.sync()
   const active = state.state !== 'stopped', canControl = active && connected && !!lease && environment?.state === 'ready'
   $('start').disabled = busy || active || environment?.state !== 'ready'
   $('stop').disabled = busy || !active; $('session').disabled = busy
@@ -44,7 +53,7 @@ async function check(force = false) {
   } catch (error) { environment = null; $('environment-state').textContent = '宿主未连接'; notice(error.message); render() }
   finally { $('check').disabled = false }
 }
-function clearFrame() { pendingFrame = null; viewport = null; lastFrameAt = 0; const context = $('screen').getContext('2d'); context.clearRect(0, 0, $('screen').width, $('screen').height) }
+function clearFrame() { screenInput.reset(); pendingFrame = null; viewport = null; lastFrameAt = 0; delete $('screen').dataset.frameGeneration; const context = $('screen').getContext('2d'); context.clearRect(0, 0, $('screen').width, $('screen').height) }
 function connectStream() {
   socket?.close(); clearFrame(); connected = false; connectionId = null; const current = ++epoch
   if (state.state === 'stopped') { render(); return }
@@ -56,9 +65,8 @@ function connectStream() {
     const message = JSON.parse(event.data)
     if (message.type === 'state') {
       if (message.connectionId) connectionId = message.connectionId
-      if (state.generation !== message.state.generation) { pendingFrame = null; viewport = null }
       if (message.state.state !== 'owner_control' || message.state.controller !== connectionId) lease = null
-      state = message.state; render()
+      applyState(message.state)
     } else if (message.type === 'frame') { pendingFrame = { ...message, connectionEpoch: current }; draw() }
     else if (message.type === 'stream_error') $('stream-state').textContent = message.detail
   }
@@ -73,22 +81,26 @@ async function draw() {
       const bytes = Uint8Array.from(atob(frame.data), char => char.charCodeAt(0))
       const bitmap = await createImageBitmap(new Blob([bytes], { type: 'image/jpeg' }))
       if (frame.connectionEpoch !== epoch || frame.tabId !== state.activeTab || frame.generation !== state.generation) { bitmap.close(); continue }
-      const canvas = $('screen'); canvas.width = bitmap.width; canvas.height = bitmap.height; canvas.getContext('2d').drawImage(bitmap, 0, 0); bitmap.close()
+      const canvas = $('screen'); canvas.width = bitmap.width; canvas.height = bitmap.height; canvas.getContext('2d').drawImage(bitmap, 0, 0); bitmap.close(); canvas.dataset.frameGeneration = frame.generation
       viewport = { width: frame.viewportWidth, height: frame.viewportHeight, generation: frame.generation, tabId: frame.tabId }; lastFrameAt = Date.now(); $('stream-state').textContent = '实时画面 · 观看中'
+      canvas.dataset.viewportWidth = frame.viewportWidth; canvas.dataset.viewportHeight = frame.viewportHeight
     }
   } catch { notice('画面解码失败，请重新连接') }
   finally { drawing = false; if (pendingFrame) draw() }
 }
-function act(input) {
-  const expectedSession = session, capturedLease = lease, generation = input.generation ?? state.generation, tabId = input.tabId ?? state.activeTab
+function dispatch(input, captured = { session, lease, generation: state.generation, tabId: state.activeTab, epoch }) {
   const run = actionQueue.catch(() => {}).then(async () => {
-    if (expectedSession !== session || capturedLease !== lease || !lease || !connected) throw new Error('请先接管当前浏览器')
-    const result = await api(`/sessions/${session}/action`, 'POST', { ...input, lease, generation, tabId })
-    if (expectedSession === session) { state = result; render() }
-  }).catch(error => notice(error.message))
+    if (captured.session !== session || captured.lease !== lease || captured.epoch !== epoch || !lease || !connected) throw new Error('请先接管当前浏览器')
+    const result = await api(`/sessions/${session}/action`, 'POST', { ...input, lease: captured.lease, generation: captured.generation, tabId: captured.tabId })
+    if (captured.session === session && captured.epoch === epoch && result.generation >= state.generation) applyState(result)
+  })
   actionQueue = run; return run
 }
-async function run(callback) { busy = true; notice(); render(); try { await callback() } catch (error) { notice(error.message) } finally { busy = false; render() } }
+function act(input) { return dispatch(input).catch(error => notice(error.message)) }
+const screenInput = bindScreenInput({ canvas: $('screen'), mode: $('input-mode'), getView: () => viewport,
+  getContext: () => lease && connected && !busy && environment?.state === 'ready' ? { session, lease, generation: state.generation, tabId: state.activeTab, epoch } : null,
+  send: dispatch, report: notice })
+async function run(callback) { screenInput.cancel(); busy = true; notice(); render(); try { await callback() } catch (error) { notice(error.message) } finally { busy = false; render() } }
 $('connect').onsubmit = event => { event.preventDefault(); run(async () => { await api('/connect', 'POST', {}, $('token').value); $('token').value = ''; $('connect').hidden = true; await enter() }) }
 async function enter() { await check(); state = await api(`/sessions/${session}`); render(); connectStream() }
 $('check').onclick = () => check(true)
@@ -111,15 +123,6 @@ for (const id of ['back', 'forward', 'reload']) $(id).onclick = () => act({ kind
 $('new-tab').onclick = () => act({ kind: 'new_tab' }); $('close-tab').onclick = () => act({ kind: 'close_tab' })
 $('insert').onclick = () => { const text = $('text').value; $('text').value = ''; act({ kind: 'text', text }) }
 $('observe').onclick = () => run(async () => { const result = await api(`/sessions/${session}/observe`); $('structure').textContent = result.aria; $('structure').hidden = false })
-$('screen').onclick = event => {
-  if (!lease || !viewport) return
-  const rect = $('screen').getBoundingClientRect(), scale = Math.min(rect.width / $('screen').width, rect.height / $('screen').height)
-  const x = (event.clientX - rect.left - (rect.width - $('screen').width * scale) / 2) / scale / $('screen').width * viewport.width
-  const y = (event.clientY - rect.top - (rect.height - $('screen').height * scale) / 2) / scale / $('screen').height * viewport.height
-  if (x < 0 || y < 0 || x >= viewport.width || y >= viewport.height) return
-  $('screen').focus(); act({ kind: 'click', x, y, tabId: viewport.tabId, generation: viewport.generation })
-}
-$('screen').addEventListener('wheel', event => { if (!lease || !viewport) return; event.preventDefault(); act({ kind: 'scroll', deltaX: Math.max(-3000, Math.min(3000, event.deltaX)), deltaY: Math.max(-3000, Math.min(3000, event.deltaY)) }) }, { passive: false })
 $('screen').onkeydown = event => {
   if (!lease || event.isComposing || event.key === 'Escape' && expanded) return
   if (event.key.length === 1 && !event.ctrlKey && !event.metaKey) { event.preventDefault(); act({ kind: 'text', text: event.key }) }
@@ -129,7 +132,7 @@ $('screen').onkeydown = event => {
   }
 }
 $('screen').addEventListener('compositionend', event => { if (lease && event.data) act({ kind: 'text', text: event.data }) })
-function expand(value) { expanded = value; $('viewer').classList.toggle('expanded', value); $('expand').textContent = value ? '收起画面' : '放大画面'; document.body.style.overflow = value ? 'hidden' : ''; $('expand').focus() }
+function expand(value) { screenInput.cancel(); expanded = value; $('viewer').classList.toggle('expanded', value); $('expand').textContent = value ? '收起画面' : '放大画面'; document.body.style.overflow = value ? 'hidden' : ''; $('expand').focus() }
 $('expand').onclick = () => expand(!expanded)
 document.addEventListener('keydown', event => { if (expanded && event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); expand(false) } }, true)
 $('theme').onclick = () => {

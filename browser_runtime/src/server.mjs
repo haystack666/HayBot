@@ -66,7 +66,7 @@ export async function createRuntimeServer({ directory, token, engine = new Brows
         if (!result) throw new RuntimeError('not_found', '接口不存在', 404)
         return json(response, 200, result)
       }
-      const files = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'], '/fixture': ['fixture.html', 'text/html'], '/fixture.js': ['fixture.js', 'text/javascript'] }
+      const files = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/input.js': ['input.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'], '/fixture': ['fixture.html', 'text/html'], '/fixture.js': ['fixture.js', 'text/javascript'] }
       const file = files[url.pathname]
       if (method !== 'GET' || !file) throw new RuntimeError('not_found', '页面不存在', 404)
       response.writeHead(200, { 'Content-Type': `${file[1]}; charset=utf-8` }); response.end(await fs.readFile(path.join(publicRoot, file[0])))
