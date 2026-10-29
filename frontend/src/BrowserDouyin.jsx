@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Field, Notice } from './components/console'
+import BrowserJournal from './BrowserJournal'
 import DouyinInteractionSettings from './DouyinInteractionSettings'
 import {interactionDefaults,interactionError} from './lib/douyin-interactions.mjs'
 import { viewingDefaults, viewingFields, viewingError } from './lib/browser-viewing.mjs'
@@ -27,6 +28,7 @@ function TaskProgress({ task }) {
         {step.watch.coverageRanges&&<><br/>累计播放：{ranges(step.watch.coverageRanges)||'尚未推进'}{step.watch.fullDuration?` / 全长 ${Math.round(step.watch.fullDuration)} 秒`:''} · {step.watch.partial?'未完整播放':'已覆盖全片'}{step.watch.ended?' · 已到结尾':''}</>}
       </small>}
     </li>)}</ol>
+    {!!task.dm_events?.length&&<details className="browser-dm-progress"><summary>独立私信通道（{task.dm_events.length}）</summary>{task.dm_events.map((event,i)=><p key={i}>{new Date(event.created*1000).toLocaleTimeString('zh-CN',{hour12:false})} · {event.detail}</p>)}</details>}
     {!!task.decision_errors?.length&&<details className="browser-decision-errors"><summary>操作格式诊断（{task.decision_errors.length}）</summary>
       {task.decision_errors.map(item=><div key={item.sequence}><p>第 {item.sequence} 次校验未通过 · 本轮尝试 {item.attempt}/3：{item.error}</p><pre>{item.response}</pre></div>)}
     </details>}
@@ -43,10 +45,10 @@ export default function BrowserDouyin({ api, notify, children, onCheck }) {
   const update=(key,value)=>setConfig(c=>({...c,[key]:value}))
   const viewing={...viewingDefaults,...config?.viewing}
   const interactions={...interactionDefaults,...config?.interactions,owner:{...interactionDefaults.owner,...config?.interactions?.owner}}
-  const autoBrowse={enabled:false,daily_video_limit:30,...config?.auto_browse}
+  const autoBrowse={enabled:false,daily_video_limit:30,only_off_peak:true,custom_hours:false,time_windows:[{start:'08:30',end:'08:59'},{start:'19:00',end:'22:30'}],...config?.auto_browse}
   const updateAuto=(key,value)=>update('auto_browse',{...autoBrowse,[key]:value})
   const updateViewing=(key,value)=>setConfig(c=>({...c,viewing:{...viewingDefaults,...c.viewing,[key]:value}}))
-  const save=async()=>{const invalid=viewingError(viewing)||interactionError(interactions)||(!Number.isInteger(autoBrowse.daily_video_limit)||autoBrowse.daily_video_limit<1||autoBrowse.daily_video_limit>1000?'每日视频总数须为 1–1000 的整数':'');if(invalid){setError(invalid);return}setBusy(true);try{const saved=await api('/browser/douyin/config','PUT',{...config,viewing,interactions,auto_browse:autoBrowse});setConfig(saved);setSavedConfig(saved);setBound(true);setError('');setSettings(false);notify?.('抖音设置已保存')}catch(e){setError(e.message)}finally{setBusy(false)}}
+  const save=async()=>{const invalid=viewingError(viewing)||interactionError(interactions)||(autoBrowse.custom_hours&&(!autoBrowse.time_windows.length||autoBrowse.time_windows.some(w=>!/^([01]\d|2[0-3]):[0-5]\d$/.test(w.start)||!/^([01]\d|2[0-3]):[0-5]\d$/.test(w.end)||w.start===w.end))?'请填写有效且起止不同的允许浏览时段':'')||(!Number.isInteger(autoBrowse.daily_video_limit)||autoBrowse.daily_video_limit<1||autoBrowse.daily_video_limit>1000?'每日视频总数须为 1–1000 的整数':'');if(invalid){setError(invalid);return}setBusy(true);try{const saved=await api('/browser/douyin/config','PUT',{...config,viewing,interactions,auto_browse:autoBrowse});setConfig(saved);setSavedConfig(saved);setBound(true);setError('');setSettings(false);notify?.('抖音设置已保存')}catch(e){setError(e.message)}finally{setBusy(false)}}
   const start=async e=>{e.preventDefault();setBusy(true);try{await api('/browser/douyin/tasks','POST',{goal});setGoal('');setNewTask(false);setPage('live');await refresh()}catch(e){setError(e.message)}finally{setBusy(false)}}
   const stop=async id=>{setBusy(true);try{await api(`/browser/douyin/tasks/${id}/stop`,'POST',{});await refresh()}catch(e){setError(e.message)}finally{setBusy(false)}}
   const verify=async id=>{setBusy(true);try{const result=await api(`/browser/douyin/operations/${id}/verify`,'POST',{});await refresh();notify?.(result.reason||'核对完成')}catch(e){setError(e.message)}finally{setBusy(false)}}
@@ -74,12 +76,12 @@ export default function BrowserDouyin({ api, notify, children, onCheck }) {
   const categories={general:'浏览偏好',viewing:'观看策略',schedule:'自动浏览',interaction:'互动权限',browser:'浏览器'}
   return <div className="browser-workbench">
     <div className="browser-workbench-actions"><Button size="sm" variant="outline" onClick={()=>{setCategory('general');setSettings(true)}}><Settings2 size={14}/>浏览设置</Button><Button size="sm" onClick={()=>setNewTask(true)}><Plus size={14}/>新建任务</Button></div>
-    <div className="browser-page-tabs" role="tablist" aria-label="工作台内容">{[['live','工作台'],['tasks','任务记录'],['operations','互动记录']].map(([key,label])=><button key={key} role="tab" aria-selected={page===key} aria-controls={`browser-tab-${key}`} id={`browser-tab-button-${key}`} onClick={()=>setPage(key)}>{label}{key==='tasks'&&<span>{tasks.length}</span>}{key==='operations'&&unknownCount>0&&<span className="browser-pending-count">{unknownCount} 待核对</span>}</button>)}</div>
+    <div className="browser-page-tabs" role="tablist" aria-label="工作台内容">{[['live','工作台'],['tasks','任务记录'],['operations','互动记录'],['journal','浏览手记']].map(([key,label])=><button key={key} role="tab" aria-selected={page===key} aria-controls={`browser-tab-${key}`} id={`browser-tab-button-${key}`} onClick={()=>setPage(key)}>{label}{key==='tasks'&&<span>{tasks.length}</span>}{key==='operations'&&unknownCount>0&&<span className="browser-pending-count">{unknownCount} 待核对</span>}</button>)}</div>
     {error&&<Notice alert>{error}</Notice>}
     <section id="browser-tab-live" role="tabpanel" aria-labelledby="browser-tab-button-live" hidden={page!=='live'}>
       <div ref={progressLayout} className={`browser-progress-layout ${progressOpen?'progress-open':''}`}><div className="browser-viewer-column">{children}
       <div className="browser-current-task"><Play size={17}/><div><b>{current?.goal||'当前没有运行中的任务'}</b><span>{current ? `${labels[current.state]} · ${current.steps.length} 步` : config?.enabled ? '可从新建任务或 Owner 私聊发起' : '在浏览设置中开启自主浏览'}</span></div>{progressTarget&&<><Button ref={progressButton} size="sm" variant="ghost" aria-expanded={progressOpen} aria-controls="browser-live-progress" onClick={()=>{setProgressId(progressTarget.id);setProgressOpen(v=>progressTarget.id===progressId?!v:true)}}>{progressOpen?'收起进度':'查看进度'}</Button><Button size="icon-sm" variant="ghost" aria-label="停止任务" disabled={busy||!current} onClick={()=>stop(current.id)}><X size={15}/></Button></>}</div>
-    {autoStatus?.enabled&&<div className="browser-auto-strip"><div className="action-row"><span>{autoStatus.peak?'高峰时段':'空闲时段'} · 今日 {autoStatus.today_watched} / {autoStatus.daily_video_limit} 条</span><Button size="sm" variant="outline" disabled={busy} onClick={async()=>{setBusy(true);try{await api(`/browser/douyin/auto/${autoStatus.hold_reason?'resume':'pause'}`,'POST',{});await refresh()}catch(e){setError(e.message)}finally{setBusy(false)}}}>{autoStatus.hold_reason?'恢复自动浏览':'暂停今日自动浏览'}</Button></div>{autoStatus.hold_reason&&<p>{autoStatus.hold_reason}</p>}{!current&&!autoStatus.hold_reason&&autoStatus.next_run_at&&<p>下次可运行：{new Date(autoStatus.next_run_at).toLocaleString('zh-CN',{hour12:false})}</p>}{autoStatus.calendar_warning&&<Notice>{autoStatus.calendar_warning}</Notice>}</div>}
+    {autoStatus?.enabled&&<div className="browser-auto-strip"><div className="action-row"><span>{autoStatus.allowed_now===false?'当前时段不自动浏览':autoStatus.only_off_peak===false?'不限计价时段':autoStatus.peak?'高峰时段':'空闲时段'} · 今日 {autoStatus.today_watched} / {autoStatus.daily_video_limit} 条</span><Button size="sm" variant="outline" disabled={busy} onClick={async()=>{setBusy(true);try{await api(`/browser/douyin/auto/${autoStatus.hold_reason?'resume':'pause'}`,'POST',{});await refresh()}catch(e){setError(e.message)}finally{setBusy(false)}}}>{autoStatus.hold_reason?'恢复自动浏览':'暂停今日自动浏览'}</Button></div>{autoStatus.hold_reason&&<p>{autoStatus.hold_reason}</p>}{!current&&!autoStatus.hold_reason&&autoStatus.next_run_at&&<p>下次可运行：{new Date(autoStatus.next_run_at).toLocaleString('zh-CN',{hour12:false})}</p>}{autoStatus.calendar_warning&&<Notice>{autoStatus.calendar_warning}</Notice>}</div>}
       </div><aside id="browser-live-progress" className="browser-progress-pane" aria-label="任务进度" aria-hidden={!progressOpen} inert={!progressOpen}><div className="browser-progress-inner">
         <header className="browser-progress-header"><h2>任务进度</h2><Button size="icon-sm" variant="ghost" aria-label="收起任务进度" onClick={closeProgress}><X size={16}/></Button></header>
         <div className="browser-progress-scroll">{progressTask&&<>
@@ -111,6 +113,7 @@ export default function BrowserDouyin({ api, notify, children, onCheck }) {
     })}</div>
       {!operations.length&&<div className="empty">暂无互动记录</div>}
     </section>
+    {page==='journal'&&<section id="browser-tab-journal" role="tabpanel" aria-labelledby="browser-tab-button-journal"><BrowserJournal {...{api,notify}}/></section>}
     <Dialog.Root open={settings} onOpenChange={value=>{setSettings(value);if(!value)setConfig(savedConfig)}}><Dialog.Portal><Dialog.Overlay className="sheet-overlay"/><Dialog.Content className="browser-settings-drawer">
       <div className="browser-dialog-heading"><Dialog.Title>浏览设置</Dialog.Title><Dialog.Close asChild><Button size="icon-sm" variant="ghost" aria-label="关闭设置"><X size={17}/></Button></Dialog.Close></div><Dialog.Description className="sr-only">当前机器人的浏览偏好、自动浏览和互动权限</Dialog.Description>
       <div className="browser-settings-layout"><nav aria-label="设置分类">{Object.entries(categories).map(([key,label])=><button key={key} aria-current={category===key?'page':undefined} onClick={()=>setCategory(key)}>{label}</button>)}</nav><div className="browser-settings-content">{error&&<Notice alert>{error}</Notice>}{current&&<Notice>任务运行期间不可修改设置，请先停止任务。</Notice>}{config?<>
@@ -129,10 +132,14 @@ export default function BrowserDouyin({ api, notify, children, onCheck }) {
         <div className="form-grid">{viewingFields.map(([key,label,min,max])=><Field key={key} label={label} id={`browser-viewing-${key}`}><Input id={`browser-viewing-${key}`} type="number" min={min} max={max} step={1} value={viewing[key]} disabled={!viewing.preview_enabled&&key!=='max_video_minutes'} onChange={e=>updateViewing(key,e.target.value===''?'':Number(e.target.value))}/></Field>)}</div>
       </fieldset>
       </section><section hidden={category!=='schedule'}><fieldset className="browser-viewing-settings" disabled={!!current||busy}>
-        <legend>空闲时段自动刷</legend>
+        <legend>自动刷视频</legend>
         <div className="form-grid"><label><input type="checkbox" checked={autoBrowse.enabled} onChange={e=>updateAuto('enabled',e.target.checked)}/> 开启自动刷视频</label>
         <Field label="每日视频总数" id="douyin-auto-limit"><Input id="douyin-auto-limit" type="number" min={1} max={1000} value={autoBrowse.daily_video_limit} onChange={e=>updateAuto('daily_video_limit',e.target.value===''?'':Number(e.target.value))}/></Field></div>
-        <p className="browser-task-capability">北京时间周一至周五 9:00–12:00、14:00–18:00 为高峰；周末与中国法定节假日全天空闲。进入高峰后完成当前操作即暂停。当天实际看过的不同视频各计一次，手动浏览也计入，重复观看不重复计数。</p>
+        <label><input type="checkbox" checked={autoBrowse.only_off_peak} onChange={e=>updateAuto('only_off_peak',e.target.checked)}/> 仅限空闲计价时段</label>
+        <p className="browser-task-capability">开启后避开北京时间周一至周五 9:00–12:00、14:00–18:00，周末与中国法定节假日全天空闲。关闭后高峰时段也可自动浏览。</p>
+        <label><input type="checkbox" checked={autoBrowse.custom_hours} onChange={e=>updateAuto('custom_hours',e.target.checked)}/> 自定义允许浏览的时段</label>
+        {autoBrowse.custom_hours&&<div className="browser-time-windows">{autoBrowse.time_windows.map((window,index)=><div key={index}><Input aria-label={`时段 ${index+1} 开始`} type="time" value={window.start} onChange={e=>updateAuto('time_windows',autoBrowse.time_windows.map((w,i)=>i===index?{...w,start:e.target.value}:w))}/><span>至</span><Input aria-label={`时段 ${index+1} 结束`} type="time" value={window.end} onChange={e=>updateAuto('time_windows',autoBrowse.time_windows.map((w,i)=>i===index?{...w,end:e.target.value}:w))}/>{window.start>window.end&&<small>次日</small>}<Button type="button" size="icon-sm" variant="ghost" aria-label={`删除时段 ${index+1}`} onClick={()=>updateAuto('time_windows',autoBrowse.time_windows.filter((_,i)=>i!==index))}><X size={14}/></Button></div>)}<Button type="button" size="sm" variant="outline" disabled={autoBrowse.time_windows.length>=20} onClick={()=>updateAuto('time_windows',[...autoBrowse.time_windows,{start:'19:00',end:'22:30'}])}><Plus size={14}/>添加时段</Button></div>}
+        <p className="browser-task-capability">自定义时段使用北京时间，支持多个时段与跨午夜；同时开启空闲计价限制时，取两者交集。离开允许时段后完成当前操作即暂停。每日数量按实际播放过的不同视频累计。</p>
       </fieldset>
       </section><section hidden={category!=='interaction'}><DouyinInteractionSettings value={interactions} onChange={v=>update('interactions',v)} disabled={!!current||busy}/>
       </section>{!bound&&config.qq_enabled&&<Notice>保存后，QQ 授权会绑定当前接入账号。</Notice>}

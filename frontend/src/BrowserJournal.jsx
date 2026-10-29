@@ -1,0 +1,27 @@
+import { useCallback, useEffect, useState } from 'react'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Notice } from './components/console'
+
+const states={completed:'已完成',running:'浏览中',queued:'准备中',paused:'进度已保存',blocked:'需要处理',failed:'未完成',cancelled:'已停止',interrupted:'已中断'}
+export default function BrowserJournal({api,notify}){
+  const [items,setItems]=useState([]),[total,setTotal]=useState(0),[offset,setOffset]=useState(0),[query,setQuery]=useState(''),[search,setSearch]=useState(''),[selected,setSelected]=useState(null),[entry,setEntry]=useState(null),[busy,setBusy]=useState(false),[error,setError]=useState('')
+  const refresh=useCallback(async()=>{try{const r=await api(`/browser/journal?offset=${offset}&limit=20&q=${encodeURIComponent(search)}`);setItems(r.items);setTotal(r.total);setError('')}catch(e){setError(e.message)}},[api,offset,search])
+  useEffect(()=>{refresh();const timer=setInterval(refresh,5000);return()=>clearInterval(timer)},[refresh])
+  useEffect(()=>{if(!selected){setEntry(null);return}let live=true;const load=async()=>{try{const v=await api(`/browser/journal/${selected}`);if(live)setEntry(v)}catch(e){if(live)setError(e.message)}};load();const timer=setInterval(load,5000);return()=>{live=false;clearInterval(timer)}},[api,selected])
+  const act=async(fn)=>{setBusy(true);setError('');try{await fn();await refresh()}catch(e){setError(e.message)}finally{setBusy(false)}}
+  return <div className="browser-journal">
+    {error&&<Notice alert>{error}</Notice>}
+    <div className="browser-journal-toolbar"><form onSubmit={e=>{e.preventDefault();setOffset(0);setSearch(query)}}><Input aria-label="搜索浏览手记" maxLength={200} placeholder="搜索标题、内容或感想" value={query} onChange={e=>setQuery(e.target.value)}/><Button size="sm" variant="outline">搜索</Button></form><Button size="sm" variant="outline" disabled={busy} onClick={()=>act(async()=>{const r=await api('/browser/journal/backfill','POST',{});notify?.(`已整理 ${r.count} 份有实际观看证据的手记`)} )}>补生成历史手记</Button></div>
+    {!selected?<>
+      {!items.length&&<div className="empty">暂无浏览手记。实际观看视频后会自动保存，也可以补生成历史手记。</div>}
+      <div className="browser-journal-list">{items.map(item=><article key={item.id}><header><time>{new Date(item.created*1000).toLocaleString('zh-CN',{hour12:false})}</time><span>{states[item.state]||item.state} · {({web:'后台任务',qq:'QQ 委托',auto:'自动浏览'})[item.source]||item.source}</span></header><h3>{item.goal}</h3><p>{item.summary||`已实际观看 ${item.videos.length} 条视频${item.state==='running'?'，浏览中，手记持续更新。':'，已保存观看记录。'}`}</p><footer><span>{item.videos.length} 条视频 · {item.remembered?'用于聊天回忆':'不用于聊天回忆'}</span><Button size="sm" variant="outline" onClick={()=>{setSelected(item.id);setEntry(null)}}>查看手记</Button></footer></article>)}</div>
+      <div className="browser-journal-pagination"><span>共 {total} 份</span><Button size="sm" variant="ghost" disabled={offset===0} onClick={()=>setOffset(v=>Math.max(0,v-20))}>上一页</Button><Button size="sm" variant="ghost" disabled={offset+20>=total} onClick={()=>setOffset(v=>v+20)}>下一页</Button></div>
+    </>:<><Button size="sm" variant="ghost" onClick={()=>setSelected(null)}>← 返回手记列表</Button>{entry?<article className="browser-journal-detail"><header><div><h2>{entry.goal}</h2><p>{new Date(entry.created*1000).toLocaleString('zh-CN',{hour12:false})} · {states[entry.state]||entry.state}</p></div><div className="action-row"><Button size="sm" variant="outline" disabled={busy} onClick={()=>act(async()=>setEntry(await api(`/browser/journal/${entry.id}`,'PATCH',{remembered:!entry.remembered})))}>{entry.remembered?'不用于聊天回忆':'恢复聊天回忆'}</Button><Button size="sm" variant="destructive" disabled={busy} onClick={()=>{if(window.confirm('删除这份浏览手记？原任务记录会保留，补生成也不会恢复已删除的手记。'))act(async()=>{await api(`/browser/journal/${entry.id}`,'DELETE');setSelected(null)})}}>删除手记</Button></div></header>
+      <section><h3>这次的感想</h3><p className="browser-journal-summary">{entry.summary|| (entry.state==='running'?'正在浏览，还没有结束总结。':'此次没有完整总结，以下保留实际观看证据。')}</p>{entry.state!=='completed'&&entry.result&&<Notice>{entry.result}</Notice>}</section>
+      <section><h3>看过的视频</h3>{entry.videos.map(video=><article className="browser-journal-video" key={video.id}><div><h4>{video.title||'未保存标题'}</h4><a href={video.url} target="_blank" rel="noreferrer">打开视频 ↗</a></div>{video.author&&<p>作者：{video.author}</p>}<small>{video.complete?'已覆盖全片':'已观看片段'} · 播放推进采样累计 {Math.round(video.advanced_seconds)} 秒{video.full_duration?` · 视频时长 ${Math.round(video.full_duration)} 秒`:''}</small>{video.impressions.length>0&&<details><summary>观看时的想法</summary>{video.impressions.map((text,i)=><p key={i}>{text}</p>)}</details>}</article>)}</section>
+      <section><h3>这次的互动</h3>{!entry.interactions.length?<p className="subtle">没有已记录的互动</p>:entry.interactions.map(item=><article className="browser-journal-video" key={item.id}><div><h4>{({like:'点赞',comment:'评论',reply_comment:'评论回复',share:'分享视频',share_note:'分享附言',reply_dm:'私信回复'})[item.op]||item.op}</h4><span>{({confirmed:'已确认',unknown:'待核对',failed:'未成功',pending:'提交中'})[item.status]}</span></div>{item.details?.video_title&&<p>{item.details.video_title}</p>}{item.details?.text&&<p className="browser-journal-summary">{item.details.text}</p>}{item.details?.video_url&&<a href={item.details.video_url} target="_blank" rel="noreferrer">打开视频 ↗</a>}</article>)}</section>
+      <p className="subtle">{entry.remembered?'这份经历可供当前绑定 Owner 的 QQ 私聊回忆。':'已停止从这份手记检索聊天回忆；已有聊天消息不会删除。'}</p>
+    </article>:<div className="empty">正在读取手记…</div>}</>}
+  </div>
+}

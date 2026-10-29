@@ -5,7 +5,7 @@ import json
 import os
 
 import websockets
-from fastapi import Depends, HTTPException, Request, WebSocket
+from fastapi import Depends, HTTPException, Request, WebSocket, Query
 from pydantic import Field
 
 from .config import StrictModel
@@ -14,6 +14,10 @@ from .browser_tasks import BrowsingConfig
 
 class BrowserTaskBody(StrictModel):
     goal: str = Field(min_length=1, max_length=3000)
+
+
+class JournalMemoryBody(StrictModel):
+    remembered: bool = Field(strict=True)
 
 
 class ViewerBody(StrictModel):
@@ -38,6 +42,31 @@ def register_browser_routes(app, scoped_runtime):
         if runtime.closing or not auth or not hmac.compare_digest(auth, app.state.session):
             raise HTTPException(401, '请先登录')
         return auth
+
+    @app.get('/api/bots/{bot_id}/browser/journal')
+    async def journal(offset:int=Query(0,ge=0),limit:int=Query(20,ge=1,le=100),q:str=Query('',max_length=200),runtime=Depends(scoped_runtime)):
+        return app.state.browser_tasks.journal.listing(runtime.id,offset,limit,q)
+
+    @app.post('/api/bots/{bot_id}/browser/journal/backfill')
+    async def journal_backfill(request:Request,runtime=Depends(scoped_runtime)):
+        authorization(request,runtime)
+        return app.state.browser_tasks.journal.backfill(runtime.id)
+
+    @app.get('/api/bots/{bot_id}/browser/journal/{task_id}')
+    async def journal_entry(task_id:str,runtime=Depends(scoped_runtime)):
+        return app.state.browser_tasks.journal.get(runtime.id,task_id)
+
+    @app.patch('/api/bots/{bot_id}/browser/journal/{task_id}')
+    async def journal_memory(task_id:str,body:JournalMemoryBody,request:Request,runtime=Depends(scoped_runtime)):
+        authorization(request,runtime)
+        app.state.browser_tasks.journal.change(runtime.id,task_id,remembered=body.remembered)
+        return app.state.browser_tasks.journal.get(runtime.id,task_id)
+
+    @app.delete('/api/bots/{bot_id}/browser/journal/{task_id}')
+    async def journal_delete(task_id:str,request:Request,runtime=Depends(scoped_runtime)):
+        authorization(request,runtime)
+        app.state.browser_tasks.journal.change(runtime.id,task_id,delete=True)
+        return {'ok':True}
 
     @app.get('/api/bots/{bot_id}/browser/douyin/config')
     async def browsing_config(runtime=Depends(scoped_runtime)):

@@ -141,8 +141,51 @@ export class DouyinAutomation {
   }
   guard(session, run) {
     this.engine.requireReady(); this.engine.requireObservation(session)
+    if(run?.parent){this.guard(session,run.parent);if(run.cancelled||run.page.isClosed()||run.parent.inboxRun!==run)throw new RuntimeError('automation_revoked','私信通道已撤销');return}
     if (run && Date.now() >= run.expires && session.automation === run) this.revoke(session)
     if (!session.context || session.lease || !run || run.cancelled || session.automation !== run || session.active !== run.tab || session.tabs.get(run.tab) !== run.page) throw new RuntimeError('automation_revoked', '任务操作权已撤销，请查看画面后重新发起任务')
+  }
+  async dmAct(id,input) {
+    const session=this.engine.get(id),parent=session.automation
+    if(!parent||input.token!==parent.token||!parent.social.messages_enabled)throw new RuntimeError('automation_revoked','私信通道未获授权')
+    this.guard(session,parent);this.renew(session,parent)
+    const monitor=parent.inboxMonitor
+    if(!monitor)return {idle:true,version:0}
+    // Wait independently of the main page's operation queue/model/watch.
+    if(input.op==='observe'&&input.wait_version===monitor.version)await new Promise(resolve=>{
+      const done=()=>{clearTimeout(timer);monitor.waiters.delete(done);resolve()}
+      const timer=setTimeout(done,20000);monitor.waiters.add(done)
+    })
+    this.guard(session,parent)
+    const job=(parent.inboxOperation||Promise.resolve()).catch(()=>{}).then(async()=>{
+      this.guard(session,parent)
+      let run=parent.inboxRun
+      if(!run){
+        run=parent.inboxRun={...parent,parent,page:monitor.page,revision:0,peer:'',lastSocial:null,messageBaselines:parent.messageBaselines}
+        run.response=response=>{try{this.social.ingestResponse(run,response)}catch{}}
+        run.page.on('response',run.response)
+      }
+      if(!['observe','conversation','inbox','reply_dm'].includes(input.op))throw new RuntimeError('invalid_action','私信通道不支持此操作',400)
+      if(input.op!=='observe'&&input.generation!==run.revision)throw new RuntimeError('stale_observation','私信会话已变化')
+      const read=async()=>{
+        this.guard(session,run)
+        const blocked=await run.page.evaluate(verificationDOM)
+        this.guard(session,run)
+        if(blocked)return {blocked,generation:run.revision,version:monitor.version}
+        if(!platform(run.page.url()))throw new RuntimeError('wrong_platform','私信页已离开抖音')
+        const social=await this.social.read(session,run);run.lastSocial=social
+        return {...social,generation:run.revision,version:monitor.version,channel:'dm'}
+      }
+      if(input.op==='observe')return read()
+      let result
+      if(input.op==='reply_dm'){
+        const before=await read();if(before.blocked)return before
+        result=await this.social.perform(session,run,input,before)
+      }else await this.social.navigate(session,run,input)
+      run.revision++
+      return {...await read(),...(result?{interaction:result}:{})}
+    })
+    parent.inboxOperation=job;return job
   }
   async act(id, input) {
     const session = this.engine.get(id), run = session.automation

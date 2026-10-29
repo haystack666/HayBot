@@ -87,7 +87,8 @@ class MemoryService:
     def stamp(self, sid):
         config = self.store.load()
         return (config.account_id, self.data.epoch(sid), config.memory.model_dump_json(),
-                self.index_key() if config.memory.enabled else None)
+                self.index_key() if config.memory.enabled else None,
+                self.bot.browser.memory_stamp(self.bot) if getattr(self.bot,'browser',None) else None)
 
     def matches(self, sid, stamp):
         try:

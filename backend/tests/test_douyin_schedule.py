@@ -134,3 +134,46 @@ def test_takeover_prevents_automatic_launch_and_requires_resume(client,monkeypat
     assert '接管' in tasks.scheduler.status('default')['hold_reason']
     tasks.scheduler.resume('default')
     assert not tasks.scheduler.status('default')['hold_reason']
+
+
+def test_multiple_custom_windows_and_cross_midnight():
+    from app.douyin_schedule import allowed_at,next_allowed
+    cfg=AutoBrowseConfig(enabled=True,custom_hours=True,time_windows=[{'start':'08:30','end':'08:59'},{'start':'19:00','end':'22:30'}])
+    assert not allowed_at(at('2026-10-29T02:00:00'),cfg)
+    assert allowed_at(at('2026-10-29T08:30:00'),cfg)
+    assert not allowed_at(at('2026-10-29T08:59:00'),cfg)
+    assert next_allowed(at('2026-10-29T02:00:00'),cfg)==at('2026-10-29T08:30:00')
+    assert next_allowed(at('2026-10-29T09:00:00'),cfg)==at('2026-10-29T19:00:00')
+    cfg.time_windows=[__import__('app.douyin_schedule',fromlist=['BrowseWindow']).BrowseWindow(start='23:00',end='01:30')]
+    assert allowed_at(at('2026-10-29T23:30:00'),cfg)
+    assert allowed_at(at('2026-10-30T01:29:59'),cfg)
+    assert not allowed_at(at('2026-10-30T01:30:00'),cfg)
+
+
+def test_off_peak_restriction_can_be_disabled_but_custom_hours_still_apply():
+    from app.douyin_schedule import allowed_at,next_allowed
+    cfg=AutoBrowseConfig(custom_hours=True,time_windows=[{'start':'10:00','end':'11:00'}])
+    assert not allowed_at(at('2026-10-29T10:30:00'),cfg)
+    assert next_allowed(at('2026-10-29T10:30:00'),cfg)==at('2026-10-31T10:00:00')
+    cfg.only_off_peak=False
+    assert allowed_at(at('2026-10-29T10:30:00'),cfg)
+    assert not allowed_at(at('2026-10-29T02:00:00'),cfg)
+    assert next_allowed(at('2026-10-29T11:30:00'),cfg)==at('2026-10-30T10:00:00')
+    for windows in [[],[{'start':'08:30','end':'08:30'}],[{'start':'25:00','end':'08:00'}]]:
+        with pytest.raises(ValueError):AutoBrowseConfig(custom_hours=True,time_windows=windows)
+
+
+def test_scheduler_respects_custom_stop_and_reports_next_permitted_time(client,monkeypatch):
+    tasks,host,_=configured(client,monkeypatch)
+    cfg=tasks.config('default');cfg.auto_browse.custom_hours=True
+    client.portal.call(tasks.save_config,'default',cfg)
+    tasks.scheduler.clock=lambda:at('2026-10-29T23:00:00')
+    assert tasks.scheduler.status('default')['allowed_now'] is False
+    assert tasks.scheduler.status('default')['next_run_at'].startswith('2026-10-30T08:30')
+    assert '自定义' in tasks.scheduler.stop_reason({'bot_id':'default','origin':{'source':'auto'}})
+    assert tasks.scheduler.stop_reason({'bot_id':'default','origin':{'source':'web'}})==''
+    tasks.scheduler.clock=lambda:at('2026-10-29T10:00:00')
+    cfg.auto_browse.only_off_peak=False;cfg.auto_browse.custom_hours=False
+    client.portal.call(tasks.save_config,'default',cfg)
+    assert tasks.scheduler.status('default')['allowed_now'] is True
+    assert not tasks.scheduler.stop_reason({'bot_id':'default','origin':{'source':'auto'}})

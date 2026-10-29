@@ -222,10 +222,12 @@ class InteractionLedger:
         with self.db:
             self.db.execute("UPDATE douyin_operations SET status=?,receipt=?,updated=? WHERE id=? AND status='pending'",(status,json.dumps(result,ensure_ascii=False),time.time(),identifier))
 
-    def history(self, bot_id):
+    def history(self, bot_id, task_id=None):
         rows = self.db.execute("""SELECT id,op,target,status,receipt,created,payload,details,task_id FROM douyin_operations
             WHERE bot_id=? AND (status IN ('pending','unknown') OR id IN
               (SELECT id FROM douyin_operations WHERE bot_id=? ORDER BY created DESC LIMIT 50)) ORDER BY created DESC""",(bot_id,bot_id)).fetchall()
+        if task_id is not None:
+            rows=self.db.execute('SELECT id,op,target,status,receipt,created,payload,details,task_id FROM douyin_operations WHERE bot_id=? AND task_id=? ORDER BY created DESC',(bot_id,task_id)).fetchall()
         result, task_steps = [], {}
         has_tasks = self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='browser_tasks'").fetchone()
         for row in rows:

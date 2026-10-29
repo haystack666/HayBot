@@ -198,7 +198,7 @@ test('Chrome inbox enforces inbound/follower identity, sends owner cards and con
  } finally {await engine.close();await fs.rm(dir,{recursive:true,force:true})}
 })
 
-test('background inbox polls configured interval, opens unread verified peers and closes immediately on takeover',{timeout:45000,skip:process.platform!=='darwin'},async()=>{
+test('independent inbox wakes on DOM changes before a 30s fallback, bypasses the video queue and closes on takeover',{timeout:45000,skip:process.platform!=='darwin'},async()=>{
  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'haybot-douyin-poll-')),engine=new BrowserEngine(dir)
  try {
   await engine.start('poll');const session=engine.get('poll'),page=session.tabs.get(session.active)
@@ -217,14 +217,33 @@ test('background inbox polls configured interval, opens unread verified peers an
   assert.equal(session.tabs.size,1);assert.equal(session.tabs.get(session.active),page);assert.match(page.url(),/user\/self/)
   const old=session.automation.inboxMonitor.page
   engine.douyin.end('poll',grant.token);await old.waitForEvent('close').catch(()=>{});assert.ok(old.isClosed())
-  grant=engine.douyin.begin('poll',{interactions:{...interactions,dm_check_interval_seconds:1}})
+  grant=engine.douyin.begin('poll',{interactions:{...interactions,dm_check_interval_seconds:30}})
   result=await act({op:'account'});const monitor=session.automation.inboxMonitor
+  assert.equal(result.inboxMonitor.interval_seconds,30)
   const before=monitor.checkedAt,generation=session.generation,active=session.active
-  await monitor.page.locator('[data-e2e]').evaluate(e=>{e.__reactProps$fixture.conversation.unreadCount=3})
-  await page.waitForTimeout(1300)
+  await monitor.page.locator('[data-e2e]').evaluate(e=>{e.__reactProps$fixture.conversation.unreadCount=3;e.querySelector('i').textContent='3'})
+  await page.waitForTimeout(500)
   assert.ok(monitor.checkedAt>before);assert.equal(monitor.pending.get(owner).unreadCount,3)
   assert.equal(session.generation,generation);assert.equal(session.active,active)
   assert.equal(session.automation.people.has(owner),false)
+  // The video operation queue may be occupied by a long watch/model boundary.
+  // Reading/opening a DM must still finish on its own page and queue.
+  const previousOperation=session.operation;let releaseMain
+  session.operation=new Promise(resolve=>releaseMain=resolve)
+  try {
+   let dm=await engine.douyin.dmAct('poll',{token:grant.token,op:'observe'})
+   dm=await engine.douyin.dmAct('poll',{token:grant.token,op:'conversation',generation:dm.generation,peer_id:owner})
+   assert.equal(dm.conversation.id,owner);assert.equal(dm.messages[0].id,'real-inbound-id')
+   assert.equal(session.tabs.get(session.active),page);assert.match(page.url(),/user\/self/)
+   await monitor.page.waitForTimeout(250)
+   dm=await engine.douyin.dmAct('poll',{token:grant.token,op:'observe'})
+   const started=Date.now(),wake=engine.douyin.dmAct('poll',{token:grant.token,op:'observe',wait_version:dm.version})
+   await monitor.page.evaluate(()=>{const p=document.createElement('p');p.dataset.messageId='new-message-without-waiting';p.dataset.direction='inbound';p.textContent='新来信';document.body.append(p)})
+   const arrived=await wake
+   assert.ok(Date.now()-started<1500,'DOM event wakes the independent consumer without waiting for polling')
+   assert.ok(arrived.messages.some(m=>m.id==='new-message-without-waiting'))
+  } finally {releaseMain();session.operation=previousOperation}
+
   result=await act({op:'conversation',peer_id:owner})
   assert.equal(result.conversation.id,owner);assert.equal(result.conversation.follows_me,true)
   assert.equal(result.messages[0].id,'real-inbound-id');assert.deepEqual(result.pendingUnread,[])

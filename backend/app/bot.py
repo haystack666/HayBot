@@ -511,6 +511,7 @@ class Bot:
             qzone_context = qzone.chat_context(sid) if qzone and not group_turn else ''
             diary_context = self.diary.chat_context(user,group)
             android_context = self.browser.chat_context(self,user,group) if self.browser and self.browser.browser_mode(self) else self.android.chat_context(self,user,group) if self.android else ''
+            browser_experience = self.browser.experience_context(self,user,group,context_text) if self.browser else ''
             conversation_context = conversation_instruction(self.store, c, d, group, owner, incoming['id'] if incoming else 0, batch, bot=self)
             if group:
                 user_message['content'] = group_message(d, user_message['content'], attribution=group_identity.attribution(self,c,d,explicitly_addressed(payload,self,c)))
@@ -524,7 +525,7 @@ class Bot:
                            '不得引入私聊、手机任务或私人日程；不能声称实际操作了手机。不要朗读身份元数据。')
                 # Include the complete public burst, even when the selected speaker spoke first.
                 conversation_context += '\n[本轮群聊公开背景]\n' + json.dumps(self.group_chat.public_messages(c,target,group_turn['through_id'],group_turn['ids']),ensure_ascii=False)
-            messages = [{'role': 'system', 'content': persona + android_context + memory_context + schedule_context + qzone_context + diary_context + dialogue_instruction + meme_instruction + conversation_context}, *old, user_message]
+            messages = [{'role': 'system', 'content': persona + android_context + browser_experience + memory_context + schedule_context + qzone_context + diary_context + dialogue_instruction + meme_instruction + conversation_context}, *old, user_message]
             try:
                 answer = await self.generate(c.ollama, messages, max(2048, c.ollama.max_tokens) if dialogue_instruction or meme_instruction else c.ollama.max_tokens, thinking=self.provider(c.ollama).chat_thinking)
             except (ValueError, httpx.HTTPError):

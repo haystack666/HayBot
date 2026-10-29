@@ -4,7 +4,7 @@ import json
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from .config import StrictModel
 
@@ -16,9 +16,27 @@ HOLIDAYS = {2026: [('01-01','01-03'), ('02-15','02-23'), ('04-04','04-06'),
                    ('05-01','05-05'), ('06-19','06-21'), ('09-25','09-27'), ('10-01','10-07')]}
 
 
+class BrowseWindow(StrictModel):
+    start: str = Field(pattern=r'^(?:[01][0-9]|2[0-3]):[0-5][0-9]$')
+    end: str = Field(pattern=r'^(?:[01][0-9]|2[0-3]):[0-5][0-9]$')
+
+    @model_validator(mode='after')
+    def nonempty(self):
+        if self.start==self.end:raise ValueError('开始和结束不能相同；全天可关闭自定义时段')
+        return self
+
+
 class AutoBrowseConfig(StrictModel):
     enabled: bool = False
     daily_video_limit: int = Field(default=30, ge=1, le=1000, strict=True)
+    only_off_peak: bool = Field(default=True,strict=True)
+    custom_hours: bool = Field(default=False,strict=True)
+    time_windows: list[BrowseWindow] = Field(default_factory=lambda:[BrowseWindow(start='08:30',end='08:59'),BrowseWindow(start='19:00',end='22:30')],max_length=20)
+
+    @model_validator(mode='after')
+    def windows_required(self):
+        if self.custom_hours and not self.time_windows:raise ValueError('请至少添加一个允许浏览的时段')
+        return self
 
 
 def beijing_now():
@@ -40,6 +58,35 @@ def next_idle(now):
     if not period(now)['peak']:
         return now
     return now.replace(hour=12 if now.hour<12 else 18, minute=0, second=0, microsecond=0)
+
+
+def within_windows(now, config):
+    if not config.custom_hours:return True
+    local=now.astimezone(BEIJING);minute=local.hour*60+local.minute
+    for window in config.time_windows:
+        start,end=[int(value[:2])*60+int(value[3:]) for value in (window.start,window.end)]
+        if (start<=minute<end if start<end else minute>=start or minute<end):return True
+    return False
+
+
+def allowed_at(now,config):
+    return within_windows(now,config) and (not config.only_off_peak or not period(now)['peak'])
+
+
+def next_allowed(now,config):
+    now=now.astimezone(BEIJING)
+    if allowed_at(now,config):return now
+    candidates=[]
+    for day in range(9):
+        base=(now+timedelta(days=day)).replace(hour=0,minute=0,second=0,microsecond=0)
+        boundaries={'00:00','09:00','12:00','14:00','18:00'}
+        if config.custom_hours:
+            boundaries.update(w.start for w in config.time_windows)
+            boundaries.update(w.end for w in config.time_windows)
+        for boundary in boundaries:
+            hour,minute=map(int,boundary.split(':'));candidate=base.replace(hour=hour,minute=minute)
+            if candidate>=now and allowed_at(candidate,config):candidates.append(candidate)
+    return min(candidates) if candidates else None
 
 
 class DouyinScheduler:
@@ -107,15 +154,16 @@ class DouyinScheduler:
         row=self.tasks.db.execute('SELECT * FROM douyin_auto_state WHERE bot_id=?',(bot_id,)).fetchone()
         hold=row['hold_reason'] if row and row['hold_day']==now.date().isoformat() else ''
         count=self.count(bot_id,now)
-        due=next_idle(now)
+        due=next_allowed(now,cfg.auto_browse)
         if count>=cfg.auto_browse.daily_video_limit or hold:
-            due=next_idle((now+timedelta(days=1)).replace(hour=0,minute=0,second=0,microsecond=0))
-        elif row and row['next_attempt']>due.timestamp():
-            due=next_idle(datetime.fromtimestamp(row['next_attempt'],BEIJING))
+            due=next_allowed((now+timedelta(days=1)).replace(hour=0,minute=0,second=0,microsecond=0),cfg.auto_browse)
+        elif row and due and row['next_attempt']>due.timestamp():
+            due=next_allowed(datetime.fromtimestamp(row['next_attempt'],BEIJING),cfg.auto_browse)
         return {**period(now),'enabled':cfg.auto_browse.enabled,'today_watched':count,
             'daily_video_limit':cfg.auto_browse.daily_video_limit,'remaining':max(0,cfg.auto_browse.daily_video_limit-count),
-            'hold_reason':hold,'next_run_at':due.isoformat() if cfg.enabled and cfg.auto_browse.enabled else None,
-            'timezone':'Asia/Shanghai'}
+            'hold_reason':hold,'next_run_at':due.isoformat() if due and cfg.enabled and cfg.auto_browse.enabled else None,
+            'timezone':'Asia/Shanghai','allowed_now':allowed_at(now,cfg.auto_browse),'within_custom_hours':within_windows(now,cfg.auto_browse),
+            'only_off_peak':cfg.auto_browse.only_off_peak,'custom_hours':cfg.auto_browse.custom_hours,'time_windows':[w.model_dump() for w in cfg.auto_browse.time_windows]}
 
     def stop_reason(self, task):
         if task['origin'].get('source')!='auto':
@@ -126,10 +174,12 @@ class DouyinScheduler:
         state=self.status(task['bot_id'])
         if state['hold_reason']:
             return state['hold_reason']
-        if state['peak']:
+        if not state['within_custom_hours']:
+            return '已离开自定义浏览时段，当前操作结束后暂停，下次允许时段继续'
+        if cfg.auto_browse.only_off_peak and state['peak']:
             return '已进入北京时间高峰时段，当前操作结束后暂停，空闲时段继续'
         if state['remaining']<=0:
-            return '今日视频数量已达到上限，明天空闲时段继续'
+            return '今日视频数量已达到上限，明天允许的时段继续'
         return ''
 
     async def tick(self):
@@ -140,7 +190,7 @@ class DouyinScheduler:
             if not cfg.enabled or not cfg.auto_browse.enabled or tasks.busy(bid):
                 continue
             state=self.status(bid)
-            if state['peak'] or not state['remaining'] or state['hold_reason']:
+            if not state['allowed_now'] or not state['remaining'] or state['hold_reason']:
                 continue
             row=tasks.db.execute('SELECT next_attempt FROM douyin_auto_state WHERE bot_id=?',(bid,)).fetchone()
             if row and row['next_attempt']>self.clock().timestamp():
@@ -156,7 +206,7 @@ class DouyinScheduler:
                 if browser.get('automation'):
                     continue
                 latest=tasks.config(bid)
-                if not latest.enabled or not latest.auto_browse.enabled or tasks.busy(bid) or self.status(bid)['hold_reason'] or period(self.clock())['peak']:
+                if not latest.enabled or not latest.auto_browse.enabled or tasks.busy(bid) or self.status(bid)['hold_reason'] or not allowed_at(self.clock(),latest.auto_browse):
                     continue
                 tasks.submit(bid,'去抖音看你自己感兴趣的视频，自行选择浏览路线；按已有内容与互动设置执行。',
                     {'source':'auto','day':self.clock().date().isoformat()})

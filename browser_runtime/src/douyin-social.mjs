@@ -83,6 +83,7 @@ export function conversationDOM(element) {
   const key=Object.keys(element).find(k=>k.startsWith('__reactProps$')),c=key?walk(element[key],0):null
   const identifier=c?.toParticipantSecUserId||element.querySelector('a[href*="/user/"]')?.getAttribute('href')?.match(/\/user\/([^/?]+)/)?.[1]||element.getAttribute('data-peer-id')||element.getAttribute('data-user-id')||''
   return {id:identifier,conversation_id:typeof c?.id==='string'?c.id:'',nickname:((element.querySelector('[class*="ConversationItemtitle"]')||element).innerText||'').split('\n')[0].slice(0,80),
+    preview:(element.innerText||'').slice(-240),
     unreadCount:typeof c?.unreadCount==='number'?c.unreadCount:null,
     unread:typeof c?.unreadCount==='number'?c.unreadCount>0:!!element.querySelector('[class*="badge"],[class*="Badge"],[class*="unread"],[data-unread="true"]'),
     selected:element.getAttribute('aria-selected')==='true'||element.getAttribute('data-active')==='true'||/curConversation|selected|Selected|active|Active/.test(element.className)}
@@ -142,13 +143,21 @@ export class DouyinSocial {
       while(run.comments.size>300)run.comments.delete(run.comments.keys().next().value)
     }
   }
+  async ingestResponse(run,response) {
+    try {
+      const url=new URL(response.url())
+      if(url.origin!=='https://www.douyin.com'||!/\/user\/profile\/(?:self|other)/.test(url.pathname)||! /json/i.test(response.headers()['content-type']||''))return
+      const text=await response.text();if(text.length>2000000||run.cancelled||run.parent?.cancelled)return
+      this.ingest(run,url,JSON.parse(text))
+    }catch{}
+  }
   async startMonitor(session,run) {
     if(!run.social.messages_enabled || run.inboxMonitor)return
     const seconds=run.social.dm_check_interval_seconds ?? 5
     if(!Number.isInteger(seconds)||seconds<1||seconds>3600)throw new RuntimeError('invalid_interval','私信检查间隔须为 1–3600 秒',400)
     const page=await this.auto.engine.auxiliaryPage(session)
     try {this.auto.guard(session,run)}catch(error){await page.close().catch(()=>{});throw error}
-    const monitor=run.inboxMonitor={page,checkedAt:null,error:'',pending:new Map(),opened:new Map()}
+    const monitor=run.inboxMonitor={page,checkedAt:null,error:'',pending:new Map(),opened:new Map(),version:0,waiters:new Set(),signature:''}
     const poll=async()=>{
       this.auto.guard(session,run)
       if(page.url()!=='https://www.douyin.com/chat?isPopup=1')return
@@ -157,9 +166,12 @@ export class DouyinSocial {
       this.auto.guard(session,run)
       for(const person of people) {
         if(!person.id)continue
-        if(person.unread && monitor.opened.get(person.id)!==person.unreadCount)monitor.pending.set(person.id,person)
+        if(person.unread && monitor.opened.get(person.id)!==JSON.stringify([person.unreadCount,person.preview]))monitor.pending.set(person.id,person)
         if(!person.unread){monitor.pending.delete(person.id);monitor.opened.delete(person.id)}
       }
+      const messages=(await page.evaluate(socialDOM)).messages.slice(-10).map(m=>m.id).join('|')
+      const signature=JSON.stringify([...monitor.pending.values()].map(p=>[p.id,p.unreadCount,p.preview]))+messages
+      if(signature!==monitor.signature){monitor.signature=signature;monitor.version++;for(const wake of [...monitor.waiters])wake()}
       monitor.checkedAt=Date.now();monitor.error=''
     }
     const tick=async()=>{
@@ -170,11 +182,30 @@ export class DouyinSocial {
       await page.goto('https://www.douyin.com/chat?isPopup=1',{waitUntil:'domcontentloaded',timeout:15000})
       await this.auto.wait(session,run,500)
     } catch(error) {if(run.cancelled)throw error;monitor.error='消息页暂未加载完成'}
+    // DOM changes wake the independent consumer immediately; the configured
+    // interval is a fallback scan, never a sender's timing window.
+    const binding='__haybotInboxChanged'
+    let scanning=false,scanAgain=false
+    await page.exposeBinding(binding,async()=>{
+      if(run.cancelled)return
+      if(scanning){scanAgain=true;return}
+      scanning=true
+      try{do{scanAgain=false;await poll()}while(scanAgain&&!run.cancelled)}catch{}finally{scanning=false}
+    }).catch(()=>{})
+    const observe=()=>page.evaluate(()=>{
+      window.__haybotInboxObserver?.disconnect();let timer
+      window.__haybotInboxObserver=new MutationObserver(()=>{if(timer)return;timer=setTimeout(()=>{timer=null;window.__haybotInboxChanged().catch(()=>{})},100)})
+      window.__haybotInboxObserver.observe(document.body,{childList:true,subtree:true,attributes:true,characterData:true})
+    }).catch(()=>{})
+    await observe();monitor.observe=observe
+    page.on('domcontentloaded',observe)
     await tick()
   }
   stopMonitor(run) {
     if(!run.inboxMonitor)return
     clearTimeout(run.inboxMonitor.timer)
+    if(run.inboxRun){run.inboxRun.cancelled=true;run.inboxRun.page.off('response',run.inboxRun.response)}
+    for(const wake of [...run.inboxMonitor.waiters])wake()
     run.inboxMonitor.page.close().catch(()=>{})
   }
   async waitConversation(session,run,peerId,timeout=8000) {
@@ -188,7 +219,7 @@ export class DouyinSocial {
   }
   async read(session,run) {
     const data=await run.page.evaluate(socialDOM);this.auto.guard(session,run)
-    if(run.identityChanged)throw new RuntimeError('account_changed','登录的抖音账号已变化，请重新发起任务')
+    if(run.identityChanged||run.parent?.identityChanged)throw new RuntimeError('account_changed','登录的抖音账号已变化，请重新发起任务')
     data.conversations=[]
     const rows=run.page.locator('[data-e2e="conversation-item"]').filter({visible:true})
     for(let i=0;i<Math.min(await rows.count(),50);i++)data.conversations.push(await rows.nth(i).evaluate(conversationDOM))
