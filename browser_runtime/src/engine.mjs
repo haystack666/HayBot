@@ -241,7 +241,10 @@ export class BrowserEngine extends EventEmitter {
       if (!page.screencast?.start) { this.emit('streamError', { id: session.id, detail: '当前驱动不支持页面实时采集' }); return }
       const stream = { page, tab: session.active, generation: session.generation }; session.stream = stream
       try {
-        await page.screencast.start({ onFrame: frame => {
+        // Without an explicit size Playwright downsamples the longest edge to
+        // 800px. Stream the actual viewport so the workbench does not upscale
+        // an 800×450 image back to desktop size. Input coordinates stay in CSS px.
+        await page.screencast.start({ size: page.viewportSize(), quality: 90, onFrame: frame => {
           if (session.stream !== stream || session.active !== stream.tab || stream.generation !== session.generation || !session.context) return
           this.emit('frame', { id: session.id, tabId: stream.tab, generation: stream.generation, sequence: ++session.frame, timestamp: frame.timestamp, viewportWidth: frame.viewportWidth, viewportHeight: frame.viewportHeight, data: frame.data })
         } })

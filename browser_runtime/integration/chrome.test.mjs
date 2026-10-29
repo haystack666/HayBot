@@ -60,6 +60,11 @@ test('real macOS Chrome: hidden launch, streaming, controls, tabs, media and per
     assert.ok(frames.length >= 3, `received ${frames.length} frames`)
     assert.equal(frames[0].viewportWidth, 1600); assert.equal(frames[0].viewportHeight, 900)
     assert.equal(Buffer.from(frames[0].data, 'base64').readUInt16BE(0), 0xffd8)
+    const encodedSize = await page.evaluate(async data => {
+      const bitmap = await createImageBitmap(new Blob([Uint8Array.from(atob(data), char => char.charCodeAt(0))], { type: 'image/jpeg' }))
+      const size = { width: bitmap.width, height: bitmap.height }; bitmap.close(); return size
+    }, frames[0].data)
+    assert.deepEqual(encodedSize, { width: 1600, height: 900 }, 'encoded JPEG pixels must match the viewport, not just frame metadata')
     const frameCount = frames.length
     const claimed = await fetch(runtime.origin + '/api/sessions/a/claim', { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ connectionId: viewerConnection }) })
     assert.equal(claimed.status, 200); lease = (await claimed.json()).lease
