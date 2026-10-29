@@ -113,3 +113,32 @@ def test_inbox_interval_defaults_and_strict_bounds():
         with pytest.raises(ValidationError):
             InteractionConfig(dm_check_interval_seconds=value)
     assert InteractionConfig(dm_check_interval_seconds=1).dm_check_interval_seconds == 1
+
+
+def test_read_only_reconciliation_checks_scope_evidence_and_preserves_quota(ledger):
+    first=reserve(ledger,decision('like'))
+    identifier=first['operation_id']
+    ledger.settle(identifier,{'status':'unknown','submitted':True})
+    with pytest.raises(HTTPException):ledger.verification_grant('other',identifier)
+    result={**first,'op':'like','reconciled':True,'status':'confirmed','liked':True,'evidence':'fresh_video_detail'}
+    for bad in ({'account_id':'other'},{'video_id':'999999'},{'evidence':'toast'},{'operation_id':'wrong'},{'liked':False}):
+        with pytest.raises(HTTPException):ledger.reconcile('one',identifier,{**result,**bad})
+    ledger.reconcile('one',identifier,{**result,'status':'failed','liked':False,'reason':'当前未点赞，不证明当时失败'})
+    assert ledger.history('one')[0]['status']=='unknown'
+    ledger.reconcile('one',identifier,result)
+    assert ledger.history('one')[0]['status']=='confirmed'
+    assert ledger.count('self-sec','like')==1
+    assert ledger.db.execute('SELECT count(*) FROM douyin_operation_checks').fetchone()[0]==2
+    with pytest.raises(HTTPException):reserve(ledger,decision('like'))
+    with pytest.raises(HTTPException):ledger.verification_grant('one',identifier)
+
+
+def test_history_includes_all_unknowns_even_older_than_recent_fifty(ledger):
+    oldest=reserve(ledger,decision('like'))
+    ledger.settle(oldest['operation_id'],{'status':'unknown'})
+    for n in range(55):
+        video=str(3234567890123+n)
+        row=reserve(ledger,decision('like',id=video),observation(current={'id':video}))
+        ledger.settle(row['operation_id'],{'status':'confirmed'})
+    assert len(ledger.history('one'))==51
+    assert any(x['id']==oldest['operation_id'] for x in ledger.history('one'))

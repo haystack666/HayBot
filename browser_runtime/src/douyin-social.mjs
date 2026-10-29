@@ -3,6 +3,39 @@ import { RuntimeError } from './environment.mjs'
 const clean = (v,n=1000) => typeof v==='string'?v.slice(0,n):''
 const id = v => typeof v==='string' && /^[A-Za-z0-9_-]{3,128}$/.test(v)
 export const writeOps = new Set(['like','comment','reply_comment','reply_dm','share','share_note'])
+// Detail pages render a second interaction bar. Its visible heart has no e2e
+// attribute; the e2e heart belongs to the hidden fullscreen player. Read only
+// the rendered icon's public type/state, then use a normal pointer click.
+export function likeControlDOM(videoId) {
+  const visible=e=>{const r=e.getBoundingClientRect(),s=getComputedStyle(e);return r.width>0&&r.height>0&&s.visibility!=='hidden'&&s.display!=='none'}
+  const root=document.querySelector(`[data-e2e="detail-video-info"][data-e2e-aweme-id="${videoId}"]`)
+  const matches=[]
+  if(root)for(const e of root.querySelectorAll('*')) {
+    if(!visible(e))continue
+    const k=Object.keys(e).find(k=>k.startsWith('__reactProps$')),p=k?e[k]:null
+    if(typeof p?.onClick!=='function')continue
+    if((Array.isArray(p.children)?p.children:[p.children]).some(c=>c?.props?.type==='digg'&&typeof c.props.userInteraction==='boolean'))matches.push(e)
+  }
+  if(matches.length)return matches.length===1?matches[0]:null
+  const buttons=[...document.querySelectorAll('[data-e2e="video-player-digg"]')].filter(visible).filter(e=>{
+    const owner=e.closest('[data-e2e-aweme-id]');return !owner||owner.getAttribute('data-e2e-aweme-id')===videoId
+  })
+  return buttons.length===1?buttons[0]:null
+}
+export function likeStateDOM(e) {
+  const k=Object.keys(e).find(k=>k.startsWith('__reactProps$')),p=k?e[k]:null
+  const icon=(Array.isArray(p?.children)?p.children:[p?.children]).find(c=>c?.props?.type==='digg'&&typeof c.props.userInteraction==='boolean')
+  if(icon)return icon.props.userInteraction
+  const state=e.getAttribute('data-e2e-state'),pressed=e.getAttribute('aria-pressed')
+  if(['liked','active','video-player-is-digg','video-player-digged','video-player-is-digged'].includes(state)||pressed==='true')return true
+  if(['unliked','inactive','false','0','video-player-no-digg','video-player-no-digged'].includes(state)||pressed==='false')return false
+  return null
+}
+export function verificationDOM() {
+  const visible=e=>{const r=e.getBoundingClientRect(),s=getComputedStyle(e);return r.width>0&&r.height>0&&s.visibility!=='hidden'&&s.display!=='none'}
+  // Return only the kind, never phone numbers, codes, or verification text.
+  return [...document.querySelectorAll('article,[role="dialog"],[class*="verify"],[class*="Verify"]')].some(e=>visible(e)&&/为确保是本人操作|本人验证|身份验证/.test(e.innerText||'')&&/短信|验证码/.test(e.innerText||''))?'account_verification':''
+}
 export function profile(payload) {
   const user=payload?.user || payload?.user_info
   if(!user || !id(user.sec_uid) || typeof user.nickname!=='string')return null
@@ -11,7 +44,7 @@ export function profile(payload) {
 }
 export function commentItems(payload) {
   return (Array.isArray(payload?.comments)?payload.comments:[]).slice(0,100).flatMap(c=>
-    id(c.cid) && id(c.aweme_id) && id(c.user?.sec_uid)?[{id:c.cid,video_id:c.aweme_id,author_id:c.user.sec_uid,author:clean(c.user.nickname,80),text:clean(c.text),parent_id:clean(c.reply_to_reply_id && c.reply_to_reply_id!=='0'?c.reply_to_reply_id:c.reply_id,80)}]:[])
+    id(c.cid) && id(c.aweme_id) && id(c.user?.sec_uid)?[{id:c.cid,video_id:c.aweme_id,author_id:c.user.sec_uid,author:clean(c.user.nickname,80),text:clean(c.text),parent_id:clean(c.reply_to_reply_id && c.reply_to_reply_id!=='0'?c.reply_to_reply_id:c.reply_id,80),mentions:(c.text_extra||[]).filter(x=>id(x.sec_uid)||id(x.user_id)).map(x=>({id:clean(x.sec_uid,128),uid:clean(x.user_id,128)})).slice(0,20)}]:[])
 }
 
 // Resolve only public user fields attached to the rendered element. In
@@ -256,6 +289,77 @@ export class DouyinSocial {
     if(await locator.count()!==1)throw new RuntimeError('ambiguous_control','未找到唯一操作入口，未提交')
     this.auto.guard(session,run);await locator.click({timeout:2500,noWaitAfter:true})
   }
+  async verifyLike(session,run,videoId) {
+    const page=await this.auto.engine.auxiliaryPage(session)
+    let state=null
+    const listener=async response=>{try {
+      const u=new URL(response.url())
+      if(u.origin!=='https://www.douyin.com'||!/^\/aweme\/v\d+\/web\/aweme\/detail\/?$/.test(u.pathname))return
+      const d=await response.json(),v=d.aweme_detail
+      this.auto.guard(session,run)
+      if(d.status_code===0&&v?.aweme_id===videoId&&[0,1].includes(v.user_digged))state={liked:v.user_digged===1,video_id:videoId,evidence:'fresh_video_detail'}
+    }catch{}}
+    page.on('response',listener)
+    try {
+      this.auto.guard(session,run)
+      await page.goto('https://www.douyin.com/video/'+videoId,{waitUntil:'domcontentloaded',timeout:15000})
+      for(let i=0;i<24&&!state;i++)await this.auto.wait(session,run,250)
+      this.auto.guard(session,run)
+      if(await page.evaluate(verificationDOM))return null
+      return state
+    }finally{page.off('response',listener);await page.close().catch(()=>{})}
+  }
+  async reconcile(session,run,grant) {
+    this.auto.guard(session,run)
+    if(!/^[a-f0-9]{32}$/.test(grant?.operation_id||'')||grant.account_id!==run.account?.id||!run.account?.verified)throw new RuntimeError('account_mismatch','当前抖音账号与原互动账号不同，未核对')
+    const result={op:grant.op,status:'unknown',reconciled:true,operation_id:grant.operation_id,account_id:grant.account_id,reason:'没有找到可靠结果，保留待核对；未重新提交'}
+    if(grant.op==='like') {
+      const state=await this.verifyLike(session,run,grant.video_id)
+      if(state?.liked)Object.assign(result,state,{status:'confirmed',reason:'平台视频详情确认当前账号已点赞'})
+      else if(state)result.reason='平台当前显示未点赞；无法证明原操作是否曾成功，保留待核对，未重复点击'
+      return result
+    }
+    const page=run.page
+    if(['comment','reply_comment'].includes(grant.op)&&/^\d{6,30}$/.test(grant.video_id||'')) {
+      run.comments.clear();run.currentItems.clear()
+      await page.goto('https://www.douyin.com/video/'+grant.video_id,{waitUntil:'domcontentloaded',timeout:20000})
+      await this.auto.wait(session,run,1500)
+      for(let i=0;i<12;i++) {
+        const view=await this.auto.snapshot(session,run)
+        if(view.blocked)return {...result,blocked:view.blocked,reason:'页面要求验证或登录，请先接管完成后核对'}
+        const matches=[...run.comments.values()].filter(c=>c.video_id===grant.video_id&&c.author_id===grant.account_id&&
+          (grant.mention_owner?c.text.trim().endsWith((grant.text||'').trim()):c.text.trim()===(grant.text||'').trim())&&
+          (grant.op==='reply_comment'?c.parent_id===grant.comment_id:['','0'].includes(c.parent_id)))
+        if(matches.length===1) {
+          const c=matches[0],mentioned=!!grant.mention_owner&&c.mentions.some(p=>p.id===grant.mention_id||p.uid===run.people.get(grant.mention_id)?.uid)
+          return {...result,status:'confirmed',cid:c.id,video_id:c.video_id,parent_id:c.parent_id,mentioned_owner:mentioned,evidence:'own_published_comment',reason:'已查到当前账号在原视频发表的同一条评论'}
+        }
+        if(i===0) {
+          const trigger=page.locator('[data-e2e="video-comment"],[data-e2e="feed-comment-icon"]').filter({visible:true}).first()
+          if(await trigger.count())await this.click(session,run,trigger)
+          else await page.getByText('全部评论',{exact:true}).first().scrollIntoViewIfNeeded({timeout:1500}).catch(()=>{})
+        }
+        await this.auto.wait(session,run,400)
+      }
+      return result
+    }
+    if(grant.op==='share'&&id(grant.peer_id)&&/^\d{6,30}$/.test(grant.video_id||'')) {
+      await page.goto('https://www.douyin.com/user/'+grant.peer_id,{waitUntil:'domcontentloaded',timeout:20000})
+      for(let i=0;i<20&&!run.people.has(grant.peer_id);i++)await this.auto.wait(session,run,250)
+      const peer=run.people.get(grant.peer_id)
+      if(!peer||peer.handle!==run.social.owner?.handle||peer.nickname!==run.social.owner?.nickname)return {...result,reason:'原接收账号与当前 Owner 设置不匹配，未读取消息'}
+      await this.navigate(session,run,{op:'inbox'})
+      await this.waitConversation(session,run,grant.peer_id)
+      await this.navigate(session,run,{op:'conversation',peer_id:grant.peer_id})
+      for(let i=0;i<12;i++) {
+        const view=await this.read(session,run)
+        const sent=view.messages.filter(m=>m.direction==='outbound'&&m.video_id===grant.video_id)
+        if(sent.length===1)return {...result,status:'confirmed',message_id:sent[0].id,peer_id:peer.id,video_id:grant.video_id,evidence:'owner_conversation_card',reason:'已在 Owner 会话查到自己发出的原视频卡片'}
+        await this.auto.wait(session,run,400)
+      }
+    }
+    return result
+  }
   async perform(session,run,input,before) {
     const a=this.auto,page=run.page,op=input.op,grant=input.authorization
     if(!grant || !/^[a-f0-9]{32}$/.test(grant.operation_id||'') || grant.account_id!==before.account?.id)throw new RuntimeError('write_permission','互动未取得当前账号授权')
@@ -273,15 +377,38 @@ export class DouyinSocial {
         if(op!=='reply_comment'&&!before.watched)throw new RuntimeError('not_watched','请先实际观看视频')
       }
       if(op==='like') {
-        const button=page.locator('[data-e2e="video-player-digg"]')
-        if(await button.count()!==1)throw new RuntimeError('like_missing','未找到唯一的点赞按钮')
-        const state=await button.getAttribute('data-e2e-state')
-        if(['liked','active','video-player-is-digg','video-player-digged'].includes(state)||await button.getAttribute('aria-pressed')==='true')return Object.assign(result,{status:'confirmed',already:true})
-        if(!['unliked','inactive','false','0','video-player-no-digg','video-player-no-digged'].includes(state)&&await button.getAttribute('aria-pressed')!=='false')throw new RuntimeError('like_unknown','无法判断是否已经点赞，未点击')
-        submit()
-        if(await button.isVisible())await button.click({timeout:2500})
-        else await button.evaluate(e=>e.click())
-        for(let i=0;i<12;i++){await a.wait(session,run,250);if(['liked','active','video-player-is-digg','video-player-digged'].includes(await button.getAttribute('data-e2e-state'))||await button.getAttribute('aria-pressed')==='true')return Object.assign(result,{status:'confirmed'})}
+        const handle=await page.evaluateHandle(likeControlDOM,grant.video_id),button=handle.asElement()
+        try {
+          if(!button)throw new RuntimeError('like_missing','未找到当前视频唯一可见的点赞按钮，未点击')
+          const state=await button.evaluate(likeStateDOM)
+          if(state===true)return Object.assign(result,{status:'confirmed',already:true,video_id:grant.video_id,evidence:'visible_like_state'})
+          if(state!==false)throw new RuntimeError('like_unknown','无法判断是否已经点赞，未点击')
+          let receipt=null
+          const listener=async response=>{try{
+            const u=new URL(response.url()),req=response.request()
+            if(u.origin!=='https://www.douyin.com'||!/^\/aweme\/v\d+\/web\/commit\/item\/digg\/?$/.test(u.pathname)||req.method()!=='POST')return
+            const params=new URLSearchParams(req.postData()||'')
+            if(params.get('aweme_id')!==grant.video_id||params.get('type')!=='1')return
+            const d=await response.json();a.guard(session,run)
+            if(d.status_code===0)receipt={status:'confirmed',video_id:grant.video_id,evidence:'platform_like_receipt'}
+            else if(Number.isInteger(d.status_code))receipt={status:'failed',reason:'平台拒绝点赞',platform_code:d.status_code}
+          }catch{}}
+          page.on('response',listener)
+          try {
+            submit();await button.click({timeout:2500})
+            for(let i=0;i<24&&!receipt;i++) {
+              await a.wait(session,run,250)
+              if(await page.evaluate(verificationDOM)){result.reason='点赞触发账号本人验证，请接管完成验证后核对，勿重复点击';break}
+            }
+            if(receipt)return Object.assign(result,receipt)
+            if(!result.reason) {
+              const state=await this.verifyLike(session,run,grant.video_id)
+              if(state?.liked)return Object.assign(result,state,{status:'confirmed'})
+            }
+            // Optimistic heart animation alone is not a server acknowledgement.
+            result.reason??='已点击点赞，但未收到平台回执；请核对，勿重复点击'
+          }finally{page.off('response',listener)}
+        }finally{await handle.dispose()}
       } else if(op==='comment'||op==='reply_comment') {
         const trigger=page.locator('[data-e2e="video-comment"],[data-e2e="feed-comment-icon"]').filter({visible:true}).first()
         const open=await page.locator('[data-e2e="comment-list"],[data-e2e="comment-item"],[contenteditable="true"][data-e2e*="comment"]').filter({visible:true}).count()
@@ -315,6 +442,7 @@ export class DouyinSocial {
         }
         if(typeof grant.text!=='string'||!grant.text.trim()||grant.text.length>1000)throw new RuntimeError('invalid_text','评论正文不正确',400)
         a.guard(session,run);await page.keyboard.insertText(grant.text)
+        const knownCommentIds=new Set(run.comments.keys())
         let receipt=null
         const listener=async response=>{
           try {const u=new URL(response.url());if(u.origin!=='https://www.douyin.com'||!/^\/aweme\/v\d+\/web\/comment\/publish\/?$/.test(u.pathname))return
@@ -323,13 +451,23 @@ export class DouyinSocial {
             if(params.get('aweme_id')!==grant.video_id || !(params.get('text')||'').includes(grant.text))return
             const d=await response.json();a.guard(session,run)
             const c=d.comment,parent=String(c?.reply_to_reply_id&&c.reply_to_reply_id!=='0'?c.reply_to_reply_id:c?.reply_id||'')
-            if(d.status_code && d.status_code!==0)receipt={status:'failed',reason:'平台拒绝评论'}
-            else if(id(c?.cid)&&c.aweme_id===grant.video_id&&c.user?.sec_uid===grant.account_id&&(op==='reply_comment'?parent===grant.comment_id:['','0'].includes(parent)))receipt={status:'confirmed',cid:c.cid,video_id:c.aweme_id,parent_id:parent}
+            if(Number.isInteger(d.status_code)&&d.status_code!==0)receipt={status:'failed',reason:'平台拒绝评论',platform_code:d.status_code}
+            else if(d.status_code===0&&id(c?.cid)&&(!c.aweme_id||c.aweme_id===grant.video_id)&&
+              (c.user?.sec_uid===grant.account_id||!c.user?.sec_uid&&before.account?.uid&&String(c.user?.uid)===before.account.uid)&&
+              (typeof c.text!=='string'||c.text.includes(grant.text))&&
+              (op==='reply_comment'?parent===grant.comment_id:['','0'].includes(parent)))receipt={status:'confirmed',cid:c.cid,video_id:grant.video_id,parent_id:parent,evidence:'platform_comment_receipt'}
           }catch{/* Uncorrelated or partial receipts never confirm a write. */}}
         page.on('response',listener)
         try {
           submit();await page.keyboard.press('Enter')
-          for(let i=0;i<24&&!receipt;i++)await a.wait(session,run,400)
+          for(let i=0;i<24&&!receipt;i++) {
+            await a.wait(session,run,400)
+            if(await page.evaluate(verificationDOM)){result.reason='评论触发短信本人验证，发布结果尚未确认；请接管完成验证后核对，勿重发';result.verification_required=true;break}
+            const sent=[...run.comments.values()].filter(c=>!knownCommentIds.has(c.id)&&c.video_id===grant.video_id&&c.author_id===grant.account_id&&
+              (grant.mention_owner?c.text.trim().endsWith(grant.text.trim()):c.text.trim()===grant.text.trim())&&
+              (op==='reply_comment'?c.parent_id===grant.comment_id:['','0'].includes(c.parent_id)))
+            if(sent.length===1)receipt={status:'confirmed',cid:sent[0].id,video_id:grant.video_id,parent_id:sent[0].parent_id,evidence:'fresh_own_comment_list'}
+          }
           if(receipt) {
             Object.assign(result,receipt,{mentioned_owner:!!grant.mention_owner})
             if(receipt.status==='confirmed')run.published.set(receipt.cid,{cid:receipt.cid,account_id:before.account.id,video_id:grant.video_id})

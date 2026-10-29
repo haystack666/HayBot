@@ -65,6 +65,54 @@ def test_legacy_config_without_viewing_gets_defaults(client):
     assert saved['character_interests']=='保留我的兴趣' and saved['viewing']==ViewingConfig().model_dump()
 
 
+def test_verify_endpoint_uses_original_grant_without_writes_and_releases_on_failure(client,monkeypatch):
+    from app.douyin_interactions import InteractionConfig
+    tasks=client.app.state.browser_tasks
+    grant=tasks.interactions.reserve({'id':'old-task','bot_id':'default'},BrowseDecision(op='like',id='123456789',reason='喜欢'),
+        {'account':{'id':'self-account','verified':True},'current':{'id':'123456789'},'watched':True},InteractionConfig(likes_enabled=True))
+    tasks.interactions.settle(grant['operation_id'],{'status':'unknown'})
+    calls=[];bad=False;blocked=False
+    async def gateway(method,path,body=None):
+        calls.append((method,path,body))
+        if method=='GET':return {'state':'owner_control' if blocked else 'ready','generation':3}
+        if path.endswith('/begin'):return {'token':body['runId']}
+        if path.endswith('/end'):return {'stopped':True}
+        if body['op']=='account':return {'generation':4,'account':{'id':'wrong' if bad else 'self-account'}}
+        assert body['op']=='reconcile'
+        return {'interaction':{**grant,'op':'like','reconciled':True,'status':'confirmed','liked':True,'evidence':'fresh_video_detail'}}
+    monkeypatch.setattr(tasks.browser.gateway,'request',gateway)
+    endpoint=f'/api/bots/default/browser/douyin/operations/{grant["operation_id"]}/verify'
+    blocked=True
+    assert client.post(endpoint,json={}).status_code==409 and not tasks.reconciling
+    blocked=False;bad=True
+    assert client.post(endpoint,json={}).status_code==409 and not tasks.reconciling
+    assert calls[-1][1].endswith('/end')
+    bad=False
+    assert client.post(endpoint,json={}).json()['status']=='confirmed'
+    assert not tasks.reconciling
+    assert all(body.get('op') not in ('like','comment','share') for _,_,body in calls if body)
+    assert client.post(endpoint,json={}).status_code==409
+
+
+def test_reconciled_results_overlay_original_task_evidence_without_rewriting_history(client):
+    import time
+    from app.douyin_interactions import InteractionConfig
+    tasks=client.app.state.browser_tasks
+    async def verify():
+        tasks.save_config('default',BrowsingConfig(enabled=True))
+        task=tasks.submit('default','查看',deferred=True)
+        grant=tasks.interactions.reserve(task,BrowseDecision(op='like',id='123456789',reason='喜欢'),
+            {'account':{'id':'self-account','verified':True},'current':{'id':'123456789'},'watched':True},InteractionConfig(likes_enabled=True))
+        tasks.interactions.settle(grant['operation_id'],{'status':'unknown'})
+        tasks.update(task['id'],state='blocked',steps=[{'op':'like','at':time.time(),'current':{'id':'123456789'},'interaction':{'status':'unknown'}}])
+        tasks.interactions.reconcile('default',grant['operation_id'],{**grant,'op':'like','reconciled':True,'status':'confirmed','liked':True,'evidence':'fresh_video_detail'})
+        step=tasks.get('default',task['id'])['steps'][0]
+        assert step['interaction']['status']=='confirmed' and step['original_interaction']['status']=='unknown'
+        original=json.loads(tasks.db.execute('SELECT steps FROM browser_tasks WHERE id=?',(task['id'],)).fetchone()[0])
+        assert original[0]['interaction']['status']=='unknown'
+    client.portal.call(verify)
+
+
 def test_strict_decisions_and_share_intention():
     for raw in ('{"op":"next","op":"finish","reason":"x"}', '{"op":"next","reason":"x"} {"op":"finish"}', 'xx {"op":"next","reason":"x"}'):
         with pytest.raises(ValueError):

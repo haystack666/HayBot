@@ -69,6 +69,8 @@ class InteractionLedger:
           CREATE TABLE IF NOT EXISTS douyin_opportunities(account TEXT NOT NULL, day TEXT NOT NULL,
             video TEXT NOT NULL, allowed INTEGER NOT NULL, probability INTEGER NOT NULL,
             PRIMARY KEY(account,day,video));
+          CREATE TABLE IF NOT EXISTS douyin_operation_checks(id INTEGER PRIMARY KEY AUTOINCREMENT,
+            operation_id TEXT NOT NULL, status TEXT NOT NULL, receipt TEXT NOT NULL, checked REAL NOT NULL);
         ''')
         with db:
             db.execute("UPDATE douyin_operations SET status='unknown' WHERE status='pending'")
@@ -209,4 +211,33 @@ class InteractionLedger:
             self.db.execute("UPDATE douyin_operations SET status=?,receipt=?,updated=? WHERE id=? AND status='pending'",(status,json.dumps(result,ensure_ascii=False),time.time(),identifier))
 
     def history(self, bot_id):
-        return [dict(row) for row in self.db.execute('SELECT id,op,target,status,receipt,created FROM douyin_operations WHERE bot_id=? ORDER BY created DESC LIMIT 50',(bot_id,))]
+        return [dict(row) for row in self.db.execute('''SELECT id,op,target,status,receipt,created FROM douyin_operations
+            WHERE bot_id=? AND (status IN ('pending','unknown') OR id IN
+              (SELECT id FROM douyin_operations WHERE bot_id=? ORDER BY created DESC LIMIT 50)) ORDER BY created DESC''',(bot_id,bot_id))]
+
+    def verification_grant(self, bot_id, identifier):
+        row=self.db.execute('SELECT * FROM douyin_operations WHERE bot_id=? AND id=?',(bot_id,identifier)).fetchone()
+        if not row:
+            raise HTTPException(404,'互动记录不存在')
+        if row['status']!='unknown':
+            raise HTTPException(409,'仅可核对结果未知的互动，不能重新提交')
+        return {'operation_id':row['id'],'account_id':row['account'],'op':row['op'],**json.loads(row['payload'])}
+
+    def reconcile(self, bot_id, identifier, result):
+        grant=self.verification_grant(bot_id,identifier)
+        if any(result.get(k)!=grant[k] for k in ('operation_id','account_id','op')) or result.get('reconciled') is not True:
+            raise HTTPException(409,'核对结果与原账号或互动不匹配')
+        confirmed=result.get('status')=='confirmed'
+        if confirmed:
+            valid=(grant['op']=='like' and result.get('video_id')==grant.get('video_id') and result.get('liked') is True and result.get('evidence')=='fresh_video_detail'
+                or grant['op'] in ('comment','reply_comment') and result.get('video_id')==grant.get('video_id') and result.get('cid') and result.get('evidence')=='own_published_comment'
+                or grant['op']=='share' and result.get('video_id')==grant.get('video_id') and result.get('peer_id')==grant.get('peer_id') and result.get('message_id') and result.get('evidence')=='owner_conversation_card')
+            if not valid:raise HTTPException(409,'核对缺少可靠平台证据')
+        # Absence is not proof of rejection; unknowns continue reserving quota.
+        receipt={**result,'status':'confirmed' if confirmed else 'unknown','checked_at':time.time()}
+        with self.db:
+            self.db.execute('INSERT INTO douyin_operation_checks(operation_id,status,receipt,checked) VALUES (?,?,?,?)',
+                (identifier,receipt['status'],json.dumps(receipt,ensure_ascii=False),receipt['checked_at']))
+            self.db.execute("UPDATE douyin_operations SET status=?,receipt=?,updated=? WHERE bot_id=? AND id=? AND status='unknown'",
+                (receipt['status'],json.dumps(receipt,ensure_ascii=False),receipt['checked_at'],bot_id,identifier))
+        return receipt

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { RuntimeError } from './environment.mjs'
-import { DouyinSocial, writeOps } from './douyin-social.mjs'
+import { DouyinSocial, writeOps, verificationDOM } from './douyin-social.mjs'
 
 const platform = value => { try { const u = new URL(value); return u.protocol === 'https:' && (u.hostname === 'douyin.com' || u.hostname === 'www.douyin.com') } catch { return false } }
 const videoId = value => typeof value === 'string' && /^\d{6,30}$/.test(value)
@@ -154,9 +154,20 @@ export class DouyinAutomation {
     this.guard(session, run)
     this.renew(session, run)
     const page = run.page, op = input.op
-    if (!['observe', 'home', 'search', 'open', 'next', 'scroll', 'watch', 'comments', 'account', 'inbox', 'profile', 'owner_profile', 'conversation', 'stickers', ...writeOps].includes(op)) throw new RuntimeError('invalid_action', '不支持此抖音操作', 400)
+    if (!['observe', 'home', 'search', 'open', 'next', 'scroll', 'watch', 'comments', 'account', 'inbox', 'profile', 'owner_profile', 'conversation', 'stickers', 'reconcile', ...writeOps].includes(op)) throw new RuntimeError('invalid_action', '不支持此抖音操作', 400)
     if (input.generation !== session.generation) throw new RuntimeError('stale_observation', '页面已变化，请重新观察')
+    if(input.reconciling) {
+      const drafts=await page.locator('[contenteditable="true"],textarea').evaluateAll(nodes=>nodes.some(e=>e.getClientRects().length&&(e.innerText||e.value||'').trim()))
+      if(drafts)throw new RuntimeError('existing_draft','页面已有未发送草稿，请先保存草稿后核对')
+    }
     if (!['home', 'search', 'account', 'inbox'].includes(op) && !platform(page.url())) throw new RuntimeError('wrong_platform', '当前已离开抖音，请先返回抖音')
+    if(op==='reconcile') {
+      const before=await this.snapshot(session,run)
+      if(before.blocked)return before
+      const interaction=await this.social.reconcile(session,run,input.authorization)
+      await this.pause(session,run)
+      return {...await this.snapshot(session,run),interaction}
+    }
     if(writeOps.has(op)) {
       const before=await this.snapshot(session,run)
       if(before.blocked)return before
@@ -334,7 +345,7 @@ export class DouyinAutomation {
     const currentId = videoId(data.detail?.id) ? data.detail.id : match?.[1]
     const current = currentId ? run.items.get(currentId) || { id:currentId, url:'https://www.douyin.com/video/'+currentId, title:data.detail?.title || '', author:data.detail?.author || '' } : null
     if (current) run.items.set(current.id,current)
-    const blocked = data.challenge || /验证码|安全验证|完成验证|拖动滑块|验证后继续/.test(data.modal) ? 'captcha' : data.loginForm || /登录后(?:即可|查看|搜索)|扫码登录|手机号登录/.test(data.modal) ? 'login' : ''
+    const blocked = await page.evaluate(verificationDOM) || (data.challenge || /验证码|安全验证|完成验证|拖动滑块|验证后继续/.test(data.modal) ? 'captcha' : data.loginForm || /登录后(?:即可|查看|搜索)|扫码登录|手机号登录/.test(data.modal) ? 'login' : '')
     const policy=watchPolicy(data.playback?.duration || current?.duration,run.viewing)
     const social=blocked?{}:await this.social.read(session,run)
     if(!blocked)run.lastSocial=social

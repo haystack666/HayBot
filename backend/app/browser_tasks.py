@@ -146,6 +146,7 @@ class BrowserTasks:
             self.db.execute("UPDATE browser_tasks SET notification='unknown' WHERE notification='sending'")
         self.interactions = InteractionLedger(self.db)
         self.jobs, self.tokens = {}, {}
+        self.reconciling = set()
         self.closed = False
         self.completion_callback = None
         self.scheduler = DouyinScheduler(self)
@@ -177,13 +178,54 @@ class BrowserTasks:
         return config.model_dump()
 
     def busy(self, bot_id):
-        return self.db.execute("SELECT 1 FROM browser_tasks WHERE bot_id=? AND state IN ('queued','running')", (bot_id,)).fetchone() is not None
+        return bot_id in self.reconciling or self.db.execute("SELECT 1 FROM browser_tasks WHERE bot_id=? AND state IN ('queued','running')", (bot_id,)).fetchone() is not None
+
+    async def reconcile(self, bot_id, operation_id):
+        async with self.browser.lock(bot_id):
+            if self.busy(bot_id):raise HTTPException(409,'请先停止浏览任务，再核对互动')
+            grant=self.interactions.verification_grant(bot_id,operation_id)
+            path=self.browser.path(bot_id)
+            state=await self.browser.gateway.request('GET',path)
+            if state.get('state')!='ready' or state.get('owner_login') or state.get('automation') or state.get('controller'):
+                raise HTTPException(409,'请先启动浏览器并退出登录或接管，再核对互动')
+            self.reconciling.add(bot_id)
+        token=uuid.uuid4().hex
+        begun=False
+        try:
+            cfg=self.config(bot_id)
+            await self.browser.gateway.request('POST',path+'/douyin/begin',{'runId':token,'interactions':{**cfg.interactions.model_dump(),'messages_enabled':False}})
+            begun=True
+            state=await self.browser.gateway.request('GET',path)
+            value=await self.browser.gateway.request('POST',path+'/douyin/act',{'token':token,'generation':state['generation'],'op':'account','reconciling':True})
+            if value.get('blocked'):raise HTTPException(409,'抖音要求验证或登录，请先接管完成后核对')
+            if (value.get('account') or {}).get('id')!=grant['account_id']:raise HTTPException(409,'当前抖音账号与原互动账号不同，未核对')
+            value=await self.browser.gateway.request('POST',path+'/douyin/act',{'token':token,'generation':value['generation'],'op':'reconcile','authorization':grant})
+            result=value.get('interaction')
+            if not result:raise HTTPException(409,'页面要求验证或登录，原记录保持待核对')
+            return self.interactions.reconcile(bot_id,operation_id,result)
+        finally:
+            if begun:
+                try:await self.browser.gateway.request('POST',path+'/douyin/end',{'token':token})
+                except Exception:pass
+            self.reconciling.discard(bot_id)
 
     def list(self, bot_id):
         return [self.with_diagnostics(row) for row in self.db.execute('SELECT * FROM browser_tasks WHERE bot_id=? ORDER BY created DESC LIMIT 30', (bot_id,))]
 
     def with_diagnostics(self, row):
         value = self.unpack(row)
+        checks=[dict(r) for r in self.db.execute("SELECT id,op,target,receipt,created FROM douyin_operations WHERE task_id=? AND status='confirmed'",(value['id'],))]
+        for step in value['steps']:
+            identifier=step.pop('operation_id',None)
+            if (step.get('interaction') or {}).get('status')!='unknown':continue
+            matches=[r for r in checks if r['op']==step['op'] and
+                (identifier==r['id'] or not identifier and 0<=step.get('at',0)-r['created']<120
+                    and ((step.get('current') or {}).get('id') in (None,r['target'].split(':')[0])))]
+            if len(matches)==1:
+                receipt=json.loads(matches[0]['receipt'])
+                if receipt.get('reconciled'):
+                    step['original_interaction']=step['interaction']
+                    step['interaction']={k:v for k,v in receipt.items() if k not in ('operation_id','account_id')}
         value['decision_errors'] = [dict(r) for r in self.db.execute(
             'SELECT sequence,attempt,error,response,at FROM browser_decision_errors WHERE task_id=? ORDER BY sequence', (value['id'],))]
         return value
@@ -406,7 +448,9 @@ class BrowserTasks:
                     self.update(task_id, state='paused', result='已达到本次时间上限，浏览进度已保存')
                     break
                 if observation.get('blocked'):
-                    reason = '抖音要求安全验证，请接管浏览器完成验证后重新发起任务' if observation['blocked'] == 'captcha' else '抖音需要登录，请接管并开启登录隔离，完成登录后重新发起任务'
+                    reason = {'captcha':'抖音要求安全验证，请接管浏览器完成验证后继续',
+                        'account_verification':'抖音要求短信本人验证，已暂停操作；请在浏览器开启主人登录并完成验证，互动结果需核对后再继续',
+                        'login':'抖音需要登录，请接管并开启主人登录，完成登录后继续'}.get(observation['blocked'],'抖音要求验证，请接管完成后继续')
                     self.update(task_id, state='blocked', result=reason)
                     break
                 if cfg.interactions.messages_enabled:
@@ -514,6 +558,7 @@ class BrowserTasks:
                     evidence = {'op': decision.op, 'reason': decision.reason, 'note': decision.note, 'at': time.time(),
                         'url': observation.get('url', ''), 'current': observation.get('current'),
                         'items': observation.get('items', []), 'watch': watch, 'viewing': cfg.viewing.model_dump()}
+                    if operation_id:evidence['operation_id']=operation_id
                     if decision.op=='watch':
                         evidence['request']={'seconds':decision.seconds,**({'start_at':decision.start_at} if decision.start_at is not None else {})}
                     evidence.update({k:observation[k] for k in ('skipped', 'seekFailed', 'previewComplete', 'interaction', 'actionError') if k in observation})

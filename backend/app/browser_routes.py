@@ -69,6 +69,11 @@ def register_browser_routes(app, scoped_runtime):
         authorization(request, runtime)
         return app.state.browser_tasks.submit(runtime.id, body.goal)
 
+    @app.post('/api/bots/{bot_id}/browser/douyin/operations/{operation_id}/verify')
+    async def verify_interaction(operation_id: str, request: Request, runtime=Depends(scoped_runtime)):
+        authorization(request,runtime)
+        return await app.state.browser_tasks.reconcile(runtime.id,operation_id)
+
     @app.post('/api/bots/{bot_id}/browser/douyin/tasks/{task_id}/stop')
     async def stop_browsing(task_id: str, request: Request, runtime=Depends(scoped_runtime)):
         authorization(request, runtime)

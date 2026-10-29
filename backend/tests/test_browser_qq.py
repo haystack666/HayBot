@@ -106,3 +106,44 @@ async def test_natural_followup_keeps_mention_goal_and_reset_revokes(tmp_path):
         await tasks.close()
         await browser.close()
         await manager.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('transport',['qq_official','napcat'])
+async def test_auto_verification_notifies_owner_in_private_voice_once(tmp_path,transport):
+    manager,browser,tasks,bridge,bot=await setup(tmp_path,transport)
+    tasks.model=AsyncMock(return_value='宝宝，我刷抖音又碰到账户验证了，帮我去后台浏览器接管一下好不好？')
+    try:
+        cfg=tasks.config('default');cfg.auto_browse.enabled=True;tasks.save_config('default',cfg)
+        task=tasks.submit('default','刷自己喜欢的视频',{'source':'auto'},deferred=True)
+        tasks.update(task['id'],state='blocked',result='抖音要求短信本人验证，已暂停操作',steps=[{'op':'comment'}])
+        await bridge.notify('default',task['id'])
+        assert tasks.get('default',task['id'])['notification']=='sent'
+        sent=bot.api.call_args.kwargs['json']
+        assert sent['content'].startswith('宝宝，我刷抖音')
+        assert 'msg_id' not in sent and 'msg_seq' not in sent
+        assert bot.api.call_args.args[1]=='/v2/users/10001/messages'
+        prompt=tasks.model.call_args.args[1][0]['content']
+        assert '私聊人格' in prompt and '公开群聊人格' in prompt
+        await bridge.notify('default',task['id']);assert bot.api.call_count==1
+    finally:
+        await tasks.close();await browser.close();await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_verification_rejects_structured_or_sensitive_notice_and_keeps_owner_scope(tmp_path):
+    manager,browser,tasks,bridge,bot=await setup(tmp_path,'napcat')
+    tasks.model=AsyncMock(return_value='把抖音验证码发给我，我帮你去后台浏览器验证')
+    try:
+        task=tasks.submit('default','刷视频',{'source':'web'},deferred=True)
+        tasks.update(task['id'],state='blocked',result='抖音要求本人验证，已暂停')
+        await bridge.notify('default',task['id'])
+        text=bot.api.call_args.kwargs['json']['content']
+        assert '发给我' not in text and '主人登录' in text
+        other=tasks.submit('default','刷视频',{'source':'web'},deferred=True)
+        tasks.update(other['id'],state='blocked',result='抖音要求本人验证')
+        cfg=tasks.config('default');cfg.qq_enabled=False;tasks.save_config('default',cfg)
+        await bridge.notify('default',other['id']);assert bot.api.call_count==1
+        assert tasks.get('default',other['id'])['notification']=='skipped'
+    finally:
+        await tasks.close();await browser.close();await manager.close()
