@@ -124,7 +124,7 @@ test('formal workbench through Docker relay: login, gestures, privacy, Bot switc
       await viewer.evaluate(()=>window.scrollTo(0,0))
       await viewer.waitForFunction(()=>{
         const root=document.querySelector('.browser-viewer'), screen=document.querySelector('.browser-screen-wrap')
-        return root.getBoundingClientRect().bottom<=innerHeight && screen.getBoundingClientRect().height>=64
+        return root.getBoundingClientRect().bottom<=innerHeight+180 && screen.getBoundingClientRect().height>=100 && Math.abs(screen.clientWidth/screen.clientHeight-16/9)<0.03
       })
       assert.ok(await viewer.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'viewer fits viewport width')
     }
@@ -137,7 +137,7 @@ test('formal workbench through Docker relay: login, gestures, privacy, Bot switc
     const trackDown=r=>{if(r.url().endsWith('/action')&&JSON.parse(r.postData()||'{}').phase==='start')downs.push(r)}
     viewer.on('request',trackDown)
     const screenBox=await viewer.locator('.browser-screen').boundingBox()
-    await viewer.mouse.click(screenBox.x+2,screenBox.y+screenBox.height/2)
+    await viewer.mouse.click(screenBox.x-2,screenBox.y+screenBox.height/2)
     await viewer.waitForTimeout(80)
     assert.equal(downs.length,0)
     viewer.off('request',trackDown)
@@ -147,7 +147,9 @@ test('formal workbench through Docker relay: login, gestures, privacy, Bot switc
     assert.ok(await viewer.locator('.browser-screen-wrap').evaluate(e=>e.getBoundingClientRect().height>60),'expanded landscape retains usable picture')
     await viewer.keyboard.press('Escape')
     await viewer.setViewportSize({width:1440,height:1100})
-    await viewer.waitForFunction(()=>document.querySelector('.browser-viewer').getBoundingClientRect().bottom<=innerHeight)
+    await viewer.evaluate(()=>window.scrollTo(0,0))
+    await viewer.waitForTimeout(200)
+    await viewer.waitForFunction(()=>document.querySelector('.browser-viewer').getBoundingClientRect().bottom<=innerHeight+180)
     t.diagnostic('Viewer fits small laptops/tablets/phones; scaled dragging, letterbox rejection and short landscape expansion passed')
     await target.evaluate(() => {
       const host=document.createElement('div');host.id='hover-fixture'

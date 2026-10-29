@@ -38,12 +38,15 @@ export default function BrowserViewer({ api, botId, ready, notify, onCheck }) {
       // would enlarge the canvas and shift the page beneath the pointer.
       const rect = root.getBoundingClientRect()
       const controls = rect.height - screen.getBoundingClientRect().height
-      const below = [...root.parentElement.querySelectorAll('.browser-current-task, .browser-auto-strip')]
-        .reduce((height, element) => height + element.getBoundingClientRect().height, 0)
       const viewportHeight = window.visualViewport?.height || window.innerHeight
-      const height = Math.max(64, Math.floor(viewportHeight - (rect.top + window.scrollY) - controls - below - 18))
-      const value = `${height}px`
-      if (root.style.getPropertyValue('--browser-screen-max-height') !== value) root.style.setProperty('--browser-screen-max-height', value)
+      // Fit the picture itself, not a full-width black container. Task history
+      // may sit below the fold; it must not squeeze the browser into a thumbnail.
+      const available = viewportHeight - (rect.top + window.scrollY) - controls - 12
+      const minimum = Math.min(360, viewportHeight * 0.48)
+      const height = Math.max(minimum, available)
+      const width = Math.min(root.parentElement.clientWidth, Math.floor(height * 16 / 9))
+      const value = `${width}px`
+      if (root.style.getPropertyValue('--browser-viewer-width') !== value) root.style.setProperty('--browser-viewer-width', value)
     }
     const schedule = () => { if (!pending) pending = requestAnimationFrame(fit) }
     const observer = new ResizeObserver(schedule)
