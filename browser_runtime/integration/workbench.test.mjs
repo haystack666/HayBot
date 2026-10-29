@@ -89,6 +89,7 @@ test('formal workbench through Docker relay: login, gestures, privacy, Bot switc
     assert.equal(await viewer.getByLabel('最长视频时长（分钟）',{exact:true}).isEnabled(),true)
     await viewer.getByLabel('长视频分段跳看',{exact:true}).check()
     await viewer.setViewportSize({width:390,height:844})
+    await viewer.waitForTimeout(450)
     assert.ok(await viewer.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'viewing settings fit a phone viewport')
     await viewer.setViewportSize({width:1440,height:1100})
     await viewer.setViewportSize({width:1920,height:1100})
@@ -243,8 +244,9 @@ test('formal workbench through Docker relay: login, gestures, privacy, Bot switc
     await viewer.keyboard.press('Escape')
     await viewer.getByRole('button', { name: '放大画面', exact: true }).waitFor()
     assert.equal(await viewer.getByLabel('网页地址').isEnabled(), true, 'Escape retains control')
+    let fixtureRunning=false
     await viewer.route('**/api/bots/*/browser/douyin/tasks', route=>route.fulfill({json:{tasks:[{
-      id:'diagnostic-fixture',goal:'二次元cos',state:'blocked',created:1793260055,origin:{source:'web'},result:'操作格式未通过，进度已保存',
+      id:'diagnostic-fixture',goal:'二次元cos',state:fixtureRunning?'running':'blocked',created:1793260055,origin:{source:'web'},result:'操作格式未通过，进度已保存',
       steps:[{op:'watch',reason:'观察动作与灯光',current:{title:'角色拍摄片段'},watch:{advancedSeconds:15,samples:[{}, {}, {}],coverageRanges:[[2,17]],fullDuration:600,partial:true,mode:'preview',seek:{actual:2}}},
         {op:'open',reason:'跳过超长视频',skipped:{title:'超长候选',reason:'超过 60 分钟，未打开观看'}},
         {op:'watch',reason:'尝试另一片段',seekFailed:{requested:200,actual:17}}],
@@ -270,6 +272,29 @@ test('formal workbench through Docker relay: login, gestures, privacy, Bot switc
     assert.ok(await viewer.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'interaction content fits a phone')
     await viewer.setViewportSize({width:1440,height:1100})
     await viewer.getByRole('tab',{name:'工作台',exact:true}).click()
+    fixtureRunning=true
+    await viewer.getByRole('button',{name:'查看进度',exact:true}).waitFor()
+    await viewer.evaluate(()=>window.progressCanvas=document.querySelector('.browser-screen'))
+    await viewer.getByRole('button',{name:'查看进度',exact:true}).click()
+    await viewer.waitForTimeout(450)
+    const videoBox=await viewer.locator('.browser-viewer').boundingBox(),progressBox=await viewer.locator('#browser-live-progress').boundingBox()
+    assert.ok(videoBox.x+videoBox.width<=progressBox.x+1,'progress never covers the viewer')
+    assert.equal(await viewer.getByRole('dialog').count(),0,'progress is non-modal')
+    assert.equal(await viewer.evaluate(()=>window.progressCanvas===document.querySelector('.browser-screen')),true,'opening progress keeps the existing canvas')
+    assert.equal(secondSession.lease!==null,true,'opening progress retains takeover')
+    await viewer.setViewportSize({width:390,height:844})
+    await viewer.waitForTimeout(450)
+    const phoneVideo=await viewer.locator('.browser-viewer').boundingBox(),phoneProgress=await viewer.locator('#browser-live-progress').boundingBox()
+    assert.ok(phoneProgress.y>=phoneVideo.y+phoneVideo.height,'phone progress sits below the video')
+    assert.ok(await viewer.evaluate(()=>document.documentElement.scrollWidth<=innerWidth))
+    await viewer.getByRole('button',{name:'收起任务进度',exact:true}).click()
+    await viewer.waitForTimeout(450)
+    assert.equal(await viewer.locator('#browser-live-progress').getAttribute('aria-hidden'),'true')
+    await viewer.setViewportSize({width:1440,height:1100})
+    await viewer.getByRole('button',{name:'查看进度',exact:true}).click()
+    await viewer.keyboard.press('Escape')
+    assert.equal(await viewer.locator('#browser-live-progress').getAttribute('aria-hidden'),'true')
+    t.diagnostic('Animated non-modal progress: side-by-side desktop, stacked phone, close/Escape and takeover/canvas retention passed')
     await viewer.evaluate(() => document.documentElement.classList.add('dark'))
     assert.equal(await viewer.getByLabel('网页地址').isEnabled(), true, 'dark theme retains control')
     await viewer.screenshot({ path: path.join(process.env.HAYBOT_SCREENSHOT_DIR || directory, 'browser-workbench-dark.png'), fullPage: true })

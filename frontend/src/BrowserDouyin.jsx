@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Dialog } from 'radix-ui'
 import { Settings2, Plus, X, Play } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -35,6 +35,8 @@ function TaskProgress({ task }) {
 export default function BrowserDouyin({ api, notify, children, onCheck }) {
   const [config,setConfig]=useState(null),[savedConfig,setSavedConfig]=useState(null),[bound,setBound]=useState(true),[tasks,setTasks]=useState([]),[goal,setGoal]=useState(''),[settings,setSettings]=useState(false),[busy,setBusy]=useState(false),[error,setError]=useState(''),[operations,setOperations]=useState([]),[autoStatus,setAutoStatus]=useState(null)
   const [page,setPage]=useState('live'),[category,setCategory]=useState('general'),[newTask,setNewTask]=useState(false),[detailId,setDetailId]=useState(null),[taskFilter,setTaskFilter]=useState('all'),[operationFilter,setOperationFilter]=useState('all')
+  const [progressId,setProgressId]=useState(null),[progressOpen,setProgressOpen]=useState(false)
+  const progressLayout=useRef(null), progressButton=useRef(null)
   const refresh = useCallback(async () => { try { const value=await api('/browser/douyin/tasks');setTasks(value.tasks);setAutoStatus(value.auto_browse||null);setOperations(value.operations||[]);setError('') } catch(e){setError(e.message)} },[api])
   useEffect(()=>{let alive=true;api('/browser/douyin/config').then(v=>{if(alive){setConfig(v.config);setSavedConfig(v.config);setBound(v.qq_account_bound)}}).catch(e=>{if(alive)setError(e.message)});refresh();const timer=setInterval(refresh,3000);return()=>{alive=false;clearInterval(timer)}},[api,refresh])
   const current=tasks.find(active)
@@ -49,6 +51,25 @@ export default function BrowserDouyin({ api, notify, children, onCheck }) {
   const stop=async id=>{setBusy(true);try{await api(`/browser/douyin/tasks/${id}/stop`,'POST',{});await refresh()}catch(e){setError(e.message)}finally{setBusy(false)}}
   const verify=async id=>{setBusy(true);try{const result=await api(`/browser/douyin/operations/${id}/verify`,'POST',{});await refresh();notify?.(result.reason||'核对完成')}catch(e){setError(e.message)}finally{setBusy(false)}}
   const detail = tasks.find(t=>t.id===detailId)
+  const progressTask=tasks.find(t=>t.id===progressId)
+  const progressTarget=current||progressTask
+  const closeProgress=useCallback(()=>{setProgressOpen(false);progressButton.current?.focus({preventScroll:true})},[])
+  useEffect(()=>{
+    const root=progressLayout.current, viewer=root?.querySelector('.browser-viewer')
+    if(!viewer)return
+    const measure=()=>{
+      const height=viewer.getBoundingClientRect().height
+      if(height>0)root.style.setProperty('--browser-progress-height',`${Math.max(360,Math.round(height))}px`)
+    }
+    const observer=new ResizeObserver(measure);observer.observe(viewer);measure()
+    return()=>observer.disconnect()
+  },[])
+  useEffect(()=>{
+    if(!progressOpen||page!=='live')return
+    const escape=e=>{if(e.key==='Escape'&&!document.querySelector('[role="dialog"]')&&!document.querySelector('.browser-viewer.is-expanded')){e.preventDefault();closeProgress()}}
+    document.addEventListener('keydown',escape)
+    return()=>document.removeEventListener('keydown',escape)
+  },[progressOpen,page,closeProgress])
   const unknownCount=operations.filter(o=>o.status==='unknown').length
   const categories={general:'浏览偏好',viewing:'观看策略',schedule:'自动浏览',interaction:'互动权限',browser:'浏览器'}
   return <div className="browser-workbench">
@@ -56,9 +77,21 @@ export default function BrowserDouyin({ api, notify, children, onCheck }) {
     <div className="browser-page-tabs" role="tablist" aria-label="工作台内容">{[['live','工作台'],['tasks','任务记录'],['operations','互动记录']].map(([key,label])=><button key={key} role="tab" aria-selected={page===key} aria-controls={`browser-tab-${key}`} id={`browser-tab-button-${key}`} onClick={()=>setPage(key)}>{label}{key==='tasks'&&<span>{tasks.length}</span>}{key==='operations'&&unknownCount>0&&<span className="browser-pending-count">{unknownCount} 待核对</span>}</button>)}</div>
     {error&&<Notice alert>{error}</Notice>}
     <section id="browser-tab-live" role="tabpanel" aria-labelledby="browser-tab-button-live" hidden={page!=='live'}>
-      {children}
-      <div className="browser-current-task"><Play size={17}/><div><b>{current?.goal||'当前没有运行中的任务'}</b><span>{current ? `${labels[current.state]} · ${current.steps.length} 步` : config?.enabled ? '可从新建任务或 Owner 私聊发起' : '在浏览设置中开启自主浏览'}</span></div>{current&&<><Button size="sm" variant="ghost" onClick={()=>setDetailId(current.id)}>查看进度</Button><Button size="icon-sm" variant="ghost" aria-label="停止任务" disabled={busy} onClick={()=>stop(current.id)}><X size={15}/></Button></>}</div>
+      <div ref={progressLayout} className={`browser-progress-layout ${progressOpen?'progress-open':''}`}><div className="browser-viewer-column">{children}
+      <div className="browser-current-task"><Play size={17}/><div><b>{current?.goal||'当前没有运行中的任务'}</b><span>{current ? `${labels[current.state]} · ${current.steps.length} 步` : config?.enabled ? '可从新建任务或 Owner 私聊发起' : '在浏览设置中开启自主浏览'}</span></div>{progressTarget&&<><Button ref={progressButton} size="sm" variant="ghost" aria-expanded={progressOpen} aria-controls="browser-live-progress" onClick={()=>{setProgressId(progressTarget.id);setProgressOpen(v=>progressTarget.id===progressId?!v:true)}}>{progressOpen?'收起进度':'查看进度'}</Button><Button size="icon-sm" variant="ghost" aria-label="停止任务" disabled={busy||!current} onClick={()=>stop(current.id)}><X size={15}/></Button></>}</div>
     {autoStatus?.enabled&&<div className="browser-auto-strip"><div className="action-row"><span>{autoStatus.peak?'高峰时段':'空闲时段'} · 今日 {autoStatus.today_watched} / {autoStatus.daily_video_limit} 条</span><Button size="sm" variant="outline" disabled={busy} onClick={async()=>{setBusy(true);try{await api(`/browser/douyin/auto/${autoStatus.hold_reason?'resume':'pause'}`,'POST',{});await refresh()}catch(e){setError(e.message)}finally{setBusy(false)}}}>{autoStatus.hold_reason?'恢复自动浏览':'暂停今日自动浏览'}</Button></div>{autoStatus.hold_reason&&<p>{autoStatus.hold_reason}</p>}{!current&&!autoStatus.hold_reason&&autoStatus.next_run_at&&<p>下次可运行：{new Date(autoStatus.next_run_at).toLocaleString('zh-CN',{hour12:false})}</p>}{autoStatus.calendar_warning&&<Notice>{autoStatus.calendar_warning}</Notice>}</div>}
+      </div><aside id="browser-live-progress" className="browser-progress-pane" aria-label="任务进度" aria-hidden={!progressOpen} inert={!progressOpen}><div className="browser-progress-inner">
+        <header className="browser-progress-header"><h2>任务进度</h2><Button size="icon-sm" variant="ghost" aria-label="收起任务进度" onClick={closeProgress}><X size={16}/></Button></header>
+        <div className="browser-progress-scroll">{progressTask&&<>
+          <div className="browser-progress-state"><span>{labels[progressTask.state]||progressTask.state}</span><time>{new Date(progressTask.created*1000).toLocaleTimeString('zh-CN',{hour12:false})} 开始</time></div>
+          <h3>{progressTask.goal}</h3><p className="browser-progress-count">{progressTask.steps.length} 步 · {progressTask.steps.filter(s=>s.interaction?.status==='confirmed').length} 次互动已确认</p>
+          {progressTask.result&&<Notice>{progressTask.result}</Notice>}
+          {progressTask.steps.length>0&&<div className="browser-progress-current"><span>最近一步</span><b>{progressTask.steps.at(-1).reason}</b>{progressTask.steps.at(-1).current?.title&&<p>{progressTask.steps.at(-1).current.title}</p>}</div>}
+          {(progressTask.origin?.source==='qq'||progressTask.notification)&&<p>QQ 回报：{({sent:'已收到发送回执',unknown:'发送结果未确认',skipped:'授权或连接已变化，未发送',sending:'正在发送'})[progressTask.notification]||'尚未发送'}</p>}
+          <h4>执行记录 <span>最近优先</span></h4><TaskProgress task={{...progressTask,steps:[...progressTask.steps].reverse()}}/>
+        </>}</div>
+        <footer className="browser-progress-footer"><span>{progressTask&&active(progressTask)?'自动更新 · 不影响浏览':'进度已保存'}</span>{progressTask&&active(progressTask)&&<Button size="sm" variant="outline" disabled={busy} onClick={()=>stop(progressTask.id)}>停止任务</Button>}</footer>
+      </div></aside></div>
     </section>
     <section id="browser-tab-tasks" role="tabpanel" aria-labelledby="browser-tab-button-tasks" hidden={page!=='tasks'}><div className="browser-record-toolbar">{[['all','全部'],['running','进行中'],['completed','已完成'],['blocked','需处理']].map(([key,label])=><Button key={key} size="sm" variant={taskFilter===key?'secondary':'ghost'} onClick={()=>setTaskFilter(key)}>{label}</Button>)}</div><div className="browser-records">{tasks.filter(t=>taskFilter==='all'||taskFilter==='running'&&active(t)||taskFilter==='blocked'&&['blocked','failed','unknown','interrupted'].includes(t.state)||t.state===taskFilter).map(t=><article className="browser-record" key={t.id}><div><b>{t.goal}</b><small>{new Date(t.created*1000).toLocaleString('zh-CN',{hour12:false})}</small></div><span>{labels[t.state]||t.state}</span><Button size="sm" variant="outline" onClick={()=>setDetailId(t.id)}>查看</Button></article>)}{!tasks.length&&<div className="empty">暂无任务记录</div>}</div></section>
     <section id="browser-tab-operations" role="tabpanel" aria-labelledby="browser-tab-button-operations" hidden={page!=='operations'}><div className="browser-record-toolbar">{[['all','全部'],['unknown','待核对'],['confirmed','已确认'],['failed','未成功']].map(([key,label])=><Button key={key} size="sm" variant={operationFilter===key?'secondary':'ghost'} onClick={()=>setOperationFilter(key)}>{label}</Button>)}</div>
