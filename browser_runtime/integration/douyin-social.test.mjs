@@ -198,7 +198,7 @@ test('Chrome inbox enforces inbound/follower identity, sends owner cards and con
  } finally {await engine.close();await fs.rm(dir,{recursive:true,force:true})}
 })
 
-test('independent inbox wakes on DOM changes before a 30s fallback, bypasses the video queue and closes on takeover',{timeout:45000,skip:process.platform!=='darwin'},async()=>{
+test('independent inbox is event-driven, bypasses the video queue and closes on takeover',{timeout:45000,skip:process.platform!=='darwin'},async()=>{
  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'haybot-douyin-poll-')),engine=new BrowserEngine(dir)
  try {
   await engine.start('poll');const session=engine.get('poll'),page=session.tabs.get(session.active)
@@ -213,13 +213,13 @@ test('independent inbox wakes on DOM changes before a 30s fallback, bypasses the
   })
   let grant=engine.douyin.begin('poll',{interactions})
   const act=input=>engine.douyin.act('poll',{token:grant.token,generation:session.generation,...input})
-  let result=await act({op:'account'});assert.equal(result.inboxMonitor.interval_seconds,5);assert.equal(result.pendingUnread[0].id,owner)
+  let result=await act({op:'account'});assert.equal(result.inboxMonitor.event_driven,true);assert.equal(result.pendingUnread[0].id,owner)
   assert.equal(session.tabs.size,1);assert.equal(session.tabs.get(session.active),page);assert.match(page.url(),/user\/self/)
   const old=session.automation.inboxMonitor.page
   engine.douyin.end('poll',grant.token);await old.waitForEvent('close').catch(()=>{});assert.ok(old.isClosed())
-  grant=engine.douyin.begin('poll',{interactions:{...interactions,dm_check_interval_seconds:30}})
+  grant=engine.douyin.begin('poll',{interactions})
   result=await act({op:'account'});const monitor=session.automation.inboxMonitor
-  assert.equal(result.inboxMonitor.interval_seconds,30)
+  assert.equal(result.inboxMonitor.event_driven,true);assert.equal('timer' in monitor,false)
   const before=monitor.checkedAt,generation=session.generation,active=session.active
   await monitor.page.locator('[data-e2e]').evaluate(e=>{e.__reactProps$fixture.conversation.unreadCount=3;e.querySelector('i').textContent='3'})
   await page.waitForTimeout(500)
@@ -240,7 +240,7 @@ test('independent inbox wakes on DOM changes before a 30s fallback, bypasses the
    const started=Date.now(),wake=engine.douyin.dmAct('poll',{token:grant.token,op:'observe',wait_version:dm.version})
    await monitor.page.evaluate(()=>{const p=document.createElement('p');p.dataset.messageId='new-message-without-waiting';p.dataset.direction='inbound';p.textContent='新来信';document.body.append(p)})
    const arrived=await wake
-   assert.ok(Date.now()-started<1500,'DOM event wakes the independent consumer without waiting for polling')
+   assert.ok(Date.now()-started<1500,'DOM event wakes the independent consumer without interval polling')
    assert.ok(arrived.messages.some(m=>m.id==='new-message-without-waiting'))
   } finally {releaseMain();session.operation=previousOperation}
 

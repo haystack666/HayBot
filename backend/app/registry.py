@@ -229,6 +229,7 @@ class BotManager:
             runtime = self.get(bot_id)
             tasks = getattr(self, 'browser_tasks', None)
             if tasks:
+                await tasks.stop_dm_monitor(bot_id)
                 await tasks.cancel_bot(bot_id)
             browser = getattr(self, 'browser_service', None)
             if browser:

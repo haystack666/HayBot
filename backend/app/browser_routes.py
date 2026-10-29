@@ -80,7 +80,8 @@ def register_browser_routes(app, scoped_runtime):
 
     @app.get('/api/bots/{bot_id}/browser/douyin/tasks')
     async def browsing_tasks(runtime=Depends(scoped_runtime)):
-        return {'auto_browse':app.state.browser_tasks.scheduler.status(runtime.id), 'tasks': app.state.browser_tasks.list(runtime.id), 'operations': app.state.browser_tasks.interactions.history(runtime.id)}
+        return {'auto_browse':app.state.browser_tasks.scheduler.status(runtime.id), 'dm_monitor':app.state.browser_tasks.dm_status(runtime.id),
+            'tasks': app.state.browser_tasks.list(runtime.id), 'operations': app.state.browser_tasks.interactions.history(runtime.id)}
 
     @app.post('/api/bots/{bot_id}/browser/douyin/auto/{action}')
     async def auto_browsing(action: str, request: Request, runtime=Depends(scoped_runtime)):
@@ -136,9 +137,13 @@ def register_browser_routes(app, scoped_runtime):
         async with s.lock(runtime.id):
             authorization(request, runtime)
             if operation == 'stop':
+                await app.state.browser_tasks.stop_dm_monitor(runtime.id,'waiting_browser','浏览器已停止')
                 await app.state.browser_tasks.cancel_bot(runtime.id)
                 await s.disconnect(runtime.id)
-            return await s.gateway.request('POST', s.path(runtime.id) + '/' + operation, {})
+            result=await s.gateway.request('POST', s.path(runtime.id) + '/' + operation, {})
+        if operation=='start':
+            await app.state.browser_tasks.restart_dm_monitor(runtime.id)
+        return result
 
     @app.post('/api/bots/{bot_id}/browser/control/claim')
     async def claim(body: ViewerBody, request: Request, runtime=Depends(scoped_runtime)):
@@ -146,6 +151,7 @@ def register_browser_routes(app, scoped_runtime):
         async with s.lock(runtime.id):
             auth = authorization(request, runtime)
             viewer = s.viewer(body.connectionId, runtime.id, auth)
+            await app.state.browser_tasks.stop_dm_monitor(runtime.id,'waiting_browser','主人正在接管浏览器')
             result = await s.gateway.request('POST', s.path(runtime.id) + '/claim', body.model_dump())
             authorization(request, runtime)
             s.viewer(body.connectionId, runtime.id, auth)
@@ -163,7 +169,8 @@ def register_browser_routes(app, scoped_runtime):
             viewer = s.control(body.connectionId, runtime.id, authorization(request, runtime), body.lease)
             result = await s.gateway.request('POST', s.path(runtime.id) + '/release', {'lease': body.lease})
             viewer['lease'] = ''
-            return result
+        await app.state.browser_tasks.restart_dm_monitor(runtime.id)
+        return result
 
     @app.post('/api/bots/{bot_id}/browser/control/action')
     async def action(body: dict, request: Request, runtime=Depends(scoped_runtime)):

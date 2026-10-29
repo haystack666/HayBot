@@ -4,9 +4,9 @@ import {interactionDefaults as defaults,interactionError} from '../src/lib/douyi
 
 test('interaction configuration validates quotas, owner identity and duplicate whitelist entries',()=>{
  assert.equal(interactionError(defaults),'')
- assert.equal(defaults.dm_check_interval_seconds,5)
- for(const value of [0,3601,1.5,'5'])assert.match(interactionError({...defaults,dm_check_interval_seconds:value}),/私信检查间隔/)
- assert.equal(interactionError({...defaults,dm_check_interval_seconds:1}),'')
+ assert.equal(defaults.dm_monitor_mode,'task')
+ assert.match(interactionError({...defaults,dm_monitor_mode:'poll'}),/私信监控方式/)
+ assert.equal(interactionError({...defaults,dm_monitor_mode:'always'}),'')
  assert.match(interactionError({...defaults,comment_daily_limit:''}),/整数/)
  assert.match(interactionError({...defaults,other_probability:101}),/整数/)
  assert.match(interactionError({...defaults,shares_enabled:true}),/Owner/)

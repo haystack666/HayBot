@@ -103,15 +103,16 @@ class BrowserDM:
                 prompt.extend([{'role':'assistant','content':public_body(raw)[:1200]},
                     {'role':'user','content':'上一条格式无效。只返回单个 JSON 对象，且只能有 reply 字段；不要输出解释或 Markdown。'}])
 
-    async def run(self,task,cfg,token):
+    async def run(self,task,cfg,token,*,standalone=False,valid=None):
         t=self.tasks;path=t.browser.path(task['bot_id'])+'/douyin/dm'
         handled=set();uncertain=set();version=None;failures=0;stage='observe'
-        self.record(task,'monitoring','独立私信页已开始监控，页面变化立即检查，按配置间隔复查')
+        active=valid or (lambda:t.valid(task))
+        self.record(task,'monitoring','独立私信页已开始监控，页面变化时立即检查')
         async def request(op,view=None,**extra):
-            if not t.valid(task):raise HTTPException(409,'任务权限已撤销')
+            if not active():raise HTTPException(409,'任务权限已撤销')
             return await t.browser.gateway.request('POST',path,{'token':token,'op':op,
                 **({'generation':view['generation']} if view else {}),**extra})
-        while t.valid(task) and not t.closed:
+        while active() and not t.closed:
             try:
                 stage='observe'
                 view=await request('observe',**({'wait_version':version} if version is not None else {}))
@@ -119,9 +120,10 @@ class BrowserDM:
                     await asyncio.sleep(1);continue
                 version=view.get('version')
                 if view.get('blocked'):
-                    self.record(task,'blocked','独立私信页需要登录或安全验证，任务已暂停')
-                    t.update(task['id'],state='blocked',result=t.verification_reason(view['blocked']))
-                    await t.revoke(task['bot_id'],task['id'])
+                    self.record(task,'blocked','独立私信页需要登录或安全验证，'+('监控已暂停' if standalone else '任务已暂停'))
+                    if not standalone:
+                        t.update(task['id'],state='blocked',result=t.verification_reason(view['blocked']))
+                        await t.revoke(task['bot_id'],task['id'])
                     return
                 unread=view.get('pendingUnread') or [];recovery_task='';target=None
                 if unread:target=unread[0]
@@ -193,7 +195,7 @@ class BrowserDM:
                 self.record(task,receipt.get('status','unknown'),'独立私信回复：'+({'confirmed':'已确认发送','failed':'未成功','unknown':'结果待核对'}).get(receipt.get('status'),'待核对'))
             except asyncio.CancelledError:raise
             except HTTPException as e:
-                if e.status_code==409 or not t.valid(task):return
+                if e.status_code==409 or not active():return
                 failures+=1;self.record(task,'error',str(e.detail))
                 if failures>=3:return
                 version=None;await asyncio.sleep(2)

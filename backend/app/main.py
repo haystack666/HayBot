@@ -44,7 +44,7 @@ def create_app(data_dir=None, static_dir=None):
         for runtime in app.state.manager.runtimes.values():
             runtime.bot.android = app.state.manager.android_qq
             runtime.bot.browser = app.state.manager.browser_qq
-        app.state.browser_tasks.scheduler.start()
+        app.state.browser_tasks.start()
         app.state.qq_connect = QQConnect(app.state.manager)
         app.state.session = secrets.token_urlsafe(48)
         app.state.auth_version = time.time()

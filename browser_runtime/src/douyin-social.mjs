@@ -153,8 +153,6 @@ export class DouyinSocial {
   }
   async startMonitor(session,run) {
     if(!run.social.messages_enabled || run.inboxMonitor)return
-    const seconds=run.social.dm_check_interval_seconds ?? 5
-    if(!Number.isInteger(seconds)||seconds<1||seconds>3600)throw new RuntimeError('invalid_interval','私信检查间隔须为 1–3600 秒',400)
     const page=await this.auto.engine.auxiliaryPage(session)
     try {this.auto.guard(session,run)}catch(error){await page.close().catch(()=>{});throw error}
     const monitor=run.inboxMonitor={page,checkedAt:null,error:'',pending:new Map(),opened:new Map(),version:0,waiters:new Set(),signature:''}
@@ -174,16 +172,12 @@ export class DouyinSocial {
       if(signature!==monitor.signature){monitor.signature=signature;monitor.version++;for(const wake of [...monitor.waiters])wake()}
       monitor.checkedAt=Date.now();monitor.error=''
     }
-    const tick=async()=>{
-      try{await poll()}catch(error){if(run.cancelled)return;monitor.error='消息检查暂未完成，将按间隔继续检查'}
-      if(!run.cancelled){monitor.timer=setTimeout(tick,seconds*1000);monitor.timer.unref()}
-    }
     try {
       await page.goto('https://www.douyin.com/chat?isPopup=1',{waitUntil:'domcontentloaded',timeout:15000})
       await this.auto.wait(session,run,500)
     } catch(error) {if(run.cancelled)throw error;monitor.error='消息页暂未加载完成'}
-    // DOM changes wake the independent consumer immediately; the configured
-    // interval is a fallback scan, never a sender's timing window.
+    // DOM changes wake the independent consumer immediately. There is no
+    // periodic inbox scan; navigation/reload reattaches the observer and scans.
     const binding='__haybotInboxChanged'
     let scanning=false,scanAgain=false
     await page.exposeBinding(binding,async()=>{
@@ -197,13 +191,12 @@ export class DouyinSocial {
       window.__haybotInboxObserver=new MutationObserver(()=>{if(timer)return;timer=setTimeout(()=>{timer=null;window.__haybotInboxChanged().catch(()=>{})},100)})
       window.__haybotInboxObserver.observe(document.body,{childList:true,subtree:true,attributes:true,characterData:true})
     }).catch(()=>{})
-    await observe();monitor.observe=observe
-    page.on('domcontentloaded',observe)
-    await tick()
+    const reload=async()=>{await observe();try{await poll()}catch(error){if(!run.cancelled)monitor.error='消息页变化检查暂未完成'} }
+    await reload();monitor.observe=observe;monitor.reload=reload
+    page.on('domcontentloaded',reload)
   }
   stopMonitor(run) {
     if(!run.inboxMonitor)return
-    clearTimeout(run.inboxMonitor.timer)
     if(run.inboxRun){run.inboxRun.cancelled=true;run.inboxRun.page.off('response',run.inboxRun.response)}
     for(const wake of [...run.inboxMonitor.waiters])wake()
     run.inboxMonitor.page.close().catch(()=>{})
@@ -232,7 +225,7 @@ export class DouyinSocial {
     // actual server message identifier in the selected conversation.
     return {account:run.account||null,owner:[...run.people.values()].find(p=>p.handle===run.social.owner?.handle&&p.nickname===run.social.owner?.nickname)||null,
       conversation:peer||null,conversations:data.conversations,pendingUnread:[...(run.inboxMonitor?.pending.values()||[])],
-      inboxMonitor:run.inboxMonitor?{interval_seconds:run.social.dm_check_interval_seconds??5,checked_at:run.inboxMonitor.checkedAt,error:run.inboxMonitor.error}:null,messages:peer?messages:[],stickers:data.stickers,comments:[...run.comments.values()].slice(-60)}
+      inboxMonitor:run.inboxMonitor?{event_driven:true,checked_at:run.inboxMonitor.checkedAt,error:run.inboxMonitor.error}:null,messages:peer?messages:[],stickers:data.stickers,comments:[...run.comments.values()].slice(-60)}
   }
   async navigate(session,run,input) {
     const page=run.page,op=input.op

@@ -39,6 +39,55 @@ def test_config_scoped_strict_and_explicit_interest_migration(client):
     assert client.post('/api/bots/default/browser/douyin/tasks', json={'goal': ' '}).status_code == 422
 
 
+def test_legacy_dm_polling_config_migrates_to_task_mode(tmp_path,monkeypatch):
+    import sqlite3
+    monkeypatch.setenv('ADMIN_PASSWORD','douyin-test-password-long')
+    monkeypatch.setenv('BROWSER_RUNTIME_URL','http://127.0.0.1:17322')
+    monkeypatch.setenv('BROWSER_RUNTIME_TOKEN','test-token-'*5)
+    value=BrowsingConfig().model_dump();interactions=value['interactions']
+    interactions.pop('dm_monitor_mode');interactions['messages_enabled']=True;interactions['dm_check_interval_seconds']=5
+    db=sqlite3.connect(tmp_path/'browser_tasks.sqlite3')
+    db.execute('CREATE TABLE browser_config(bot_id TEXT PRIMARY KEY,account_id TEXT NOT NULL,config TEXT NOT NULL)')
+    db.execute('INSERT INTO browser_config VALUES (?,?,?)',('default','legacy-account',json.dumps(value,ensure_ascii=False)))
+    db.commit();db.close()
+    with TestClient(create_app(tmp_path)) as legacy:
+        legacy.post('/api/login',json={'password':'douyin-test-password-long'})
+        saved=legacy.get('/api/bots/default/browser/douyin/config').json()['config']['interactions']
+        assert saved['messages_enabled'] is True and saved['dm_monitor_mode']=='task'
+        assert 'dm_check_interval_seconds' not in saved
+        raw=json.loads(legacy.app.state.browser_tasks.db.execute('SELECT config FROM browser_config WHERE bot_id=?',('default',)).fetchone()[0])
+        assert raw['interactions']['dm_monitor_mode']=='task' and 'dm_check_interval_seconds' not in raw['interactions']
+
+
+def test_always_dm_monitor_uses_existing_browser_and_stops_when_mode_changes(client,monkeypatch):
+    tasks=client.app.state.browser_tasks;calls=[];started=asyncio.Event();release=asyncio.Event()
+    async def gateway(method,path,body=None):
+        calls.append((method,path,body))
+        if method=='GET':return {'state':'ready','generation':7,'automation':False,'owner_login':False,'controller':None}
+        if path.endswith('/douyin/begin'):return {'token':body['runId']}
+        if path.endswith('/douyin/end'):return {'stopped':True}
+        assert path.endswith('/douyin/act') and body['op']=='account'
+        return {'generation':8,'account':{'id':'self-sec','verified':True}}
+    async def dm_run(task,cfg,token,**kwargs):
+        assert task['id']=='dm-always:default' and kwargs['standalone'] is True and kwargs['valid']()
+        started.set();await release.wait()
+    monkeypatch.setattr(tasks.browser.gateway,'request',gateway)
+    monkeypatch.setattr(tasks.dm,'run',dm_run)
+    async def scenario():
+        cfg=tasks.config('default');cfg.interactions.messages_enabled=True;cfg.interactions.dm_monitor_mode='always';tasks.save_config('default',cfg)
+        await asyncio.wait_for(started.wait(),1)
+        assert tasks.dm_status('default')['state']=='monitoring'
+        assert any(path.endswith('/douyin/begin') for _,path,_ in calls)
+        assert not any(path.endswith('/start') for _,path,_ in calls)
+        cfg.interactions.dm_monitor_mode='task';tasks.save_config('default',cfg)
+        for _ in range(20):
+            if not tasks.dm_jobs.get('default'):break
+            await asyncio.sleep(.01)
+        assert tasks.dm_status('default')['state']=='task_only'
+        assert any(path.endswith('/douyin/end') for _,path,_ in calls)
+    client.portal.call(scenario)
+
+
 def test_viewing_settings_persist_per_bot_and_validate_relationships(client):
     endpoint='/api/bots/default/browser/douyin/config'
     old=client.get(endpoint).json()['config']

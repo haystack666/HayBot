@@ -106,13 +106,13 @@ def test_disabled_missing_identity_and_unwatched_actions_never_reserve(ledger):
     assert ledger.count('self-sec','comment')==0
 
 
-def test_inbox_interval_defaults_and_strict_bounds():
+def test_inbox_monitor_mode_defaults_and_strict_values():
     from pydantic import ValidationError
-    assert InteractionConfig().dm_check_interval_seconds == 5
-    for value in (0,3601,1.5,'5',True):
+    assert InteractionConfig().dm_monitor_mode == 'task'
+    for value in ('poll','',5,True):
         with pytest.raises(ValidationError):
-            InteractionConfig(dm_check_interval_seconds=value)
-    assert InteractionConfig(dm_check_interval_seconds=1).dm_check_interval_seconds == 1
+            InteractionConfig(dm_monitor_mode=value)
+    assert InteractionConfig(dm_monitor_mode='always').dm_monitor_mode == 'always'
 
 
 def test_read_only_reconciliation_checks_scope_evidence_and_preserves_quota(ledger):
