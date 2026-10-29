@@ -226,6 +226,9 @@ class BotManager:
     async def archive(self, bot_id):
         async with self.catalog_lock:
             runtime = self.get(bot_id)
+            browser = getattr(self, 'browser_service', None)
+            if browser:
+                await browser.stop_bot(bot_id)
             android = getattr(self, 'android_service', None)
             if android and not await android.cancel_bot(bot_id):
                 raise HTTPException(409, '安卓任务授权撤销未确认，请先在安卓页面人工接管，再归档')

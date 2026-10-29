@@ -28,6 +28,9 @@ def create_app(data_dir=None, static_dir=None):
             raise RuntimeError('ADMIN_PASSWORD 必须设置且至少 12 位')
         app.state.password = password
         app.state.manager = BotManager(data_dir or os.getenv('DATA_DIR', '/data'))
+        from .browser import BrowserService
+        app.state.browser = BrowserService()
+        app.state.manager.browser_service = app.state.browser
         from .android import AndroidTasks
         app.state.android = AndroidTasks(app.state.manager, app.state.manager.registry.root)
         app.state.manager.android_service = app.state.android
@@ -42,6 +45,7 @@ def create_app(data_dir=None, static_dir=None):
         try:
             yield
         finally:
+            await app.state.browser.close()
             await app.state.android.close()
             await app.state.qq_connect.close()
             await app.state.manager.close()
@@ -125,6 +129,7 @@ def create_app(data_dir=None, static_dir=None):
     @app.post('/api/logout')
     async def logout(response: Response):
         app.state.session = secrets.token_urlsafe(48)
+        await app.state.browser.disconnect()
         await app.state.qq_connect.cancel_all()
         response.delete_cookie('hay_session')
         return {'ok': True}
@@ -538,6 +543,8 @@ def create_app(data_dir=None, static_dir=None):
 
     from .android_routes import register_android_routes
     register_android_routes(app, scoped_runtime)
+    from .browser_routes import register_browser_routes
+    register_browser_routes(app, scoped_runtime)
     from .android_live import register_android_live
     register_android_live(app)
 
@@ -566,6 +573,7 @@ def create_app(data_dir=None, static_dir=None):
     @app.get('/memory')
     @app.get('/memes')
     @app.get('/android')
+    @app.get('/browser')
     @app.get('/qzone')
     async def index():
         if not (root / 'index.html').exists():

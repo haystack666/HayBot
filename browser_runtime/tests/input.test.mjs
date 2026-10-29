@@ -2,6 +2,11 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { framePoint, wheelPixels } from '../public/input.js'
 import { BrowserEngine } from '../src/engine.mjs'
+import { readFile } from 'node:fs/promises'
+
+test('prototype and formal workbench use the same gesture implementation', async () => {
+  assert.equal(await readFile(new URL('../public/input.js', import.meta.url), 'utf8'), await readFile(new URL('../../frontend/src/lib/browser-input.js', import.meta.url), 'utf8'))
+})
 
 test('frame mapping accounts for letterboxing, borders, enlargement and out-of-frame moves', () => {
   const canvas = { width: 1280, height: 800, clientLeft: 1, clientTop: 1, getBoundingClientRect: () => ({ left: 10, top: 20, width: 802, height: 802 }) }

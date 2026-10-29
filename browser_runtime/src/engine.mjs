@@ -55,7 +55,7 @@ export class BrowserEngine extends EventEmitter {
   state(id) {
     const session = this.sessions.get(id)
     if (!session) return { id, state: 'stopped', tabs: [], activeTab: null, generation: 0 }
-    return { id, state: session.context ? session.lease ? 'owner_control' : 'ready' : 'stopped', controller: session.controller || null, generation: session.generation, activeTab: session.active, tabs: [...session.tabs].map(([tabId, page]) => ({ id: tabId, title: session.titles.get(tabId) || '新标签页', url: page.url() })) }
+    return { id, state: session.context ? session.lease ? 'owner_control' : 'ready' : 'stopped', owner_login: !!session.ownerLogin, controller: session.controller || null, generation: session.generation, activeTab: session.active, tabs: [...session.tabs].map(([tabId, page]) => ({ id: tabId, title: session.titles.get(tabId) || '新标签页', url: page.url() })) }
   }
   async start(id) {
     if (!validId(id)) throw new RuntimeError('invalid_session', '浏览器会话标识无效', 400)
@@ -69,10 +69,13 @@ export class BrowserEngine extends EventEmitter {
     if (report.state !== 'ready') throw new RuntimeError(report.state, '请先完成环境检测并安装或修复 Google Chrome')
     const profile = path.join(this.directory, 'profiles', id)
     await fs.mkdir(profile, { recursive: true, mode: 0o700 })
+    let ownerLogin = false
+    try { ownerLogin = JSON.parse(await fs.readFile(path.join(profile, 'haybot-login.json'), 'utf8')).paused !== false }
+    catch (error) { if (error.code !== 'ENOENT') ownerLogin = true }
     let context
     try { context = await this.launch(profile) } catch { throw new RuntimeError('launch_failed', 'Chrome 启动失败，资料可能已被另一进程占用') }
     if (this.closed || this.stopping.has(id)) { await context.close(); throw new RuntimeError('closed', '运行时正在停止') }
-    const session = { id, context, tabs: new Map(), titles: new Map(), active: null, generation: 1, lease: null, stream: null, streamJob: Promise.resolve(), operation: Promise.resolve(), observers: 0, frame: 0 }
+    const session = { id, context, ownerLogin, tabs: new Map(), titles: new Map(), active: null, generation: 1, lease: null, stream: null, streamJob: Promise.resolve(), operation: Promise.resolve(), observers: 0, frame: 0 }
     this.sessions.set(id, session)
     const register = page => {
       if ([...session.tabs.values()].includes(page)) return
@@ -266,8 +269,46 @@ export class BrowserEngine extends EventEmitter {
   }
   async observe(id) {
     const session = this.get(id), page = session.tabs.get(session.active)
+    this.requireObservation(session)
     if (!page) throw new RuntimeError('tab_closed', '没有可用标签页')
-    return { ...this.state(id), aria: (await page.locator('body').ariaSnapshot()).slice(0, 24000), viewport: page.viewportSize() }
+    const generation = session.generation
+    const aria = (await page.locator('body').ariaSnapshot()).slice(0, 24000)
+    this.requireObservation(session)
+    if (!session.context || generation !== session.generation || page !== session.tabs.get(session.active)) throw new RuntimeError('stale_observation', '页面已变化，请重新观察')
+    return { ...this.state(id), aria, viewport: page.viewportSize() }
+  }
+  requireObservation(session) {
+    if (session.ownerLogin) throw new RuntimeError('owner_login', '主人正在登录，已暂停模型读取页面')
+    if (session.controller) throw new RuntimeError('owner_control', '主人正在接管，已暂停模型读取页面')
+  }
+  async setLogin(id, lease, paused) {
+    const session = this.get(id)
+    const job = session.operation.catch(() => {}).then(async () => {
+      if (!session.context || !lease || lease !== session.lease) throw new RuntimeError('stale_control', '请先接管当前浏览器')
+      // Begin closes the observation fence before touching the filesystem. Finish
+      // opens it only after durable storage succeeds. Disconnect/stop never clears it.
+      if (paused) session.ownerLogin = true
+      this.cancelPointer(session)
+      session.generation++; this.changed(session)
+      const filename = path.join(this.directory, 'profiles', id, 'haybot-login.json')
+      const temporary = filename + '.' + randomUUID()
+      try {
+        await fs.writeFile(temporary, JSON.stringify({ paused }), { mode: 0o600, flag: 'wx' })
+        if (!session.context || lease !== session.lease) throw new Error('Control revoked while storing login state')
+        await fs.rename(temporary, filename)
+        if (!session.context || lease !== session.lease) {
+          await fs.writeFile(filename, JSON.stringify({ paused: true }), { mode: 0o600 })
+          throw new Error('Control revoked while committing login state')
+        }
+      } catch {
+        session.ownerLogin = true; this.changed(session)
+        throw new RuntimeError('login_state_failed', '登录隔离状态保存失败，请保持暂停并检查磁盘')
+      } finally { await fs.unlink(temporary).catch(() => {}) }
+      session.ownerLogin = paused; this.changed(session)
+      return this.state(id)
+    })
+    session.operation = job
+    return job
   }
   requireReady() {
     if (this.closed || this.environment.cached?.state !== 'ready') throw new RuntimeError('environment_not_ready', '环境尚未就绪，请重新检测并修复前置条件')

@@ -50,7 +50,7 @@ export async function createRuntimeServer({ directory, token, engine = new Brows
         if (url.pathname === '/api/environment' && ['GET', 'POST'].includes(method)) {
           const report = await engine.prepare({ force: method === 'POST' }); return json(response, 200, engine.environment.public(report))
         }
-        const match = /^\/api\/sessions\/([a-zA-Z0-9_-]{1,64})(?:\/(start|stop|claim|release|action|observe))?$/.exec(url.pathname)
+        const match = /^\/api\/sessions\/([a-zA-Z0-9_-]{1,64})(?:\/(start|stop|claim|release|action|observe|login\/begin|login\/finish))?$/.exec(url.pathname)
         if (!match) throw new RuntimeError('not_found', '接口不存在', 404)
         const [, id, operation] = match
         if (!operation && method === 'GET') return json(response, 200, engine.state(id))
@@ -62,6 +62,7 @@ export async function createRuntimeServer({ directory, token, engine = new Brows
           : operation === 'stop' ? await engine.stop(id)
             : operation === 'claim' ? engine.claim(id, input.connectionId)
               : operation === 'release' ? engine.release(id, input.lease)
+                : operation.startsWith('login/') ? await engine.setLogin(id, input.lease, operation === 'login/begin')
                 : operation === 'action' ? await engine.action(id, input) : null
         if (!result) throw new RuntimeError('not_found', '接口不存在', 404)
         return json(response, 200, result)

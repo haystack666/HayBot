@@ -14,6 +14,7 @@ import MemesPage from './MemesPage'
 import QzonePage from './QzonePage'
 import LogsPage from './LogsPage'
 import AndroidPage from './AndroidPage'
+import BrowserPage from './BrowserPage'
 import ThemeSelector from './ThemeSelector'
 import BotNavigation from './components/BotNavigation'
 import FeatureSearch from './components/FeatureSearch'
@@ -37,6 +38,7 @@ export const pages = [
   { id: 'qzone', title: 'QQ 空间', subtitle: '编辑、定时发布角色动态，管理配图与可见范围。', icon: Globe2 },
   { id: 'proactive', title: '主动互动', subtitle: '设置定时问候和主动搭话策略。', icon: Bell },
   { id: 'chats', title: '会话记录', subtitle: '查看当前 Bot 的会话记录，支持列表与气泡视图。', icon: MessageSquare },
+  { id: 'browser', title: '浏览器工作台', icon: Globe2 },
   { id: 'android', title: '手机工作台', subtitle: '管理独立手机、查看画面并执行安卓操作任务。', icon: Smartphone },
   { id: 'logs', title: '运行日志', subtitle: '筛选运行事件，查看模型耗时、异常原因与消息处理链路。', icon: FileText },
 ]
@@ -178,6 +180,7 @@ export default function App({ page }) {
     {page === 'memory' && <MemoryPage config={config.memory} update={(key, value) => update('memory', key, value)} {...{active, busy, dirty, api, notify}} />}
     {page === 'memes' && <MemesPage {...{api, providers, notify}} memory={config.memory} onSaved={memes => { setConfig(c => ({ ...c, memes })); setSavedConfig(c => ({ ...c, memes })) }} />}
     {page === 'android' && <AndroidPage key={botId} {...{api, notify, providers, botId}} />}
+    {page === 'browser' && <BrowserPage key={botId} {...{api, notify, botId}} />}
     {page === 'diary' && <DiaryPage key={botId} {...{api, notify}} />}
     {page === 'qzone' && <QzonePage key={botId} {...{api,notify,dirty}} />}
     {page === 'chats' && <><div className="page-quicklinks"><Button variant="outline" size="sm" onClick={()=>navigate('rules?view=group')}>群聊参与设置<ChevronRight size={13}/></Button><Button variant="ghost" size="sm" onClick={()=>navigate('memory')}>查看角色记忆</Button></div><ChatsPage api={api} botName={currentBot?.name} /></>}

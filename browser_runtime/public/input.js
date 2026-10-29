@@ -17,6 +17,8 @@ export function wheelPixels(event, height) {
 }
 
 export function bindScreenInput({ canvas, mode, getView, getContext, send, report }) {
+  const events = new AbortController()
+  const on = (target, name, listener, options = {}) => target.addEventListener(name, listener, { ...options, signal: events.signal })
   let gesture = null, wheel = null, wheelRunning = false
   const sameContext = expected => {
     const current = getContext()
@@ -65,7 +67,7 @@ export function bindScreenInput({ canvas, mode, getView, getContext, send, repor
     if (cancelled) current.pending = null
     canvas.classList.remove('dragging'); releaseCapture(current.pointerId); pump(current)
   }
-  canvas.addEventListener('pointerdown', event => {
+  on(canvas, 'pointerdown', event => {
     if (event.button !== 0 || !event.isPrimary || gesture) return
     const captured = capture(), point = captured && framePoint(canvas, captured.view, event.clientX, event.clientY)
     if (!point) return
@@ -73,7 +75,7 @@ export function bindScreenInput({ canvas, mode, getView, getContext, send, repor
     gesture = { ...captured, id: crypto.randomUUID(), pointerId: event.pointerId, mode: mode.value === 'swipe' || mode.value === 'auto' && event.pointerType === 'touch' ? 'swipe' : 'drag', pending: { phase: 'start', ...point }, terminal: null, running: false }
     canvas.classList.add('dragging'); canvas.dataset.inputBusy = 'true'; pump(gesture)
   })
-  canvas.addEventListener('pointermove', event => {
+  on(canvas, 'pointermove', event => {
     const current = gesture
     if (!current || current.pointerId !== event.pointerId || current.finishing) return
     if (!sameContext(current.context)) { reset(); return }
@@ -81,9 +83,9 @@ export function bindScreenInput({ canvas, mode, getView, getContext, send, repor
     current.pending = { phase: 'move', ...framePoint(canvas, current.view, event.clientX, event.clientY, true) }
     pump(current)
   })
-  canvas.addEventListener('pointerup', event => finish(event))
-  canvas.addEventListener('pointercancel', event => finish(event, true))
-  canvas.addEventListener('lostpointercapture', event => {
+  on(canvas, 'pointerup', event => finish(event))
+  on(canvas, 'pointercancel', event => finish(event, true))
+  on(canvas, 'lostpointercapture', event => {
     if (gesture && !gesture.terminal && !gesture.finishing) finish(event, true)
   })
   // Moves are coalesced to one pending position, wheels to one pending delta;
@@ -99,7 +101,7 @@ export function bindScreenInput({ canvas, mode, getView, getContext, send, repor
     } catch (error) { wheel = null; report(error.message) }
     finally { wheelRunning = false }
   }
-  canvas.addEventListener('wheel', event => {
+  on(canvas, 'wheel', event => {
     const captured = capture(), point = captured && framePoint(canvas, captured.view, event.clientX, event.clientY)
     if (!point || event.ctrlKey) return
     event.preventDefault()
@@ -118,8 +120,8 @@ export function bindScreenInput({ canvas, mode, getView, getContext, send, repor
     reset()
     if (sameContext(current.context)) send({ kind: 'pointer', gestureId: current.id, phase: 'cancel' }, current.context).catch(error => report(error.message))
   }
-  mode.addEventListener('change', cancel)
-  window.addEventListener('blur', cancel)
-  document.addEventListener('visibilitychange', () => { if (document.hidden) cancel() })
-  return { reset, cancel, sync: () => { if (gesture && !sameContext(gesture.context)) reset() } }
+  on(mode, 'change', cancel)
+  on(window, 'blur', cancel)
+  on(document, 'visibilitychange', () => { if (document.hidden) cancel() })
+  return { reset, cancel, dispose: () => { cancel(); events.abort() }, sync: () => { if (gesture && !sameContext(gesture.context)) reset() } }
 }

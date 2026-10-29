@@ -1,6 +1,6 @@
 # 浏览器运行时原型
 
-独立宿主服务，验证 Google Chrome 隐藏运行、持久化资料、实时画面和人工接管。当前未接入正式 HayBot 后台、Bot 任务或 QQ；8080 上的安卓运行时不受影响。
+独立宿主服务，支持 Google Chrome 隐藏运行、持久化资料、实时画面和人工接管。已接入 HayBot 后台的登录、Bot 工作台和 HTTP/WebSocket 中继；模型任务循环与 QQ 浏览器指令仍在后续阶段。安卓工作台暂时保留。
 
 当前实现和实机验收范围为 **macOS arm64**。macOS Intel 有架构检查分支，未实测；Windows/Linux 只有安装路径发现，身份和启动流程尚未实现，会阻断启动。
 
@@ -34,6 +34,23 @@ npm --prefix browser_runtime start
 
 数据目录已加入 Git 忽略。请勿上传访问码、Cookie、资料目录。原型 A/B 是合成验收资料，不代表两个正式 Bot。
 
+## 接入正式后台
+
+宿主运行时仍在用户系统中启动，Chrome 不安装到 Docker。后台只负责鉴权和转发。在项目私有 `.env` 添加以下变量（不要把真实访问码写入仓库）：
+
+```dotenv
+BROWSER_RUNTIME_URL=http://host.docker.internal:17322
+BROWSER_RUNTIME_TOKEN=填写本机.browser-runtime/token的内容
+```
+
+如果后台直接运行在宿主，地址使用 `http://127.0.0.1:17322`。后台转发时默认发送 `Host: 127.0.0.1:端口`；自定义宿主代理地址时可用 `BROWSER_RUNTIME_HOST` 明确指定服务允许的 Host。WebSocket 的 TCP 连接目标使用配置的地址，握手 Host 使用允许值，不重复发送 Host。仍仅监听 loopback，不开放 Chrome 调试端口。
+
+应用新配置需要重建/重启后台。登录 HayBot 后，从左侧“浏览器工作台”进入；页面自动检测执行宿主，Chrome 缺失时显示中国官网安装入口。环境通过后，启动、接管，输入完整网页地址即可操作。地址和访问码只配置在服务端，管理页面无需再次填写访问码。
+
+每个已登记且未归档的 Bot 固定使用 `bot-{bot_id}` 会话和独立持久化资料，客户端不能另选 sessionId。画面连接、租约和操作均绑定同一个 Bot 及当前管理登录；页面断开或退出登录会撤销控制。归档 Bot 时先停止对应浏览器，资料保留。
+
+“主人登录”必须先接管。开启后阻断 ARIA/模型观察，手动画面仍可使用；退出接管、关闭页面、停止或重启浏览器都不会自动解除隔离。请离开密码/验证码页面后点击“完成登录”，确认解除。接管期间也阻断模型观察，观察过程中发生接管或页面变化会丢弃已捕获结果。此阶段没有模型/QQ 读取截图的入口。
+
 ## 接口与边界
 
 只监听 `127.0.0.1`；HTTP 使用 Bearer 访问码或交换得到的 HttpOnly/SameSite Strict Cookie。Host 与 Origin 必须匹配服务本机地址。不会开放 Chrome 调试 TCP 端口，驱动通过进程管道连接。
@@ -48,6 +65,7 @@ npm --prefix browser_runtime start
 | `POST /api/sessions/{id}/claim`、`release` | 绑定实时连接的操作租约 |
 | `POST /api/sessions/{id}/action` | 有限的导航、标签、坐标、滚动、pointer 手势和文字/按键操作 |
 | `GET /api/sessions/{id}/observe` | 当前页有限长度 ARIA 快照 |
+| `POST /api/sessions/{id}/login/begin`、`login/finish` | 持当前租约开启/解除持久化登录隔离 |
 | `WS /api/sessions/{id}/live` | 只读状态和 JPEG 画面；初始状态返回 connectionId |
 
 动作必须携带当前 `lease/generation/tabId`；执行队列实际执行前再次校验。导航、切换标签和接管使旧输入失效，失败的动作不自动重试。`claim` 需要同一会话仍在线的 `connectionId`。
@@ -56,7 +74,7 @@ npm --prefix browser_runtime start
 
 多个查看端共享一次活动页采集，慢端丢弃帧；前端只解码最新待处理帧。当前采用 JSON/base64 便于原型验证，尚未做慢网络长时压力、CPU/带宽基准和跨域复杂页面验收。
 
-这是直接访问宿主服务的开发页面。生产接入仍需经过 HayBot 现有登录、Bot 归属、Owner 权限和后台中继；不能把这个访问码表单当作正式产品权限设计。尚未实现 Owner 登录隔离、模型执行循环、QQ 回传、声音获取或真实站点评论任务。
+17322 上仍保留直接访问宿主服务的开发页面；正式工作台走 HayBot 管理登录和 Bot 中继。现有后台为单个管理员账号，不包含多个管理员之间的租户分权。没有向 QQ 群友暴露浏览器控制、观察或截图入口。模型执行循环、QQ 浏览器回传、声音获取及真实站点评论任务尚未接入。
 
 ## 验证
 
@@ -68,3 +86,5 @@ npm --prefix browser_runtime run test:chrome
 第一条覆盖环境阻断、鉴权、旧输入和分包中文。第二条启动真实本机 Chrome，使用临时目录与本地合成网页，结束后清理测试目录。仅 macOS 执行，需要 Xcode 命令行工具编译只读原生进程检查器；其他系统跳过。它只会终止测试临时目录明确归属的 Chrome 进程，用于崩溃恢复验收。
 
 实测结果与未完成项见 [PROTOTYPE.md](../design/browser-runtime-20261028/PROTOTYPE.md)。
+
+正式后台接入与验收见 [WORKBENCH.md](../design/browser-runtime-20261028/WORKBENCH.md)。

@@ -1,6 +1,6 @@
 import { NavLink } from 'react-router-dom'
 const groups = [
-  ['工作台', ['overview', 'chats', 'android']],
+  ['工作台', ['overview', 'chats', 'browser', 'android']],
   ['角色与生活', ['rules', 'memory', 'schedule', 'diary']],
   ['互动', ['proactive', 'memes']],
   ['配置与诊断', ['qq', 'logs']],

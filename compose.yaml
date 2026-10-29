@@ -11,6 +11,9 @@ services:
       COOKIE_SECURE: "false"
       ANDROID_RUNTIME_URL: ${ANDROID_RUNTIME_URL:-}
       ANDROID_RUNTIME_TOKEN: ${ANDROID_RUNTIME_TOKEN:-}
+      BROWSER_RUNTIME_URL: ${BROWSER_RUNTIME_URL:-}
+      BROWSER_RUNTIME_TOKEN: ${BROWSER_RUNTIME_TOKEN:-}
+      BROWSER_RUNTIME_HOST: ${BROWSER_RUNTIME_HOST:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
