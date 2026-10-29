@@ -127,8 +127,8 @@ class BrowserDM:
                         t.update(task['id'],state='blocked',result=t.verification_reason(view['blocked']))
                         await t.revoke(task['bot_id'],task['id'])
                     return
-                unread=view.get('pendingUnread') or [];recovery_task='';target=None
-                if unread:target=unread[0]
+                unread=view.get('pendingUnread') or [];recovery_task='';target=None;unread_target=False
+                if unread:target=unread[0];unread_target=True
                 else:
                     conversations={item.get('id'):item for item in view.get('conversations') or [] if item.get('id')}
                     waiting=self.pending(task,view)
@@ -145,6 +145,19 @@ class BrowserDM:
                 peer=view.get('conversation') or {};messages=view.get('messages') or []
                 if not peer.get('id') or not messages:continue
                 direction=messages[-1].get('direction')
+                if direction=='outbound' and unread_target:
+                    # The IM transport can update the unread badge before React
+                    # inserts the inbound message into the conversation DOM. Keep
+                    # the selected chat open and wait for that event-driven render
+                    # before deciding the unread notification was stale.
+                    stage='settle'
+                    settled=await request('observe',wait_version=version)
+                    version=settled.get('version')
+                    settled_peer=settled.get('conversation') or {}
+                    settled_messages=settled.get('messages') or []
+                    if settled_peer.get('id')==peer['id'] and settled_messages:
+                        view,peer,messages=settled,settled_peer,settled_messages
+                        direction=messages[-1].get('direction')
                 if direction=='outbound':
                     marker=(peer['id'],messages[-1].get('id'))
                     if marker in handled:continue
@@ -209,7 +222,7 @@ class BrowserDM:
                 return
             except Exception as error:
                 failures+=1
-                label={'observe':'观察','conversation':'打开会话','model':'模型生成','refresh':'发送前复查','send':'发送'}.get(stage,'处理')
+                label={'observe':'观察','conversation':'打开会话','settle':'等待新消息渲染','model':'模型生成','refresh':'发送前复查','send':'发送'}.get(stage,'处理')
                 self.record(task,'error','私信'+label+'未完成，已保留原消息')
                 runtime=t.manager.get(task['bot_id'])
                 runtime.store.log('warn','抖音私信处理未完成，原消息已保留',category='system',event='browser.dm_failed',

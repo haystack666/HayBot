@@ -200,6 +200,36 @@ async def test_dm_replies_once_to_a_batch_even_if_visible_messages_reorder(clien
 
 
 @pytest.mark.asyncio
+async def test_dm_waits_for_unread_message_to_render_before_treating_chat_as_outbound(client):
+    import asyncio
+    t=client.app.state.browser_tasks
+    cfg=t.config('default');cfg.interactions.messages_enabled=True;t.save_config('default',cfg)
+    t,bot=seed(client,state='running')
+    peer={'id':'peer-sec','nickname':'朋友','handle':'friend','follows_me':True}
+    outbound={'id':'outbound-old','direction':'outbound','text':'晚点聊'}
+    inbound={'id':'incoming-after-socket','direction':'inbound','text':'现在有空吗'}
+    base={'generation':0,'account':{'id':'platform-self','verified':True},'conversation':peer}
+    observes=0;sent=[]
+    async def gateway(method,path,body):
+        nonlocal observes
+        if body['op']=='observe':
+            observes+=1
+            if observes==1:return {**base,'version':1,'messages':[outbound],'pendingUnread':[peer]}
+            if observes==2:return {**base,'version':2,'messages':[outbound,inbound],'pendingUnread':[]}
+            if observes==3:return {**base,'version':2,'messages':[outbound,inbound],'pendingUnread':[]}
+            raise asyncio.CancelledError()
+        if body['op']=='conversation':return {**base,'version':1,'messages':[outbound],'pendingUnread':[]}
+        sent.append(body['authorization']['message_id'])
+        return {**base,'version':2,'messages':[outbound,inbound], 'pendingUnread':[],
+            'interaction':{'status':'confirmed','message_id':'outbound-real-1'}}
+    t.browser.gateway.request=gateway
+    t.model=AsyncMock(return_value='{"reply":"有空呀，刚看到。"}')
+    with pytest.raises(asyncio.CancelledError):await t.dm.run(t.get('default','journal-one'),cfg,'capability')
+    assert sent==['incoming-after-socket'] and t.model.await_count==1
+    assert not any(item['detail']=='会话最近一条已由当前账号发出，未重复回复' for item in t.dm.events('journal-one'))
+
+
+@pytest.mark.asyncio
 async def test_dm_repairs_malformed_json_and_logs_bounded_diagnostics(client):
     import asyncio
     t=client.app.state.browser_tasks
