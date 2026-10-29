@@ -2,7 +2,27 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { BrowserEngine } from '../src/engine.mjs'
-import { contentItems, mergeRanges, playbackRanges } from '../src/douyin.mjs'
+import { contentItems, mergeRanges, playbackRanges, watchPolicy, previewPosition } from '../src/douyin.mjs'
+
+test('duration boundaries use exact seconds: 3 minutes normal, 60 minutes preview, longer skipped',()=>{
+ for(const duration of [0,null,undefined,NaN,Infinity])assert.equal(watchPolicy(duration).mode,'unknown')
+ assert.equal(watchPolicy(180).mode,'normal')
+ assert.equal(watchPolicy(180.001).mode,'preview')
+ assert.equal(watchPolicy(3600).mode,'preview')
+ assert.equal(watchPolicy(3600.001).mode,'skip')
+ const items=contentItems({aweme_id:'1234567890123456789',desc:'边界视频',video:{duration:3600001}})
+ assert.equal(watchPolicy(items[0].duration).mode,'skip','do not round a video over 60 minutes down to 60')
+})
+
+test('long video previews spread across unseen segments and allow a model selected position',()=>{
+ assert.equal(previewPosition(600,[],15),0)
+ assert.equal(previewPosition(600,[[0,15]],15),200)
+ assert.equal(previewPosition(600,[[0,15],[200,215]],15),400)
+ assert.equal(previewPosition(600,[[0,15],[200,215],[400,415]],15),585)
+ assert.equal(previewPosition(600,[[0,15],[200,215],[400,415],[585,600]],15),null)
+ assert.equal(previewPosition(600,[[0,15]],15,123),123)
+ assert.equal(previewPosition(600,[],15,599),597)
+})
 
 test('watch ranges preserve gaps, merge overlaps and distinguish loops from seeks or changed sources',()=>{
  assert.deepEqual(mergeRanges([[5,8],[0,3],[2,4],[6,9]]),[[0,4],[5,9]])

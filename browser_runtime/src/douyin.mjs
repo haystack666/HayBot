@@ -5,6 +5,19 @@ const platform = value => { try { const u = new URL(value); return u.protocol ==
 const videoId = value => typeof value === 'string' && /^\d{6,30}$/.test(value)
 const text = (value, limit = 500) => typeof value === 'string' ? value.slice(0, limit) : ''
 
+export function watchPolicy(duration) {
+  if (!Number.isFinite(duration) || duration <= 0) return { mode:'unknown', duration:null }
+  return { mode:duration>3600?'skip':duration>180?'preview':'normal', duration }
+}
+
+export function previewPosition(duration, coverage, seconds, requested) {
+  if (requested !== undefined) return Math.min(requested, duration - 3)
+  // A default spread supports exploration without dictating what the model
+  // must watch. It may choose another position or leave after any segment.
+  return [0, duration/3, duration*2/3, Math.max(0,duration-seconds)]
+    .find(at => !coverage.some(([a,b]) => a <= at+0.5 && b >= Math.min(at+3,duration)-0.25)) ?? null
+}
+
 export function mergeRanges(ranges) {
   const result = []
   for (const [start, end] of ranges.filter(([a,b]) => Number.isFinite(a) && Number.isFinite(b) && b > a).sort((a,b) => a[0]-b[0])) {
@@ -33,7 +46,7 @@ export function contentItems(payload) {
     if (!value || typeof value !== 'object' || depth > 7 || found.size >= 60) return
     if (videoId(value.aweme_id) && typeof value.desc === 'string' && !value.is_ads && !value.live_room && value.aweme_type !== 101) {
       found.set(value.aweme_id, { id: value.aweme_id, title: text(value.desc), author: text(value.author?.nickname, 80),
-        duration: Number(value.video?.duration) > 0 ? Math.round(value.video.duration / 1000) : null,
+        duration: Number(value.video?.duration) > 0 ? value.video.duration / 1000 : null,
         url: 'https://www.douyin.com/video/' + value.aweme_id, source: 'page_response' })
     }
     for (const item of (Array.isArray(value) ? value.slice(0,60) : Object.values(value).slice(0,60))) walk(item, depth + 1)
@@ -123,6 +136,11 @@ export class DouyinAutomation {
       }
       if (op === 'open') {
         if (!videoId(input.id) || !run.items.has(input.id)) throw new RuntimeError('unobserved_video', '只能打开当前任务真实观察到的视频', 400)
+        const candidate = run.items.get(input.id)
+        if (watchPolicy(candidate.duration).mode === 'skip') {
+          await this.pause(session,run)
+          return {...await this.snapshot(session,run), skipped:{id:candidate.id,title:candidate.title,duration:candidate.duration,reason:'超过 60 分钟，未打开观看'}}
+        }
         url += 'video/' + input.id
       }
       run.currentItems.clear()
@@ -143,8 +161,43 @@ export class DouyinAutomation {
     let playback, images
     if (op === 'watch') {
       if (!Number.isInteger(input.seconds) || input.seconds < 3 || input.seconds > 30) throw new RuntimeError('invalid_duration', '每次观看支持 3–30 秒，可连续观看', 400)
-      const before = await this.snapshot(session, run)
+      let before = await this.snapshot(session, run)
       if (before.blocked) return before
+      const policy = before.watchPolicy
+      if (policy.mode === 'skip') {
+        await this.pause(session,run)
+        return {...await this.snapshot(session,run), skipped:{id:before.current?.id,duration:policy.duration,reason:'超过 60 分钟，已跳过观看'}}
+      }
+      if (input.start_at !== undefined && (typeof input.start_at !== 'number' || !Number.isFinite(input.start_at) || input.start_at < 0 || input.start_at >= (policy.duration || 0) || policy.mode !== 'preview')) throw new RuntimeError('invalid_position', '仅对超过 3 分钟、最长 60 分钟的视频指定有效跳看位置', 400)
+      const key = before.current?.id ? before.current.id + ':' + (before.playback?.source || '') : null
+      let seek = null
+      if (policy.mode === 'preview' && input.continue_segment !== true) {
+        const target=previewPosition(policy.duration,key?run.coverage.get(key)||[]:[],input.seconds,input.start_at)
+        if (target === null) {
+          await this.pause(session,run)
+          return {...before, previewComplete:true, hint:'默认分段预览已结束；可换视频，或在有具体理由时用 start_at 查看其他片段。分段预览不代表看完。'}
+        }
+        const original=before
+        this.guard(session,run)
+        const assigned=await page.locator('video').evaluateAll((videos,at)=>{
+          const video=videos.filter(v=>{const r=v.getBoundingClientRect();return r.width>100&&r.height>100&&r.bottom>0&&r.top<innerHeight}).sort((a,b)=>b.getBoundingClientRect().width*b.getBoundingClientRect().height-a.getBoundingClientRect().width*a.getBoundingClientRect().height)[0]
+          if(!video || !Number.isFinite(video.duration))return false
+          video.pause();try{video.currentTime=at;return true}catch{return false}
+        },target)
+        const deadline=Date.now()+5000
+        do {
+          await this.wait(session,run,100)
+          before=await this.snapshot(session,run)
+          if(before.blocked)return before
+          if(original.current?.id!==before.current?.id || original.playback?.source!==before.playback?.source)throw new RuntimeError('stale_observation','页面已变化，请重新观察')
+          if(!before.playback?.seeking && Math.abs((before.playback?.currentTime??-100)-target)<1)break
+        } while(assigned && Date.now()<deadline)
+        seek={requested:target,actual:before.playback?.currentTime??null}
+        if(!assigned || before.playback?.seeking || Math.abs((seek.actual??-100)-target)>=1) {
+          await this.pause(session,run)
+          return {...before, seekFailed:seek, hint:'未能确认播放器跳转成功，未播放；可重新观察、稍后尝试或换视频。'}
+        }
+      }
       // Starting playback is reversible. Never call a like/comment/share element.
       this.guard(session, run)
       await page.locator('video').evaluateAll(videos => {
@@ -167,14 +220,13 @@ export class DouyinAutomation {
         this.guard(session, run); images.push(image.toString('base64'))
         if (current?.ended) break
       }
-      const key = before.current?.id ? before.current.id + ':' + (before.playback?.source || '') : null
       const sampledRanges=mergeRanges(ranges), coverageRanges=mergeRanges([...(key ? run.coverage.get(key) || [] : []),...ranges])
       if (key) run.coverage.set(key,coverageRanges)
       while(run.coverage.size>200)run.coverage.delete(run.coverage.keys().next().value)
       const fullDuration=previous?.duration || before.current?.duration || null
       playback = { requestedSeconds: input.seconds, advancedSeconds: Math.round(ranges.reduce((sum,[a,b])=>sum+b-a,0)*10)/10,
         sampledRanges, coverageRanges, fullDuration, partial: !fullDuration || coverageRanges.length!==1 || coverageRanges[0][0]>0.25 || coverageRanges[0][1]<fullDuration-0.25,
-        ended:!!previous?.ended, samples, visualOnly: true, audioAvailable: false }
+        mode:policy.mode, seek, ended:!!previous?.ended, samples, visualOnly: true, audioAvailable: false }
     }
     // Finish playback mutations within the same serialized operation as the
     // watch. Owner input is queued after it; revoked actions never pause later.
@@ -217,7 +269,7 @@ export class DouyinAutomation {
       const loginForm = [...document.querySelectorAll('input[type="password"],input[placeholder*="手机号"],input[placeholder*="验证码"]')].some(visible)
       const challenge = /验证码|安全验证|中间页/.test(document.title) || [...document.querySelectorAll('iframe')].filter(visible).some(f => /captcha|verify|验证/i.test(f.src+' '+f.title))
       return { items:[...items.values()], detail, modal, challenge, loginForm, body:(document.body?.innerText||'').slice(0,14000),
-        playback:v ? {currentTime:Number(v.currentTime)||0,duration:Number.isFinite(v.duration)?v.duration:null,paused:v.paused,readyState:v.readyState,ended:v.ended,source:(v.currentSrc||'').split('?')[0].slice(-150)} : null }
+        playback:v ? {currentTime:Number(v.currentTime)||0,duration:Number.isFinite(v.duration)?v.duration:null,paused:v.paused,seeking:v.seeking,readyState:v.readyState,ended:v.ended,source:(v.currentSrc||'').split('?')[0].slice(-150)} : null }
     })
     this.guard(session, run)
     if (!platform(page.url())) throw new RuntimeError('wrong_platform', '当前已离开抖音，已停止读取页面')
@@ -229,6 +281,7 @@ export class DouyinAutomation {
     const current = currentId ? run.items.get(currentId) || { id:currentId, url:'https://www.douyin.com/video/'+currentId, title:data.detail?.title || '', author:data.detail?.author || '' } : null
     if (current) run.items.set(current.id,current)
     const blocked = data.challenge || /验证码|安全验证|完成验证|拖动滑块|验证后继续/.test(data.modal) ? 'captcha' : data.loginForm || /登录后(?:即可|查看|搜索)|扫码登录|手机号登录/.test(data.modal) ? 'login' : ''
-    return { platform:'douyin', generation, url, blocked, body:blocked ? '' : data.body, items:blocked ? [] : [...run.currentItems.values()].slice(-40), current:blocked ? null : current, playback:blocked ? null : data.playback }
+    const policy=watchPolicy(data.playback?.duration || current?.duration)
+    return { platform:'douyin', generation, url, blocked, body:blocked ? '' : data.body, items:blocked ? [] : [...run.currentItems.values()].slice(-40).map(item=>({...item,watchPolicy:watchPolicy(item.duration)})), current:blocked ? null : current, playback:blocked ? null : data.playback, watchPolicy:blocked ? watchPolicy(null) : policy }
   }
 }

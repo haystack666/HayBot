@@ -12,7 +12,11 @@ function TaskProgress({ task }) {
   return <>
     <ol>{task.steps.map((step,i)=><li key={i}>
       <span>{step.reason}</span>{step.current?.title&&<p>{step.current.title}</p>}
+      {step.skipped&&<p>{step.skipped.title&&`${step.skipped.title} · `}{step.skipped.reason}</p>}
+      {step.seekFailed&&<p>跳转未确认，未播放该片段</p>}
+      {step.previewComplete&&<p>默认分段预览已结束，未完整观看</p>}
       {step.watch&&<small>播放推进 {step.watch.advancedSeconds} 秒 · 抽样 {step.watch.samples.length} 次 · 无音频理解
+        {step.watch.mode==='preview'&&<> · 分段跳看{step.watch.seek?`（跳至 ${Math.round(step.watch.seek.actual)} 秒）`:''}</>}
         {step.watch.coverageRanges&&<><br/>累计播放：{ranges(step.watch.coverageRanges)||'尚未推进'}{step.watch.fullDuration?` / 全长 ${Math.round(step.watch.fullDuration)} 秒`:''} · {step.watch.partial?'未完整播放':'已覆盖全片'}{step.watch.ended?' · 已到结尾':''}</>}
       </small>}
     </li>)}</ol>

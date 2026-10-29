@@ -53,6 +53,12 @@ def test_strict_decisions_and_share_intention():
     for seconds in (True, 10.5, '15', None):
         with pytest.raises(ValueError):
             BrowseDecision.model_validate({'op': 'watch', 'reason': '看', 'seconds': seconds})
+    assert BrowseDecision.model_validate({'op':'watch','reason':'跳看','start_at':0}).start_at == 0
+    for position in (True,-1,3600,'120'):
+        with pytest.raises(ValueError):
+            BrowseDecision.model_validate({'op':'watch','reason':'跳看','start_at':position})
+    with pytest.raises(ValueError):
+        BrowseDecision.model_validate({'op':'next','reason':'继续','start_at':15})
 
 
 class Host:
@@ -279,3 +285,42 @@ def test_browser_model_events_have_task_trace_and_stage(client, monkeypatch):
     task = run_task(client, tasks, '看看抖音')
     assert task['state'] == 'blocked'
     assert seen == [{'stage': 'browser_decision', 'trace_id': task['id'], 'attempt': 1}]
+
+
+@pytest.mark.parametrize('outcome', [
+    {'skipped':{'id':'1234567890123456789','duration':3601,'reason':'超过 60 分钟，已跳过观看'}},
+    {'seekFailed':{'requested':120,'actual':0}},
+    {'previewComplete':True},
+])
+def test_skips_and_seek_outcomes_return_to_model_without_buffer_retry_or_false_completion(client, monkeypatch, outcome):
+    tasks, host, contexts = setup(client, monkeypatch, iter([
+        {'op':'home','reason':'打开抖音'}, {'op':'watch','reason':'尝试观看','seconds':15},
+        {'op':'finish','reason':'不能以跳过作为观看','note':'看完了'},
+        {'op':'blocked','reason':'本轮尚未看到画面','note':'进度已保存，尚未取得观看证据。'},
+    ]))
+    request=host.request
+    async def skipped(method,path,body=None):
+        value=await request(method,path,body)
+        if body and body.get('op')=='watch':
+            value.pop('watch',None);value.pop('images',None);value.update(outcome)
+        return value
+    monkeypatch.setattr(tasks.browser.gateway,'request',skipped)
+    task=run_task(client,tasks,'看看抖音')
+    assert task['state']=='blocked' and host.watches==1
+    assert task['steps'][1].items() >= outcome.items()
+    assert any(s['op']=='invalid' for s in task['steps'])
+    assert json.loads(contexts[2][1]['content'])['progress'][-1].items() >= outcome.items()
+
+
+def test_model_selected_preview_position_reaches_runtime_including_zero(client, monkeypatch):
+    tasks,host,_=setup(client,monkeypatch,iter([
+        {'op':'home','reason':'打开抖音'},
+        {'op':'watch','reason':'先看开头','seconds':15,'start_at':0},
+        {'op':'watch','reason':'跳到中段','seconds':15,'start_at':240.5},
+        {'op':'finish','reason':'看过两个片段','note':'这条我跳着看了两段。'},
+    ]))
+    task=run_task(client,tasks,'看看抖音')
+    assert task['state']=='completed'
+    watches=[body for _,path,body in host.calls if path.endswith('/act') and body['op']=='watch']
+    assert watches[0]['start_at']==0 and watches[-1]['start_at']==240.5
+    assert 'start_at' not in watches[1] and watches[1]['continue_segment']  # Do not rewind or choose a new segment while buffering.

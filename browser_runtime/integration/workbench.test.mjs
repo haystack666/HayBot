@@ -128,11 +128,16 @@ test('formal workbench through Docker relay: login, gestures, privacy, Bot switc
     assert.equal(await viewer.getByLabel('网页地址').isEnabled(), true, 'Escape retains control')
     await viewer.route('**/api/bots/*/browser/douyin/tasks', route=>route.fulfill({json:{tasks:[{
       id:'diagnostic-fixture',goal:'二次元cos',state:'blocked',created:1793260055,origin:{source:'web'},result:'操作格式未通过，进度已保存',
-      steps:[{op:'watch',reason:'观察动作与灯光',current:{title:'角色拍摄片段'},watch:{advancedSeconds:15,samples:[{}, {}, {}],coverageRanges:[[2,17]],fullDuration:105,partial:true}}],
+      steps:[{op:'watch',reason:'观察动作与灯光',current:{title:'角色拍摄片段'},watch:{advancedSeconds:15,samples:[{}, {}, {}],coverageRanges:[[2,17]],fullDuration:600,partial:true,mode:'preview',seek:{actual:2}}},
+        {op:'open',reason:'跳过超长视频',skipped:{title:'超长候选',reason:'超过 60 分钟，未打开观看'}},
+        {op:'watch',reason:'尝试另一片段',seekFailed:{requested:200,actual:17}}],
       decision_errors:[{sequence:1,attempt:1,error:'seconds: Input should be greater than or equal to 3',response:'<img src=x onerror="window.unexpectedExecution=true">'}]
     }]}}))
     await viewer.locator('.browser-task > summary').click()
     assert.match(await viewer.locator('.browser-task small').innerText(),/累计播放：2–17 秒.*未完整播放/)
+    assert.match(await viewer.locator('.browser-task small').innerText(),/分段跳看（跳至 2 秒）/)
+    assert.equal(await viewer.getByText('超长候选 · 超过 60 分钟，未打开观看',{exact:true}).count(),1)
+    assert.equal(await viewer.getByText('跳转未确认，未播放该片段',{exact:true}).count(),1)
     await viewer.getByText('操作格式诊断（1）',{exact:true}).click()
     assert.match(await viewer.locator('.browser-decision-errors pre').innerText(),/<img src=x/)
     assert.equal(await viewer.evaluate(()=>window.unexpectedExecution),undefined)

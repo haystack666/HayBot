@@ -53,3 +53,48 @@ test('real Chrome Douyin adapter: observed IDs, search, playback evidence, comme
   engine.douyin.end('fixture',second.token)
  }finally{await engine.close();await fs.rm(dir,{recursive:true,force:true})}
 })
+
+test('Chrome duration policy: long content rejected, disjoint previews, failed seek and takeover', {timeout:60000,skip:process.platform!=='darwin'},async()=>{
+ const dir=await fs.mkdtemp(path.join(os.tmpdir(),'haybot-douyin-duration-')),engine=new BrowserEngine(dir)
+ try{
+  await engine.start('duration');const session=engine.get('duration'),page=session.tabs.get(session.active)
+  await session.context.route('https://www.douyin.com/**',route=>route.fulfill(route.request().url().includes('/aweme/')?{json:{aweme_list:[{aweme_id:aid,desc:'长视频',video:{duration:3600001}}]}}:{contentType:'text/html',body:html}))
+  const grant=engine.douyin.begin('duration')
+  const act=input=>engine.douyin.act('duration',{token:grant.token,generation:session.generation,...input})
+  await act({op:'home'});const original=page.url()
+  let result=await act({op:'open',id:aid})
+  assert.equal(result.skipped.duration,3600.001);assert.equal(page.url(),original,'known over-limit video is not opened')
+  // A synthetic timeline on a real, playing canvas stream isolates seeking
+  // policy from website/network behaviour. Existing tests cover native playback.
+  await page.evaluate(id=>{
+   history.replaceState(null,'','/video/'+id)
+   const v=document.querySelector('video'),nativeTime=Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype,'currentTime')
+   window.fixtureDuration=3601;window.seekAllowed=true;window.seekCount=0;let offset=0
+   Object.defineProperty(v,'duration',{get:()=>window.fixtureDuration})
+   Object.defineProperty(v,'currentTime',{get:()=>nativeTime.get.call(v)+offset,set:t=>{window.seekCount++;if(window.seekAllowed)offset=t-nativeTime.get.call(v)}})
+  },aid)
+  result=await act({op:'watch',seconds:3})
+  assert.ok(result.skipped);assert.equal(result.watch,undefined)
+  assert.equal(await page.locator('video').evaluate(v=>v.paused),true)
+  await page.evaluate(()=>window.fixtureDuration=600)
+  result=await act({op:'watch',seconds:3})
+  assert.equal(result.watch.mode,'preview');assert.ok(result.watch.coverageRanges[0][0]<1)
+  result=await act({op:'watch',seconds:3})
+  assert.equal(result.watch.seek.requested,200);assert.equal(result.watch.partial,true)
+  assert.equal(result.watch.coverageRanges.length,2)
+  assert.ok(result.watch.coverageRanges[1][0]>=200 && result.watch.advancedSeconds<5,'seeking does not count skipped time as watching')
+  result=await act({op:'watch',seconds:3,start_at:450})
+  assert.equal(result.watch.seek.requested,450);assert.equal(result.watch.coverageRanges.length,3)
+  const seekCount=await page.evaluate(()=>window.seekCount)
+  result=await act({op:'watch',seconds:3,continue_segment:true})
+  assert.equal(await page.evaluate(()=>window.seekCount),seekCount,'buffer waiting continues the same segment without another seek')
+  assert.equal(result.watch.seek,null);assert.ok(result.watch.sampledRanges[0][0]>450)
+  await page.evaluate(()=>window.seekAllowed=false)
+  result=await act({op:'watch',seconds:3,start_at:300})
+  assert.ok(result.seekFailed);assert.equal(result.watch,undefined);assert.equal(result.images,undefined)
+  assert.equal(await page.locator('video').evaluate(v=>v.paused),true)
+  const pending=act({op:'watch',seconds:3,start_at:300})
+  await new Promise(r=>setTimeout(r,250));engine.claim('duration','owner')
+  await assert.rejects(pending,{code:'owner_control'})
+ }finally{await engine.close();await fs.rm(dir,{recursive:true,force:true})}
+})
