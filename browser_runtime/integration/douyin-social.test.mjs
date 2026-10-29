@@ -233,7 +233,11 @@ test('independent inbox is event-driven, bypasses the video queue and closes on 
   try {
    let dm=await engine.douyin.dmAct('poll',{token:grant.token,op:'observe'})
    dm=await engine.douyin.dmAct('poll',{token:grant.token,op:'conversation',generation:dm.generation,peer_id:owner})
-   assert.equal(dm.conversation.id,owner);assert.equal(dm.messages[0].id,'real-inbound-id')
+   assert.equal(dm.conversation.id,owner);assert.equal(dm.conversation.follows_me,true);assert.equal(dm.messages[0].id,'real-inbound-id')
+   assert.equal(typeof monitor.opened.get(owner),'string')
+   await monitor.page.locator('[data-e2e]').evaluate(e=>e.setAttribute('data-render-tick','1'))
+   await monitor.page.waitForTimeout(250)
+   assert.equal(monitor.pending.has(owner),false,'opening the same unread signature must not enqueue it again')
    assert.equal(session.tabs.get(session.active),page);assert.match(page.url(),/user\/self/)
    await monitor.page.waitForTimeout(250)
    dm=await engine.douyin.dmAct('poll',{token:grant.token,op:'observe'})
@@ -244,9 +248,8 @@ test('independent inbox is event-driven, bypasses the video queue and closes on 
    assert.ok(arrived.messages.some(m=>m.id==='new-message-without-waiting'))
   } finally {releaseMain();session.operation=previousOperation}
 
-  result=await act({op:'conversation',peer_id:owner})
-  assert.equal(result.conversation.id,owner);assert.equal(result.conversation.follows_me,true)
-  assert.equal(result.messages[0].id,'real-inbound-id');assert.deepEqual(result.pendingUnread,[])
+  // The main video tab never observed this peer; the independent DM channel
+  // above owns the conversation state and must not leak it into the main tab.
   result=await act({op:'conversation',peer_id:'MS4_not_observed'});assert.equal(result.actionError.code,'unobserved_peer');assert.equal(result.actionError.submitted,false)
   const lease=engine.claim('poll','owner').lease;await monitor.page.waitForEvent('close').catch(()=>{})
   assert.ok(monitor.page.isClosed());assert.equal(session.automation,null);engine.release('poll',lease)

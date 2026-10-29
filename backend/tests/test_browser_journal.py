@@ -173,6 +173,33 @@ async def test_dm_accepts_natural_text_from_persona_without_dropping_message(cli
 
 
 @pytest.mark.asyncio
+async def test_dm_replies_once_to_a_batch_even_if_visible_messages_reorder(client):
+    import asyncio
+    t=client.app.state.browser_tasks
+    cfg=t.config('default');cfg.interactions.messages_enabled=True;t.save_config('default',cfg)
+    t,bot=seed(client,state='running')
+    peer={'id':'peer-sec','nickname':'朋友','handle':'friend','follows_me':True}
+    batch=[{'id':'incoming-old-1','direction':'inbound','text':'在吗'},
+        {'id':'incoming-old-2','direction':'inbound','text':'睡了吗'},
+        {'id':'incoming-latest','direction':'inbound','text':'回我一下'}]
+    base={'generation':0,'version':1,'account':{'id':'platform-self','verified':True},'conversation':peer,'pendingUnread':[]}
+    observes=0;sent=[]
+    async def gateway(method,path,body):
+        nonlocal observes
+        if body['op']=='observe':
+            observes+=1
+            if observes<=2:return {**base,'messages':batch}
+            if observes==3:return {**base,'messages':batch[:2]}
+            raise asyncio.CancelledError()
+        sent.append(body['authorization']['message_id'])
+        return {**base,'messages':batch,'interaction':{'status':'confirmed','message_id':'outbound-real-1'}}
+    t.browser.gateway.request=gateway
+    t.model=AsyncMock(return_value='{"reply":"在呀，刚看到你连着发的消息。"}')
+    with pytest.raises(asyncio.CancelledError):await t.dm.run(t.get('default','journal-one'),cfg,'capability')
+    assert sent==['incoming-latest'] and t.model.await_count==1
+
+
+@pytest.mark.asyncio
 async def test_dm_repairs_malformed_json_and_logs_bounded_diagnostics(client):
     import asyncio
     t=client.app.state.browser_tasks

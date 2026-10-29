@@ -172,24 +172,33 @@ export class DouyinSocial {
       if(signature!==monitor.signature){monitor.signature=signature;monitor.version++;for(const wake of [...monitor.waiters])wake()}
       monitor.checkedAt=Date.now();monitor.error=''
     }
-    try {
-      await page.goto('https://www.douyin.com/chat?isPopup=1',{waitUntil:'domcontentloaded',timeout:15000})
-      await this.auto.wait(session,run,500)
-    } catch(error) {if(run.cancelled)throw error;monitor.error='消息页暂未加载完成'}
     // DOM changes wake the independent consumer immediately. There is no
     // periodic inbox scan; navigation/reload reattaches the observer and scans.
     const binding='__haybotInboxChanged'
     let scanning=false,scanAgain=false
-    await page.exposeBinding(binding,async()=>{
+    const changed=async()=>{
       if(run.cancelled)return
       if(scanning){scanAgain=true;return}
       scanning=true
       try{do{scanAgain=false;await poll()}while(scanAgain&&!run.cancelled)}catch{}finally{scanning=false}
-    }).catch(()=>{})
+    }
+    await page.exposeBinding(binding,changed).catch(()=>{})
+    // Register transport listeners before navigation: Douyin commonly creates
+    // its long-lived IM WebSocket while the chat document is bootstrapping.
+    // Attaching after goto can permanently miss that socket.
+    page.on('websocket',socket=>socket.on('framereceived',()=>changed().catch(()=>{})))
+    page.on('response',response=>{if(/(?:im|message|chat|conversation)/i.test(response.url()))changed().catch(()=>{})})
+    try {
+      await page.goto('https://www.douyin.com/chat?isPopup=1',{waitUntil:'domcontentloaded',timeout:15000})
+      await this.auto.wait(session,run,500)
+    } catch(error) {if(run.cancelled)throw error;monitor.error='消息页暂未加载完成'}
+    // Douyin may replace the chat body during hydration, and incoming IM data
+    // may arrive before React mutates the visible list. Both are event sources,
+    // not interval scans; serialization above coalesces bursts safely.
     const observe=()=>page.evaluate(()=>{
       window.__haybotInboxObserver?.disconnect();let timer
       window.__haybotInboxObserver=new MutationObserver(()=>{if(timer)return;timer=setTimeout(()=>{timer=null;window.__haybotInboxChanged().catch(()=>{})},100)})
-      window.__haybotInboxObserver.observe(document.body,{childList:true,subtree:true,attributes:true,characterData:true})
+      window.__haybotInboxObserver.observe(document.documentElement,{childList:true,subtree:true,attributes:true,characterData:true})
     }).catch(()=>{})
     const reload=async()=>{await observe();try{await poll()}catch(error){if(!run.cancelled)monitor.error='消息页变化检查暂未完成'} }
     await reload();monitor.observe=observe;monitor.reload=reload
@@ -285,12 +294,16 @@ export class DouyinSocial {
       for(let i=0;i<await rows.count();i++) {const row=rows.nth(i),data=await row.evaluate(conversationDOM);if(data.id===input.peer_id){if(found)throw new RuntimeError('ambiguous_peer','会话身份不唯一');found=row}}
       if(!found)throw new RuntimeError('missing_peer','目标会话已不在当前列表中')
       this.auto.guard(session,run);await found.click({timeout:3000});run.peer=input.peer_id
+      let openedView
       for(let i=0;i<16;i++) {
         const view=await this.read(session,run);run.lastSocial=view
-        if(view.conversation?.id===input.peer_id&&view.messages.length)break
+        if(view.conversation?.id===input.peer_id&&view.messages.length){openedView=view;break}
         await this.auto.wait(session,run,250)
       }
-      if(run.inboxMonitor){run.inboxMonitor.pending.delete(input.peer_id);run.inboxMonitor.opened.set(input.peer_id,known.unreadCount)}
+      if(run.inboxMonitor){
+        const opened=(openedView?.conversations||[]).find(item=>item.id===input.peer_id)||known
+        run.inboxMonitor.pending.delete(input.peer_id);run.inboxMonitor.opened.set(input.peer_id,JSON.stringify([opened.unreadCount,opened.preview]))
+      }
     }
   }
 

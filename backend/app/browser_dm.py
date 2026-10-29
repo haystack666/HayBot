@@ -107,6 +107,8 @@ class BrowserDM:
         t=self.tasks;path=t.browser.path(task['bot_id'])+'/douyin/dm'
         handled=set();uncertain=set();version=None;failures=0;stage='observe'
         active=valid or (lambda:t.valid(task))
+        def complete_batch(peer_id,messages):
+            handled.update((peer_id,item.get('id')) for item in messages if item.get('direction')=='inbound' and item.get('id'))
         self.record(task,'monitoring','独立私信页已开始监控，页面变化时立即检查')
         async def request(op,view=None,**extra):
             if not active():raise HTTPException(409,'任务权限已撤销')
@@ -159,17 +161,17 @@ class BrowserDM:
                 self.remember(task,view,peer,incoming)
                 white=any(t.interactions.person(peer,p) for p in cfg.interactions.whitelist)
                 if not white and peer.get('follows_me') is not True:
-                    handled.add(key);self.resolve(task,view,peer,'skipped');self.recovered(recovery_task,task['bot_id'],'skipped')
+                    complete_batch(peer['id'],messages);self.resolve(task,view,peer,'skipped');self.recovered(recovery_task,task['bot_id'],'skipped')
                     self.record(task,'skipped','非白名单且未确认关注关系，未回复');continue
                 if not white and t.interactions.availability((view.get('account') or {}).get('id'),task['id'],cfg.interactions).get('nonwhite_dm_remaining',0)<=0:
-                    handled.add(key);self.resolve(task,view,peer,'skipped');self.recovered(recovery_task,task['bot_id'],'skipped');continue
+                    complete_batch(peer['id'],messages);self.resolve(task,view,peer,'skipped');self.recovered(recovery_task,task['bot_id'],'skipped');continue
                 runtime=t.manager.get(task['bot_id'])
                 owner=t.interactions.person(peer,cfg.interactions.owner)
                 persona=runtime.store.load().rules.prompt if owner else cfg.interactions.public_style
                 stage='model'
                 text=await self.generate(t,runtime,task,peer,messages,owner,persona)
                 if not text:
-                    handled.add(key);self.resolve(task,view,peer,'no_reply');self.recovered(recovery_task,task['bot_id'],'no_reply');continue
+                    complete_batch(peer['id'],messages);self.resolve(task,view,peer,'no_reply');self.recovered(recovery_task,task['bot_id'],'no_reply');continue
                 # Refresh before reserving: if a new message arrived during model
                 # generation, discard the stale draft and let the next loop decide.
                 stage='refresh'
@@ -181,7 +183,7 @@ class BrowserDM:
                 decision=BrowseDecision(op='reply_dm',reason='回复独立私信页的实际来信',peer_id=peer['id'],message_id=incoming['id'],text=text)
                 try:grant=t.interactions.reserve(task,decision,fresh,cfg.interactions)
                 except HTTPException as e:
-                    handled.add(key);self.resolve(task,fresh,peer,'skipped');self.recovered(recovery_task,task['bot_id'],'skipped')
+                    complete_batch(peer['id'],messages);self.resolve(task,fresh,peer,'skipped');self.recovered(recovery_task,task['bot_id'],'skipped')
                     self.record(task,'skipped',str(e.detail));continue
                 try:
                     stage='send'
@@ -190,7 +192,7 @@ class BrowserDM:
                 except Exception:
                     receipt={'status':'unknown','reason':'私信发送回执未确认，禁止自动重发'}
                 t.interactions.settle(grant['operation_id'],receipt)
-                handled.add(key);failures=0
+                complete_batch(peer['id'],messages);failures=0
                 self.resolve(task,fresh,peer,receipt.get('status','unknown'));self.recovered(recovery_task,task['bot_id'],receipt.get('status','unknown'))
                 self.record(task,receipt.get('status','unknown'),'独立私信回复：'+({'confirmed':'已确认发送','failed':'未成功','unknown':'结果待核对'}).get(receipt.get('status'),'待核对'))
             except asyncio.CancelledError:raise
