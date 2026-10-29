@@ -51,7 +51,18 @@ def register_browser_routes(app, scoped_runtime):
 
     @app.get('/api/bots/{bot_id}/browser/douyin/tasks')
     async def browsing_tasks(runtime=Depends(scoped_runtime)):
-        return {'tasks': app.state.browser_tasks.list(runtime.id), 'operations': app.state.browser_tasks.interactions.history(runtime.id)}
+        return {'auto_browse':app.state.browser_tasks.scheduler.status(runtime.id), 'tasks': app.state.browser_tasks.list(runtime.id), 'operations': app.state.browser_tasks.interactions.history(runtime.id)}
+
+    @app.post('/api/bots/{bot_id}/browser/douyin/auto/{action}')
+    async def auto_browsing(action: str, request: Request, runtime=Depends(scoped_runtime)):
+        authorization(request,runtime)
+        tasks=app.state.browser_tasks
+        if action not in ('pause','resume'):
+            raise HTTPException(404,'操作不存在')
+        if action=='resume':
+            return tasks.scheduler.resume(runtime.id)
+        tasks.scheduler.hold(runtime.id,'主人已暂停今日自动浏览，可手动恢复')
+        return tasks.scheduler.status(runtime.id)
 
     @app.post('/api/bots/{bot_id}/browser/douyin/tasks')
     async def start_browsing(body: BrowserTaskBody, request: Request, runtime=Depends(scoped_runtime)):

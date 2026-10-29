@@ -49,6 +49,7 @@ export function conversationDOM(element) {
   const key=Object.keys(element).find(k=>k.startsWith('__reactProps$')),c=key?walk(element[key],0):null
   const identifier=c?.toParticipantSecUserId||element.querySelector('a[href*="/user/"]')?.getAttribute('href')?.match(/\/user\/([^/?]+)/)?.[1]||element.getAttribute('data-peer-id')||element.getAttribute('data-user-id')||''
   return {id:identifier,conversation_id:typeof c?.id==='string'?c.id:'',nickname:((element.querySelector('[class*="ConversationItemtitle"]')||element).innerText||'').split('\n')[0].slice(0,80),
+    unreadCount:typeof c?.unreadCount==='number'?c.unreadCount:null,
     unread:typeof c?.unreadCount==='number'?c.unreadCount>0:!!element.querySelector('[class*="badge"],[class*="Badge"],[class*="unread"],[data-unread="true"]'),
     selected:element.getAttribute('aria-selected')==='true'||element.getAttribute('data-active')==='true'||/curConversation|selected|Selected|active|Active/.test(element.className)}
 }
@@ -79,7 +80,11 @@ export function socialDOM() {
     const conversation=String(metadata?.conversationId||metadata?.conversation_id||'')
     if(!mid || messages.some(m=>m.id===mid))continue
     const card=e.querySelector('a[href*="/video/"]')
-    messages.push({id:short(mid,100),direction,sender:short(sender,100),conversation_id:short(conversation,100),text:short(e.innerText),video_id:card?.href.match(/\/video\/(\d+)/)?.[1]||'',sticker:e.querySelector('img')?.getAttribute('alt')||''})
+    // The real share card is a div, with no anchor. Read only its rendered
+    // message's itemId; never pass arbitrary message content or assets onward.
+    let parsed;try{parsed=metadata?.parsedContent}catch{}
+    const cardId=typeof parsed?.itemId==='string'&&/^\d{6,30}$/.test(parsed.itemId)?parsed.itemId:''
+    messages.push({id:short(mid,100),direction,sender:short(sender,100),conversation_id:short(conversation,100),text:short(e.innerText),video_id:cardId||card?.href.match(/\/video\/(\d+)/)?.[1]||'',sticker:e.querySelector('img')?.getAttribute('alt')||''})
   }
   const selected=[...document.querySelectorAll('[data-e2e="conversation-item"]')].filter(visible).filter(e=>e.getAttribute('aria-selected')==='true'||e.getAttribute('data-active')==='true'||/selected|Selected|active|Active/.test(e.className))
   const peer=selected.length===1?identity(selected[0]):''
@@ -103,6 +108,50 @@ export class DouyinSocial {
       while(run.comments.size>300)run.comments.delete(run.comments.keys().next().value)
     }
   }
+  async startMonitor(session,run) {
+    if(!run.social.messages_enabled || run.inboxMonitor)return
+    const seconds=run.social.dm_check_interval_seconds ?? 5
+    if(!Number.isInteger(seconds)||seconds<1||seconds>3600)throw new RuntimeError('invalid_interval','私信检查间隔须为 1–3600 秒',400)
+    const page=await this.auto.engine.auxiliaryPage(session)
+    try {this.auto.guard(session,run)}catch(error){await page.close().catch(()=>{});throw error}
+    const monitor=run.inboxMonitor={page,checkedAt:null,error:'',pending:new Map(),opened:new Map()}
+    const poll=async()=>{
+      this.auto.guard(session,run)
+      if(page.url()!=='https://www.douyin.com/chat?isPopup=1')return
+      const rows=page.locator('[data-e2e="conversation-item"]').filter({visible:true}),people=[]
+      for(let i=0;i<Math.min(await rows.count(),50);i++)people.push(await rows.nth(i).evaluate(conversationDOM))
+      this.auto.guard(session,run)
+      for(const person of people) {
+        if(!person.id)continue
+        if(person.unread && monitor.opened.get(person.id)!==person.unreadCount)monitor.pending.set(person.id,person)
+        if(!person.unread){monitor.pending.delete(person.id);monitor.opened.delete(person.id)}
+      }
+      monitor.checkedAt=Date.now();monitor.error=''
+    }
+    const tick=async()=>{
+      try{await poll()}catch(error){if(run.cancelled)return;monitor.error='消息检查暂未完成，将按间隔继续检查'}
+      if(!run.cancelled){monitor.timer=setTimeout(tick,seconds*1000);monitor.timer.unref()}
+    }
+    try {
+      await page.goto('https://www.douyin.com/chat?isPopup=1',{waitUntil:'domcontentloaded',timeout:15000})
+      await this.auto.wait(session,run,500)
+    } catch(error) {if(run.cancelled)throw error;monitor.error='消息页暂未加载完成'}
+    await tick()
+  }
+  stopMonitor(run) {
+    if(!run.inboxMonitor)return
+    clearTimeout(run.inboxMonitor.timer)
+    run.inboxMonitor.page.close().catch(()=>{})
+  }
+  async waitConversation(session,run,peerId,timeout=8000) {
+    const deadline=Date.now()+timeout
+    do {
+      const social=await this.read(session,run);run.lastSocial=social
+      if(social.conversations.some(c=>c.id===peerId))return social
+      await this.auto.wait(session,run,250)
+    }while(Date.now()<deadline)
+    throw new RuntimeError('conversation_loading','消息列表尚未加载出目标会话，请稍后重新观察；未重新发送')
+  }
   async read(session,run) {
     const data=await run.page.evaluate(socialDOM);this.auto.guard(session,run)
     if(run.identityChanged)throw new RuntimeError('account_changed','登录的抖音账号已变化，请重新发起任务')
@@ -117,13 +166,15 @@ export class DouyinSocial {
     // A DOM direction alone is not enough: require a resolved profile and an
     // actual server message identifier in the selected conversation.
     return {account:run.account||null,owner:[...run.people.values()].find(p=>p.handle===run.social.owner?.handle&&p.nickname===run.social.owner?.nickname)||null,
-      conversation:peer||null,conversations:data.conversations,messages:peer?messages:[],stickers:data.stickers,comments:[...run.comments.values()].slice(-60)}
+      conversation:peer||null,conversations:data.conversations,pendingUnread:[...(run.inboxMonitor?.pending.values()||[])],
+      inboxMonitor:run.inboxMonitor?{interval_seconds:run.social.dm_check_interval_seconds??5,checked_at:run.inboxMonitor.checkedAt,error:run.inboxMonitor.error}:null,messages:peer?messages:[],stickers:data.stickers,comments:[...run.comments.values()].slice(-60)}
   }
   async navigate(session,run,input) {
     const page=run.page,op=input.op
     if(op==='account') {
       await page.goto('https://www.douyin.com/user/self?from_nav=1',{waitUntil:'domcontentloaded',timeout:25000})
       for(let i=0;i<15&&!run.account;i++)await this.auto.wait(session,run,400)
+      if(run.account)await this.startMonitor(session,run)
     }
     if(op==='inbox') {await page.goto('https://www.douyin.com/chat?isPopup=1',{waitUntil:'domcontentloaded',timeout:25000});run.peer='';await this.auto.wait(session,run,1600)}
     if(op==='stickers') {
@@ -157,15 +208,34 @@ export class DouyinSocial {
       await page.goto(url.href,{waitUntil:'domcontentloaded',timeout:25000});await this.auto.wait(session,run,1500)
     }
     if(op==='conversation') {
-      const known=run.lastSocial?.conversations?.find(p=>p.id===input.peer_id)
+      let known=run.lastSocial?.conversations?.find(p=>p.id===input.peer_id)||run.inboxMonitor?.pending.get(input.peer_id)
       if(!known)throw new RuntimeError('unobserved_peer','只能打开已观察到的消息会话')
-      const rows=page.locator('[data-e2e="conversation-item"]').filter({visible:true})
+      // Resolve the stable ID and relationship automatically before disclosing
+      // messages. Opening a row alone never grants permission to reply.
+      if(!run.people.has(input.peer_id)) {
+        await page.goto('https://www.douyin.com/user/'+encodeURIComponent(input.peer_id),{waitUntil:'domcontentloaded',timeout:15000})
+        for(let i=0;i<20&&!run.people.has(input.peer_id);i++)await this.auto.wait(session,run,250)
+        const peer=run.people.get(input.peer_id)
+        if(!peer||known.nickname&&peer.nickname!==known.nickname)throw new RuntimeError('identity_changed','未能核对会话账号身份，未读取或回复私信')
+      }
+      let rows=page.locator('[data-e2e="conversation-item"]').filter({visible:true})
+      if(!/\/chat(?:\?|$)/.test(page.url())) {
+        await page.goto('https://www.douyin.com/chat?isPopup=1',{waitUntil:'domcontentloaded',timeout:15000})
+      }
+      await this.waitConversation(session,run,input.peer_id)
       let found
       for(let i=0;i<await rows.count();i++) {const row=rows.nth(i),data=await row.evaluate(conversationDOM);if(data.id===input.peer_id){if(found)throw new RuntimeError('ambiguous_peer','会话身份不唯一');found=row}}
       if(!found)throw new RuntimeError('missing_peer','目标会话已不在当前列表中')
-      this.auto.guard(session,run);await found.click({timeout:3000});run.peer=input.peer_id;await this.auto.wait(session,run,1000)
+      this.auto.guard(session,run);await found.click({timeout:3000});run.peer=input.peer_id
+      for(let i=0;i<16;i++) {
+        const view=await this.read(session,run);run.lastSocial=view
+        if(view.conversation?.id===input.peer_id&&view.messages.length)break
+        await this.auto.wait(session,run,250)
+      }
+      if(run.inboxMonitor){run.inboxMonitor.pending.delete(input.peer_id);run.inboxMonitor.opened.set(input.peer_id,known.unreadCount)}
     }
   }
+
   async editor(session,run,kind) {
     const page=run.page
     const selector=kind==='comment'?'[contenteditable="true"][data-e2e*="comment"],.public-DraftEditor-content[contenteditable="true"],textarea[placeholder*="评论"],input[placeholder*="评论"]':'[contenteditable="true"],textarea[placeholder*="发送"],input[placeholder*="发送"]'
@@ -316,7 +386,7 @@ export class DouyinSocial {
         // A click/toast is not a delivery receipt. Read the exact owner's
         // conversation and require a fresh, outbound card with this video ID.
         await page.goto('https://www.douyin.com/chat?isPopup=1',{waitUntil:'domcontentloaded',timeout:25000});await a.wait(session,run,1000)
-        const social=await this.read(session,run);run.lastSocial=social
+        await this.waitConversation(session,run,before.owner.id)
         await this.navigate(session,run,{op:'conversation',peer_id:before.owner.id})
         for(let i=0;i<15;i++){await a.wait(session,run,400);const v=await this.read(session,run);const sent=v.messages.find(m=>m.direction==='outbound'&&m.video_id===grant.video_id&&!beforeIds.has(m.id));if(sent)return Object.assign(result,{status:'confirmed',message_id:sent.id,peer_id:before.owner.id,video_id:grant.video_id})}
       }

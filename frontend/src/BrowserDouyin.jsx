@@ -17,6 +17,7 @@ function TaskProgress({ task }) {
       <span>{step.reason}</span>{step.current?.title&&<p>{step.current.title}</p>}
       {step.interaction&&<p>{({confirmed:'已确认',failed:'未成功',unknown:'结果待核对，请勿重发'})[step.interaction.status]}{step.interaction.reason?` · ${step.interaction.reason}`:''}</p>}
       {step.skipped&&<p>{step.skipped.title&&`${step.skipped.title} · `}{step.skipped.reason}</p>}
+      {step.actionError&&<p>操作未执行 · {step.actionError.reason}</p>}
       {step.seekFailed&&<p>跳转未确认，未播放该片段</p>}
       {step.previewComplete&&<p>默认分段预览已结束，未完整观看</p>}
       {step.watch&&<small>播放推进 {step.watch.advancedSeconds} 秒 · 抽样 {step.watch.samples.length} 次 · 无音频理解
@@ -30,15 +31,17 @@ function TaskProgress({ task }) {
   </>
 }
 export default function BrowserDouyin({ api, notify }) {
-  const [config,setConfig]=useState(null),[bound,setBound]=useState(true),[tasks,setTasks]=useState([]),[goal,setGoal]=useState(''),[settings,setSettings]=useState(false),[busy,setBusy]=useState(false),[error,setError]=useState(''),[operations,setOperations]=useState([])
-  const refresh = useCallback(async () => { try { const value=await api('/browser/douyin/tasks');setTasks(value.tasks);setOperations(value.operations||[]);setError('') } catch(e){setError(e.message)} },[api])
+  const [config,setConfig]=useState(null),[bound,setBound]=useState(true),[tasks,setTasks]=useState([]),[goal,setGoal]=useState(''),[settings,setSettings]=useState(false),[busy,setBusy]=useState(false),[error,setError]=useState(''),[operations,setOperations]=useState([]),[autoStatus,setAutoStatus]=useState(null)
+  const refresh = useCallback(async () => { try { const value=await api('/browser/douyin/tasks');setTasks(value.tasks);setAutoStatus(value.auto_browse||null);setOperations(value.operations||[]);setError('') } catch(e){setError(e.message)} },[api])
   useEffect(()=>{let alive=true;api('/browser/douyin/config').then(v=>{if(alive){setConfig(v.config);setBound(v.qq_account_bound)}}).catch(e=>{if(alive)setError(e.message)});refresh();const timer=setInterval(refresh,3000);return()=>{alive=false;clearInterval(timer)}},[api,refresh])
   const current=tasks.find(active)
   const update=(key,value)=>setConfig(c=>({...c,[key]:value}))
   const viewing={...viewingDefaults,...config?.viewing}
   const interactions={...interactionDefaults,...config?.interactions,owner:{...interactionDefaults.owner,...config?.interactions?.owner}}
+  const autoBrowse={enabled:false,daily_video_limit:30,...config?.auto_browse}
+  const updateAuto=(key,value)=>update('auto_browse',{...autoBrowse,[key]:value})
   const updateViewing=(key,value)=>setConfig(c=>({...c,viewing:{...viewingDefaults,...c.viewing,[key]:value}}))
-  const save=async()=>{const invalid=viewingError(viewing)||interactionError(interactions);if(invalid){setError(invalid);return}setBusy(true);try{setConfig(await api('/browser/douyin/config','PUT',{...config,viewing,interactions}));setBound(true);setError('');notify?.('抖音设置已保存')}catch(e){setError(e.message)}finally{setBusy(false)}}
+  const save=async()=>{const invalid=viewingError(viewing)||interactionError(interactions)||(!Number.isInteger(autoBrowse.daily_video_limit)||autoBrowse.daily_video_limit<1||autoBrowse.daily_video_limit>1000?'每日视频总数须为 1–1000 的整数':'');if(invalid){setError(invalid);return}setBusy(true);try{setConfig(await api('/browser/douyin/config','PUT',{...config,viewing,interactions,auto_browse:autoBrowse}));setBound(true);setError('');notify?.('抖音设置已保存')}catch(e){setError(e.message)}finally{setBusy(false)}}
   const start=async e=>{e.preventDefault();setBusy(true);try{await api('/browser/douyin/tasks','POST',{goal});setGoal('');await refresh()}catch(e){setError(e.message)}finally{setBusy(false)}}
   const stop=async id=>{setBusy(true);try{await api(`/browser/douyin/tasks/${id}/stop`,'POST',{});await refresh()}catch(e){setError(e.message)}finally{setBusy(false)}}
   return <Panel title="抖音自主浏览" action={<Button size="sm" variant="outline" aria-expanded={settings} onClick={()=>setSettings(v=>!v)}>{settings?'收起设置':'设置'}</Button>}>
@@ -58,11 +61,18 @@ export default function BrowserDouyin({ api, notify }) {
         <label><input type="checkbox" checked={viewing.preview_enabled} onChange={e=>updateViewing('preview_enabled',e.target.checked)}/> 长视频分段跳看</label>
         <div className="form-grid">{viewingFields.map(([key,label,min,max])=><Field key={key} label={label} id={`browser-viewing-${key}`}><Input id={`browser-viewing-${key}`} type="number" min={min} max={max} step={1} value={viewing[key]} disabled={!viewing.preview_enabled&&key!=='max_video_minutes'} onChange={e=>updateViewing(key,e.target.value===''?'':Number(e.target.value))}/></Field>)}</div>
       </fieldset>
+      <fieldset className="browser-viewing-settings" disabled={!!current||busy}>
+        <legend>空闲时段自动刷</legend>
+        <div className="form-grid"><label><input type="checkbox" checked={autoBrowse.enabled} onChange={e=>updateAuto('enabled',e.target.checked)}/> 开启自动刷视频</label>
+        <Field label="每日视频总数" id="douyin-auto-limit"><Input id="douyin-auto-limit" type="number" min={1} max={1000} value={autoBrowse.daily_video_limit} onChange={e=>updateAuto('daily_video_limit',e.target.value===''?'':Number(e.target.value))}/></Field></div>
+        <p className="browser-task-capability">北京时间周一至周五 9:00–12:00、14:00–18:00 为高峰；周末与中国法定节假日全天空闲。进入高峰后完成当前操作即暂停。当天实际看过的不同视频各计一次，手动浏览也计入，重复观看不重复计数。</p>
+      </fieldset>
       <DouyinInteractionSettings value={interactions} onChange={v=>update('interactions',v)} disabled={!!current||busy}/>
       {!bound&&config.qq_enabled&&<Notice>保存后，QQ 授权会绑定当前接入账号。</Notice>}
       <div><Button size="sm" disabled={!!current||busy} onClick={save}>保存设置</Button></div>
     </div>}
     {config&&!config.enabled&&<Notice>在设置中开启后，可从这里或 Owner 私聊发起抖音任务。</Notice>}
+    {autoStatus?.enabled&&<div className="page-stack"><div className="action-row"><span>{autoStatus.peak?'高峰时段':'空闲时段'} · 今日 {autoStatus.today_watched} / {autoStatus.daily_video_limit} 条</span><Button size="sm" variant="outline" disabled={busy} onClick={async()=>{setBusy(true);try{await api(`/browser/douyin/auto/${autoStatus.hold_reason?'resume':'pause'}`,'POST',{});await refresh()}catch(e){setError(e.message)}finally{setBusy(false)}}}>{autoStatus.hold_reason?'恢复自动浏览':'暂停今日自动浏览'}</Button></div>{autoStatus.hold_reason&&<p>{autoStatus.hold_reason}</p>}{!current&&!autoStatus.hold_reason&&autoStatus.next_run_at&&<p>下次可运行：{new Date(autoStatus.next_run_at).toLocaleString('zh-CN',{hour12:false})}</p>}{autoStatus.calendar_warning&&<Notice>{autoStatus.calendar_warning}</Notice>}</div>}
     <form className="action-row" onSubmit={start}><Input aria-label="抖音浏览任务" placeholder="去抖音看看你感兴趣的内容" value={goal} maxLength={3000} disabled={busy||!!current||!config?.enabled} onChange={e=>setGoal(e.target.value)}/><Button type="submit" disabled={busy||!!current||!config?.enabled||!goal.trim()}>开始浏览</Button>{current&&<Button type="button" variant="outline" disabled={busy} onClick={()=>stop(current.id)}>停止</Button>}</form>
     <p className="browser-task-capability">评论、@、点赞、私信回复与站内分享按设置执行。</p>
     {!!operations.length&&<details><summary>最近互动（{operations.length}）</summary><div className="douyin-operation-list">{operations.map(item=><div key={item.id}><span>{({comment:'新评论',reply_comment:'评论回复',reply_dm:'私信回复',like:'点赞',share:'站内分享',share_note:'分享附言'})[item.op]}</span><span>{({confirmed:'已确认',failed:'未成功',unknown:'待核对',pending:'提交中'})[item.status]}</span><time>{new Date(item.created*1000).toLocaleString()}</time></div>)}</div></details>}

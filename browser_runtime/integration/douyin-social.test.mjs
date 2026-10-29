@@ -44,7 +44,7 @@ test('Chrome social writes correlate receipts, preserve drafts, verify mentions 
   const run=session.automation
   const act=input=>engine.douyin.act('social',{token:grant.token,generation:session.generation,...input})
   await page.goto('https://www.douyin.com/video/'+video);await page.waitForTimeout(500)
-  run.coverage.set(video+':fixture',[[0,3]])
+  run.coverage.set(video,[[0,3]])
   let state=await act({op:'observe'});assert.equal(state.account.id,self);assert.equal(state.owner.id,owner);assert.equal(state.comments[0].parent_id,'own_comment');assert.equal(state.watched,true)
   const authorization=(n,p={})=>({operation_id:n.toString(16).padStart(32,'0'),account_id:self,video_id:video,text:'这个演示很清楚',...p})
   let result=await act({op:'comment',authorization:authorization(1)})
@@ -82,13 +82,14 @@ test('Chrome inbox enforces inbound/follower identity, sends owner cards and con
  const chat=()=>`<!doctype html><meta charset="utf-8"><title>消息</title>
   <div data-e2e="conversation-item" data-peer-id="${owner}" aria-selected="true"><span class="ConversationItemtitle">主人</span><a href="/user/${owner}">主页</a><i data-unread="true">1</i></div>
   <p data-message-id="inbound-server-1" data-direction="inbound">这个视频好看吗</p>
-  ${shared?`<p data-message-id="new-card-id" data-direction="outbound"><a href="/video/${video}">视频卡片</a></p>`:''}
+  ${shared?`<div class="MessageItemShareAwemecontainer" id="shared-card">视频卡片</div>`:''}
   <section id="messages">${outbound.map(m=>`<p data-message-id="${m.id}" data-direction="outbound">${m.text}</p>`).join('')}</section>
   <div contenteditable="true"></div><button class="messageMsgInputiconAction" onclick="document.querySelector('.componentsemojiemojiPanel').hidden=false">表情</button>
   <div class="componentsemojiemojiPanel" hidden><img alt="好耶" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='30' height='30'%3E%3C/svg%3E" onclick="sendSticker()"></div>
   <script>const box=document.querySelector('[contenteditable]');let count=${outbound.length};
    async function append(text,sticker=''){const id='outbound-server-'+(++count);await fetch('/fixture/message',{method:'POST',body:JSON.stringify({id,text})});const p=document.createElement('p');p.dataset.messageId=id;p.dataset.direction='outbound';p.innerText=text;if(sticker)p.innerHTML='<img alt="'+sticker+'" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7">';document.querySelector('#messages').append(p)}
    box.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();append(box.innerText);box.innerHTML=''}});function sendSticker(){append('','好耶')}
+   const card=document.querySelector('#shared-card');if(card)card.__reactProps$fixture={children:{props:{message:Object.assign(Object.create({serverId:'new-card-id',sender:'10001',conversationId:''}),{isMyMessage:true,parsedContent:{itemId:'${video}'}})}}};
    fetch('/aweme/v1/web/user/profile/self/');fetch('/aweme/v1/web/user/profile/other/');
   </script>`
  try {
@@ -99,7 +100,11 @@ test('Chrome inbox enforces inbound/follower identity, sends owner cards and con
    if(u.pathname.includes('profile/other'))return route.fulfill({json:{user:{sec_uid:owner,uid:'10002',nickname:'主人',unique_id:'owner_handle',follower_status:1}}})
    if(u.pathname==='/fixture/share'){shared=true;return route.fulfill({json:{ok:true}})}
    if(u.pathname==='/fixture/message'){outbound.push(JSON.parse(route.request().postData()));return route.fulfill({json:{ok:true}})}
-   if(u.pathname==='/chat')return route.fulfill({contentType:'text/html',body:chat()})
+   if(u.pathname==='/chat') {
+    let body=chat()
+    if(shared)body=body.replace('<script>',`<script>const rows=[...document.querySelectorAll('[data-e2e="conversation-item"]')];rows.forEach(e=>e.remove());setTimeout(()=>rows.forEach(e=>document.body.prepend(e)),2400);`)
+    return route.fulfill({contentType:'text/html',body})
+   }
    return route.fulfill({contentType:'text/html',body:html.replace('window.shared=true','fetch(\'/fixture/share\',{method:\'POST\'});window.shared=true')})
   })
   const grant=engine.douyin.begin('inbox',{interactions}),run=session.automation
@@ -121,7 +126,7 @@ test('Chrome inbox enforces inbound/follower identity, sends owner cards and con
   result=await act({op:'reply_dm',authorization:auth(23)})
   assert.equal(result.interaction.status,'failed');assert.equal(outbound.length,1)
   run.people.set(owner,{...run.people.get(owner),follows_me:true})
-  run.items.set(video,{id:video,title:'DeepSeek',url:'https://www.douyin.com/video/'+video});run.coverage.set(video+':fixture',[[0,4]])
+  run.items.set(video,{id:video,title:'DeepSeek',url:'https://www.douyin.com/video/'+video});run.coverage.set(video,[[0,4]])
   await act({op:'open',id:video})
   result=await act({op:'share',authorization:auth(24,{video_id:video,text:''})})
   assert.equal(result.interaction.status,'confirmed');assert.equal(result.interaction.message_id,'new-card-id');assert.equal(shared,true)
@@ -134,4 +139,40 @@ test('Chrome inbox enforces inbound/follower identity, sends owner cards and con
   state=await act({op:'observe'});assert.equal(state.conversation,null);assert.deepEqual(state.messages,[])
   engine.douyin.end('inbox',grant.token)
  } finally {await engine.close();await fs.rm(dir,{recursive:true,force:true})}
+})
+
+test('background inbox polls configured interval, opens unread verified peers and closes immediately on takeover',{timeout:45000,skip:process.platform!=='darwin'},async()=>{
+ const dir=await fs.mkdtemp(path.join(os.tmpdir(),'haybot-douyin-poll-')),engine=new BrowserEngine(dir)
+ try {
+  await engine.start('poll');const session=engine.get('poll'),page=session.tabs.get(session.active)
+  const account=`<script>fetch('/aweme/v1/web/user/profile/self/')</script>`
+  const peerProfile=`<script>fetch('/aweme/v1/web/user/profile/other/')</script>`
+  const inbox=`<meta charset="utf-8"><div data-e2e="conversation-item" data-peer-id="${owner}" onclick="this.setAttribute('aria-selected','true')"><span class="ConversationItemtitle">主人</span><i data-unread="true">2</i></div><p data-message-id="real-inbound-id" data-direction="inbound">你好</p><script>const row=document.querySelector('[data-e2e]');row.__reactProps$fixture={conversation:{toParticipantSecUserId:'${owner}',id:'cid',unreadCount:2}}</script>`
+  await session.context.route('https://www.douyin.com/**',async route=>{
+   const u=new URL(route.request().url())
+   if(u.pathname.includes('profile/self'))return route.fulfill({json:{user:{sec_uid:self,uid:'10001',nickname:'自己',unique_id:'self_handle'}}})
+   if(u.pathname.includes('profile/other'))return route.fulfill({json:{user:{sec_uid:owner,uid:'10002',nickname:'主人',unique_id:'owner_handle',follower_status:1}}})
+   return route.fulfill({contentType:'text/html',body:u.pathname==='/chat'?inbox:u.pathname==='/user/'+owner?peerProfile:account})
+  })
+  let grant=engine.douyin.begin('poll',{interactions})
+  const act=input=>engine.douyin.act('poll',{token:grant.token,generation:session.generation,...input})
+  let result=await act({op:'account'});assert.equal(result.inboxMonitor.interval_seconds,5);assert.equal(result.pendingUnread[0].id,owner)
+  assert.equal(session.tabs.size,1);assert.equal(session.tabs.get(session.active),page);assert.match(page.url(),/user\/self/)
+  const old=session.automation.inboxMonitor.page
+  engine.douyin.end('poll',grant.token);await old.waitForEvent('close').catch(()=>{});assert.ok(old.isClosed())
+  grant=engine.douyin.begin('poll',{interactions:{...interactions,dm_check_interval_seconds:1}})
+  result=await act({op:'account'});const monitor=session.automation.inboxMonitor
+  const before=monitor.checkedAt,generation=session.generation,active=session.active
+  await monitor.page.locator('[data-e2e]').evaluate(e=>{e.__reactProps$fixture.conversation.unreadCount=3})
+  await page.waitForTimeout(1300)
+  assert.ok(monitor.checkedAt>before);assert.equal(monitor.pending.get(owner).unreadCount,3)
+  assert.equal(session.generation,generation);assert.equal(session.active,active)
+  assert.equal(session.automation.people.has(owner),false)
+  result=await act({op:'conversation',peer_id:owner})
+  assert.equal(result.conversation.id,owner);assert.equal(result.conversation.follows_me,true)
+  assert.equal(result.messages[0].id,'real-inbound-id');assert.deepEqual(result.pendingUnread,[])
+  result=await act({op:'conversation',peer_id:'MS4_not_observed'});assert.equal(result.actionError.code,'unobserved_peer');assert.equal(result.actionError.submitted,false)
+  const lease=engine.claim('poll','owner').lease;await monitor.page.waitForEvent('close').catch(()=>{})
+  assert.ok(monitor.page.isClosed());assert.equal(session.automation,null);engine.release('poll',lease)
+ } finally{await engine.close();await fs.rm(dir,{recursive:true,force:true})}
 })

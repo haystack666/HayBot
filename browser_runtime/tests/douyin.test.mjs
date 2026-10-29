@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { BrowserEngine } from '../src/engine.mjs'
-import { contentItems, mergeRanges, playbackRanges, watchPolicy, previewPosition, viewingConfig } from '../src/douyin.mjs'
+import { contentItems, videoCoverage, mergeRanges, playbackRanges, watchPolicy, previewPosition, viewingConfig } from '../src/douyin.mjs'
 
 test('per-run viewing settings control thresholds, disabled preview and fixed skip intervals',()=>{
  const settings=viewingConfig({preview_after_minutes:2,max_video_minutes:90,segment_seconds:6,skip_seconds:75})
@@ -95,4 +95,13 @@ test('automation rejects arbitrary actions and unobserved video IDs',async()=>{
  await assert.rejects(engine.douyin.act('one',{token:grant.token,generation:1,op:'open',id:'1234567890123456789'}),{code:'unobserved_video'})
  await assert.rejects(engine.douyin.act('one',{token:grant.token,generation:0,op:'next'}),{code:'stale_observation'})
  engine.douyin.end('one',grant.token)
+})
+
+
+test('coverage follows the stable video timeline and resets for a changed duration',()=>{
+ const run={coverage:new Map([['123456',[[1,8],[12,15]]]]),coverageDurations:new Map([['123456',20]])}
+ assert.deepEqual(videoCoverage(run,{id:'123456'},20.05),[[1,8],[12,15]])
+ assert.deepEqual(videoCoverage(run,{id:'654321'},20),[])
+ assert.deepEqual(videoCoverage(run,{id:'123456'},30),[])
+ assert.deepEqual(videoCoverage(run,null,null),[])
 })

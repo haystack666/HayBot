@@ -402,3 +402,48 @@ def test_confirmed_like_integrates_durable_policy_and_completion(client,monkeypa
     assert any(s.get('interaction',{}).get('status')=='confirmed' for s in result['steps'])
     assert tasks.interactions.count('self-sec','like')==1
     assert 'operation_id' not in json.dumps(result)
+
+
+@pytest.mark.parametrize('messages_enabled',[False,True])
+def test_invalid_watch_position_returns_feedback_without_stopping_or_replaying(client,monkeypatch,messages_enabled):
+    tasks,host,contexts=setup(client,monkeypatch,iter([
+        {'op':'home','reason':'打开抖音'},
+        {'op':'watch','seconds':5,'start_at':16,'reason':'误把短视频当跳看'},
+        {'op':'watch','seconds':5,'reason':'按当前正常播放位置继续'},
+        {'op':'finish','reason':'已看到内容','note':'看了一会儿。'},
+    ]))
+    cfg=tasks.config('default');cfg.interactions.messages_enabled=messages_enabled
+    client.portal.call(tasks.save_config,'default',cfg)
+    request=host.request
+    async def observed(method,path,body=None):
+        value=await request(method,path,body)
+        if path.endswith('/begin'):value['interactions']=body['interactions']
+        if body and body.get('op')=='watch' and 'start_at' in body:
+            value.pop('watch',None);value.pop('images',None)
+            value['actionError']={'code':'invalid_position','recoverable':True,'submitted':False,'reason':'正常观看省略 start_at'}
+        return value
+    monkeypatch.setattr(tasks.browser.gateway,'request',observed)
+    task=run_task(client,tasks,'刷会抖音')
+    assert task['state']=='completed',task
+    failed=task['steps'][1]
+    assert failed['actionError']['submitted'] is False
+    assert failed['request']=={'seconds':5,'start_at':16}
+    feedback=json.loads(contexts[2][1]['content'])
+    assert feedback['observation']['actionError']['code']=='invalid_position'
+    assert feedback['progress'][-1]['actionError']['code']=='invalid_position'
+    assert host.watches==2
+    assert len([b for _,p,b in host.calls if b and b.get('start_at')==16])==1
+
+
+def test_repeated_invalid_position_is_bounded_and_retains_reason(client,monkeypatch):
+    tasks,host,_=setup(client,monkeypatch,iter([{'op':'watch','reason':'错误位置','start_at':17}]*3))
+    request=host.request
+    async def invalid(method,path,body=None):
+        value=await request(method,path,body)
+        if body and body.get('op')=='watch':
+            value.pop('watch',None);value['actionError']={'code':'invalid_position','reason':'正常观看不能指定跳转位置','submitted':False}
+        return value
+    monkeypatch.setattr(tasks.browser.gateway,'request',invalid)
+    task=run_task(client,tasks,'看抖音')
+    assert task['state']=='blocked' and '3 次' in task['result']
+    assert len(task['steps'])==3 and host.token is None

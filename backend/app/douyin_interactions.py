@@ -36,6 +36,7 @@ class InteractionConfig(StrictModel):
     comment_task_limit: int = Field(default=3, ge=0, le=100, strict=True)
     deepseek_probability: int = Field(default=50, ge=0, le=100, strict=True)
     other_probability: int = Field(default=15, ge=0, le=100, strict=True)
+    dm_check_interval_seconds: int = Field(default=5, ge=1, le=3600, strict=True)
     dm_total_limit: int = Field(default=20, ge=0, le=10000, strict=True)
     share_task_limit: int = Field(default=3, ge=0, le=100, strict=True)
     share_daily_limit: int = Field(default=10, ge=0, le=500, strict=True)

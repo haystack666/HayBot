@@ -43,6 +43,18 @@ export function mergeRanges(ranges) {
   return result.map(pair => pair.map(n => Math.round(n * 100) / 100))
 }
 
+// A CDN URL may change on reload or rendition switch. Coverage belongs to the
+// stable video ID and timeline; source equality is required only within a sample.
+export function videoCoverage(run, current, duration) {
+  if (!current?.id) return []
+  const known = run.coverageDurations.get(current.id)
+  if (Number.isFinite(duration) && duration > 0) {
+    if (known && Math.abs(known-duration) > Math.max(1, known*0.01)) run.coverage.delete(current.id)
+    run.coverageDurations.set(current.id, duration)
+  }
+  return run.coverage.get(current.id) || []
+}
+
 export function playbackRanges(previous, current, seconds) {
   if (!previous || !current || previous.source !== current.source) return []
   const start=previous.currentTime,end=current.currentTime,duration=current.duration
@@ -80,7 +92,7 @@ export class DouyinAutomation {
     const token = input.runId || randomUUID()
     if (typeof token !== 'string' || !/^[a-zA-Z0-9-]{16,64}$/.test(token)) throw new RuntimeError('invalid_run', '任务标识无效', 400)
     if (this.ended.has(token)) throw new RuntimeError('automation_revoked', '本次任务已停止')
-    const run = { token, page, tab: session.active, viewing:viewingConfig(input.viewing), items: new Map(), currentItems: new Map(), coverage: new Map(), pending: new Set(), social:input.interactions || {}, people:new Map(), comments:new Map(), account:null, messageBaselines:new Map(), peer:'', cancelled: false }
+    const run = { token, page, tab: session.active, viewing:viewingConfig(input.viewing), items: new Map(), currentItems: new Map(), coverage: new Map(), coverageDurations: new Map(), pending: new Set(), social:input.interactions || {}, people:new Map(), comments:new Map(), account:null, messageBaselines:new Map(), peer:'', cancelled: false }
     run.published=new Map((input.published||[]).filter(p=>typeof p.cid==='string'&&videoId(p.video_id)&&typeof p.account_id==='string').map(p=>[p.cid,p]))
     run.response = response => {
       let url
@@ -124,7 +136,7 @@ export class DouyinAutomation {
     this.ended.add(run.token)
     while (this.ended.size > 1000) this.ended.delete(this.ended.values().next().value)
     clearTimeout(run.expiryTimer)
-    run.cancelled = true; run.page.off('response', run.response); session.automation = null
+    run.cancelled = true; this.social.stopMonitor(run); run.page.off('response', run.response); session.automation = null
     this.engine.changed(session)
   }
   guard(session, run) {
@@ -157,7 +169,12 @@ export class DouyinAutomation {
         const before=await this.snapshot(session,run)
         if(before.blocked)return before
       }
-      await this.social.navigate(session,run,input)
+      try {await this.social.navigate(session,run,input)}
+      catch(error) {
+        if(!['conversation_loading','missing_peer','identity_changed','unobserved_peer','owner_ambiguous'].includes(error.code))throw error
+        await this.pause(session,run)
+        return {...await this.snapshot(session,run),actionError:{code:error.code,recoverable:true,submitted:false,reason:error.message}}
+      }
     } else if (op === 'home' || op === 'search' || op === 'open') {
       let url = 'https://www.douyin.com/'
       if (op === 'search') {
@@ -200,8 +217,13 @@ export class DouyinAutomation {
         await this.pause(session,run)
         return {...await this.snapshot(session,run), skipped:{id:before.current?.id,duration:policy.duration,reason:`超过 ${run.viewing.max_video_minutes} 分钟，已跳过观看`}}
       }
-      if (input.start_at !== undefined && (typeof input.start_at !== 'number' || !Number.isFinite(input.start_at) || input.start_at < 0 || input.start_at >= (policy.duration || 0) || policy.mode !== 'preview')) throw new RuntimeError('invalid_position', '仅对当前观看策略允许跳看的视频指定有效位置', 400)
-      const key = before.current?.id ? before.current.id + ':' + (before.playback?.source || '') : null
+      if (input.start_at !== undefined && (typeof input.start_at !== 'number' || !Number.isFinite(input.start_at) || input.start_at < 0 || input.start_at >= (policy.duration || 0) || policy.mode !== 'preview')) {
+        await this.pause(session,run)
+        return {...before, actionError:{code:'invalid_position', recoverable:true, submitted:false,
+          reason:policy.mode==='normal'?'当前视频按正常模式观看，请省略 start_at，从 playback.currentTime 继续播放。':'指定位置不适用于当前观看策略，请按 watchPolicy 和真实时长重新选择操作。'}}
+      }
+      const key = before.current?.id || null
+      videoCoverage(run,before.current,policy.duration)
       let seek = null
       if (policy.mode === 'preview' && input.continue_segment !== true) {
         const target=previewPosition(policy.duration,key?run.coverage.get(key)||[]:[],seconds,run.viewing.skip_seconds>0?undefined:input.start_at,run.viewing.skip_seconds)
@@ -254,7 +276,7 @@ export class DouyinAutomation {
       }
       const sampledRanges=mergeRanges(ranges), coverageRanges=mergeRanges([...(key ? run.coverage.get(key) || [] : []),...ranges])
       if (key) run.coverage.set(key,coverageRanges)
-      while(run.coverage.size>200)run.coverage.delete(run.coverage.keys().next().value)
+      while(run.coverage.size>200) {const oldest=run.coverage.keys().next().value;run.coverage.delete(oldest);run.coverageDurations.delete(oldest)}
       const fullDuration=previous?.duration || before.current?.duration || null
       playback = { requestedSeconds: seconds, advancedSeconds: Math.round(ranges.reduce((sum,[a,b])=>sum+b-a,0)*10)/10,
         sampledRanges, coverageRanges, fullDuration, partial: !fullDuration || coverageRanges.length!==1 || coverageRanges[0][0]>0.25 || coverageRanges[0][1]<fullDuration-0.25,
@@ -316,7 +338,8 @@ export class DouyinAutomation {
     const policy=watchPolicy(data.playback?.duration || current?.duration,run.viewing)
     const social=blocked?{}:await this.social.read(session,run)
     if(!blocked)run.lastSocial=social
-    const watched=!!current&&[...run.coverage.entries()].some(([key,ranges])=>key.startsWith(current.id+':')&&ranges.reduce((n,[a,b])=>n+b-a,0)>=1)
-    return { ...social, watched:!blocked&&watched, platform:'douyin', generation, url, blocked, viewing:run.viewing, body:blocked ? '' : data.body, items:blocked ? [] : [...run.currentItems.values()].slice(-40).map(item=>({...item,watchPolicy:watchPolicy(item.duration,run.viewing)})), current:blocked ? null : current, playback:blocked ? null : data.playback, watchPolicy:blocked ? watchPolicy(null) : policy }
+    const coverageRanges=videoCoverage(run,current,policy.duration)
+    const watched=!!current&&coverageRanges.reduce((n,[a,b])=>n+b-a,0)>=1
+    return { ...social, coverageRanges:blocked?[]:coverageRanges, watched:!blocked&&watched, platform:'douyin', generation, url, blocked, viewing:run.viewing, body:blocked ? '' : data.body, items:blocked ? [] : [...run.currentItems.values()].slice(-40).map(item=>({...item,watchPolicy:watchPolicy(item.duration,run.viewing)})), current:blocked ? null : current, playback:blocked ? null : data.playback, watchPolicy:blocked ? watchPolicy(null) : policy }
   }
 }

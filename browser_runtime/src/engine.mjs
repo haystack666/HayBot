@@ -98,6 +98,7 @@ export class BrowserEngine extends EventEmitter {
     const session = { id, context, options, ownerLogin, tabs: new Map(), titles: new Map(), active: null, generation: 1, lease: null, stream: null, streamJob: Promise.resolve(), operation: Promise.resolve(), observers: 0, frame: 0 }
     this.sessions.set(id, session)
     const register = page => {
+      if (session.creatingAuxiliary) {session.auxiliaryPages ||= new Set();session.auxiliaryPages.add(page);page.once('close',()=>session.auxiliaryPages.delete(page));page.on('dialog',dialog=>dialog.dismiss().catch(()=>{}));return}
       if ([...session.tabs.values()].includes(page)) return
       this.cancelPointer(session)
       const tabId = randomUUID(); session.tabs.set(tabId, page); session.active = tabId; session.generation++
@@ -126,6 +127,13 @@ export class BrowserEngine extends EventEmitter {
     for (const page of context.pages()) register(page)
     if (!session.tabs.size) await context.newPage()
     return this.state(id)
+  }
+  async auxiliaryPage(session) {
+    // Created only at a serialized automation boundary. It shares this Bot's
+    // login context, but cannot change the active tab, generation or live view.
+    session.creatingAuxiliary = true
+    try {return await session.context.newPage()}
+    finally {session.creatingAuxiliary = false}
   }
   changed(session) { this.emit('state', this.state(session.id)); this.refreshStream(session) }
   async stop(id) {

@@ -104,3 +104,12 @@ def test_disabled_missing_identity_and_unwatched_actions_never_reserve(ledger):
     for obs, config in [(observation(),InteractionConfig()),(observation(account={'id':'self-sec','verified':False}),cfg()),(observation(watched=False),cfg())]:
         with pytest.raises(HTTPException):reserve(ledger,obs=obs,config=config)
     assert ledger.count('self-sec','comment')==0
+
+
+def test_inbox_interval_defaults_and_strict_bounds():
+    from pydantic import ValidationError
+    assert InteractionConfig().dm_check_interval_seconds == 5
+    for value in (0,3601,1.5,'5',True):
+        with pytest.raises(ValidationError):
+            InteractionConfig(dm_check_interval_seconds=value)
+    assert InteractionConfig(dm_check_interval_seconds=1).dm_check_interval_seconds == 1
