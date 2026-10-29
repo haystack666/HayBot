@@ -36,7 +36,7 @@ export default function BrowserViewer({ api, botId, ready, notify }) {
     if (['Enter', 'Tab', 'Shift+Tab', 'Escape', 'Backspace', 'Delete', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'ControlOrMeta+A'].includes(key)) { event.preventDefault(); act({ kind: 'key', key }) }
   }
   return <section className={`browser-viewer ${expanded ? 'is-expanded' : ''}`} aria-label="浏览器画面">
-    <div className="browser-heading"><div><b>{state.owner_login ? '主人登录中' : owned ? '正在接管' : state.state === 'owner_control' ? '其他连接已接管' : active ? '浏览器运行中' : '浏览器已停止'}</b><span role="status">{stream}</span></div><div className="action-row">
+    <div className="browser-heading"><div><b>{state.owner_login ? '主人登录中' : owned ? '正在接管' : state.state === 'owner_control' ? '其他连接已接管' : state.automation ? 'Bot 正在浏览' : active ? '浏览器运行中' : '浏览器已停止'}</b><span role="status">{stream}</span></div><div className="action-row">
       {!active ? <Button size="sm" disabled={busy || !ready} onClick={() => controller.current.start()}>启动浏览器</Button> : <>
         <Button size="sm" variant={owned ? 'default' : 'outline'} disabled={busy || !connected || !ready} onClick={() => controller.current.claim()}>{owned ? '结束接管' : '接管'}</Button>
         <Button size="sm" variant="outline" disabled={busy || !canControl} onClick={() => state.owner_login ? setLoginConfirm(true) : controller.current.login()}>{state.owner_login ? '完成登录' : '主人登录'}</Button>

@@ -166,6 +166,7 @@ class BotManager:
         runtime = BotRuntime(self.registry.directory(bot_id), self.inference_lock, self.providers, self.memes)
         runtime.id = bot_id
         runtime.bot.android = getattr(self, 'android_qq', None)
+        runtime.bot.browser = getattr(self, 'browser_qq', None)
         self.runtimes[bot_id] = runtime
         runtime.store.log('info', '机器人管理服务已就绪')
         runtime.start_background()
@@ -226,6 +227,9 @@ class BotManager:
     async def archive(self, bot_id):
         async with self.catalog_lock:
             runtime = self.get(bot_id)
+            tasks = getattr(self, 'browser_tasks', None)
+            if tasks:
+                await tasks.cancel_bot(bot_id)
             browser = getattr(self, 'browser_service', None)
             if browser:
                 await browser.stop_bot(bot_id)

@@ -50,7 +50,7 @@ export async function createRuntimeServer({ directory, token, engine = new Brows
         if (url.pathname === '/api/environment' && ['GET', 'POST'].includes(method)) {
           const report = await engine.prepare({ force: method === 'POST' }); return json(response, 200, engine.environment.public(report))
         }
-        const match = /^\/api\/sessions\/([a-zA-Z0-9_-]{1,64})(?:\/(start|stop|settings|claim|release|action|observe|login\/begin|login\/finish))?$/.exec(url.pathname)
+        const match = /^\/api\/sessions\/([a-zA-Z0-9_-]{1,64})(?:\/(start|stop|settings|claim|release|action|observe|login\/begin|login\/finish|douyin\/begin|douyin\/end|douyin\/act))?$/.exec(url.pathname)
         if (!match) throw new RuntimeError('not_found', '接口不存在', 404)
         const [, id, operation] = match
         if (!operation && method === 'GET') {
@@ -61,6 +61,9 @@ export async function createRuntimeServer({ directory, token, engine = new Brows
         if (operation === 'observe' && method === 'GET') return json(response, 200, await engine.observe(id))
         if (method !== 'POST') throw new RuntimeError('method_not_allowed', '请求方法无效', 405)
         const input = await body(request)
+        if (operation === 'douyin/begin') return json(response, 200, engine.douyin.begin(id, input))
+        if (operation === 'douyin/end') return json(response, 200, engine.douyin.end(id, input.token))
+        if (operation === 'douyin/act') return json(response, 200, await engine.douyin.act(id, input))
         if (operation === 'claim' && ![...clients].some(([ws, client]) => client.id === id && client.connectionId === input.connectionId && ws.readyState === WebSocket.OPEN)) throw new RuntimeError('viewer_disconnected', '请先连接当前浏览器画面再接管')
         const result = operation === 'settings' ? await engine.configure(id, input)
           : operation === 'start' ? await engine.start(id)

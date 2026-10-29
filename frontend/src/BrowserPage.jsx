@@ -3,6 +3,7 @@ import { RefreshCw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Panel, Notice } from './components/console'
 import BrowserViewer from './BrowserViewer'
+import BrowserDouyin from './BrowserDouyin'
 import './browser.css'
 
 export default function BrowserPage({ api, botId, notify }) {
@@ -31,5 +32,6 @@ export default function BrowserPage({ api, botId, notify }) {
       </>}
     </Panel>
     {configured && <BrowserViewer key={botId} {...{api, botId, notify}} ready={environment?.state === 'ready' && !checking}/>}
+    {configured && <BrowserDouyin key={`douyin-${botId}`} {...{api, notify}}/>}
   </div>
 }

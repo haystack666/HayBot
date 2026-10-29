@@ -9,6 +9,11 @@ from fastapi import Depends, HTTPException, Request, WebSocket
 from pydantic import Field
 
 from .config import StrictModel
+from .browser_tasks import BrowsingConfig
+
+
+class BrowserTaskBody(StrictModel):
+    goal: str = Field(min_length=1, max_length=3000)
 
 
 class ViewerBody(StrictModel):
@@ -33,6 +38,30 @@ def register_browser_routes(app, scoped_runtime):
         if runtime.closing or not auth or not hmac.compare_digest(auth, app.state.session):
             raise HTTPException(401, '请先登录')
         return auth
+
+    @app.get('/api/bots/{bot_id}/browser/douyin/config')
+    async def browsing_config(runtime=Depends(scoped_runtime)):
+        tasks = app.state.browser_tasks
+        return {'config': tasks.config(runtime.id).model_dump(), 'qq_account_bound': tasks.bound(runtime.id)}
+
+    @app.put('/api/bots/{bot_id}/browser/douyin/config')
+    async def save_browsing_config(body: BrowsingConfig, request: Request, runtime=Depends(scoped_runtime)):
+        authorization(request, runtime)
+        return app.state.browser_tasks.save_config(runtime.id, body)
+
+    @app.get('/api/bots/{bot_id}/browser/douyin/tasks')
+    async def browsing_tasks(runtime=Depends(scoped_runtime)):
+        return {'tasks': app.state.browser_tasks.list(runtime.id)}
+
+    @app.post('/api/bots/{bot_id}/browser/douyin/tasks')
+    async def start_browsing(body: BrowserTaskBody, request: Request, runtime=Depends(scoped_runtime)):
+        authorization(request, runtime)
+        return app.state.browser_tasks.submit(runtime.id, body.goal)
+
+    @app.post('/api/bots/{bot_id}/browser/douyin/tasks/{task_id}/stop')
+    async def stop_browsing(task_id: str, request: Request, runtime=Depends(scoped_runtime)):
+        authorization(request, runtime)
+        return await app.state.browser_tasks.cancel(runtime.id, task_id)
 
     @app.get('/api/bots/{bot_id}/browser')
     async def status(runtime=Depends(scoped_runtime)):
@@ -62,6 +91,7 @@ def register_browser_routes(app, scoped_runtime):
         async with s.lock(runtime.id):
             authorization(request, runtime)
             if operation == 'stop':
+                await app.state.browser_tasks.cancel_bot(runtime.id)
                 await s.disconnect(runtime.id)
             return await s.gateway.request('POST', s.path(runtime.id) + '/' + operation, {})
 
@@ -78,6 +108,7 @@ def register_browser_routes(app, scoped_runtime):
                 if other['bot_id'] == runtime.id:
                     other['lease'] = ''
             viewer['lease'] = result['lease']
+            await app.state.browser_tasks.cancel_bot(runtime.id)
             return result
 
     @app.post('/api/bots/{bot_id}/browser/control/release')

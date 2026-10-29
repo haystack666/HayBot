@@ -34,10 +34,16 @@ def create_app(data_dir=None, static_dir=None):
         from .android import AndroidTasks
         app.state.android = AndroidTasks(app.state.manager, app.state.manager.registry.root)
         app.state.manager.android_service = app.state.android
+        from .browser_tasks import BrowserTasks
+        from .browser_qq import BrowserQQ
+        app.state.browser_tasks = BrowserTasks(app.state.manager, app.state.browser, app.state.manager.registry.root)
+        app.state.manager.browser_tasks = app.state.browser_tasks
+        app.state.manager.browser_qq = BrowserQQ(app.state.browser_tasks)
         from .android_qq import AndroidQQ
         app.state.manager.android_qq = AndroidQQ(app.state.android)
         for runtime in app.state.manager.runtimes.values():
             runtime.bot.android = app.state.manager.android_qq
+            runtime.bot.browser = app.state.manager.browser_qq
         app.state.qq_connect = QQConnect(app.state.manager)
         app.state.session = secrets.token_urlsafe(48)
         app.state.auth_version = time.time()
@@ -45,6 +51,7 @@ def create_app(data_dir=None, static_dir=None):
         try:
             yield
         finally:
+            await app.state.browser_tasks.close()
             await app.state.browser.close()
             await app.state.android.close()
             await app.state.qq_connect.close()
@@ -340,6 +347,7 @@ def create_app(data_dir=None, static_dir=None):
             if runtime.bot.schedule.lock.locked() or runtime.bot.memory.busy or runtime.bot.diary.lock.locked():
                 raise HTTPException(409, '日程正在生成，请等待完成后再保存配置')
             app.state.manager.assert_unique_app_id(c.account_id, runtime.id)
+            await app.state.browser_tasks.cancel_bot(runtime.id)
             old = runtime.store.load()
             if not c.ollama.provider_id:
                 c.ollama.provider_id = app.state.manager.providers.legacy(c.ollama.url, c.ollama.model)

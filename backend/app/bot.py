@@ -26,6 +26,7 @@ from . import group_identity
 class Bot:
     def __init__(self, store, client=None, inference_lock=None, providers=None, memes=None):
         self.android = None
+        self.browser = None
         self.store = store
         self.providers = providers
         if providers is not None:
@@ -203,6 +204,8 @@ class Bot:
 
     async def stop(self):
         self.state = 'stopped'
+        if self.browser:
+            await self.browser.cancel_scope(self)
         if self.android:
             await self.android.cancel_scope(self)
         if self.task:
@@ -349,7 +352,8 @@ class Bot:
 
     def is_command(self, text):
         from .android_qq import AndroidQQ
-        return (AndroidQQ.command(text) is not None or self.reset.action(text) is not None or text in ('/查看日程', '/重置日程', '/查看记忆')
+        from .browser_qq import BrowserQQ
+        return (BrowserQQ.command(text) is not None or AndroidQQ.command(text) is not None or self.reset.action(text) is not None or text in ('/查看日程', '/重置日程', '/查看记忆')
                 or text.startswith('/记住') or text.startswith('/忘记'))
 
     async def receive(self, payload):
@@ -457,7 +461,9 @@ class Bot:
                     await day.sync_commitments()
                     await self.send_schedule_text(response, c, d, group, target, source='memory')
                 return
-            if group_turn is None and self.android and await self.android.handle(self,text,c,d,group,target,user,sid,incoming['id'] if incoming else 0,batch,key):
+            if group_turn is None and self.browser and await self.browser.handle(self,text,c,d,group,target,user,sid,incoming['id'] if incoming else 0,batch,key):
+                return True
+            if group_turn is None and self.android and (not self.browser or not self.browser.browser_mode(self) or text.startswith('/手机')) and await self.android.handle(self,text,c,d,group,target,user,sid,incoming['id'] if incoming else 0,batch,key):
                 return True
             if key in self.pending or (batch is None and group_turn is None and time.time() - self.last.get(key, 0) < c.rules.cooldown):
                 return
@@ -504,7 +510,7 @@ class Bot:
             qzone = getattr(self, 'qzone', None)
             qzone_context = qzone.chat_context(sid) if qzone and not group_turn else ''
             diary_context = self.diary.chat_context(user,group)
-            android_context = self.android.chat_context(self,user,group) if self.android else ''
+            android_context = self.browser.chat_context(self,user,group) if self.browser and self.browser.browser_mode(self) else self.android.chat_context(self,user,group) if self.android else ''
             conversation_context = conversation_instruction(self.store, c, d, group, owner, incoming['id'] if incoming else 0, batch, bot=self)
             if group:
                 user_message['content'] = group_message(d, user_message['content'], attribution=group_identity.attribution(self,c,d,explicitly_addressed(payload,self,c)))

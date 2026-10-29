@@ -5,6 +5,7 @@ import { EventEmitter } from 'node:events'
 import { chromium } from 'playwright'
 import { Environment, RuntimeError } from './environment.mjs'
 import { BrowserOptions, DEFAULT_OPTIONS } from './options.mjs'
+import { DouyinAutomation } from './douyin.mjs'
 
 const validId = id => typeof id === 'string' && /^[a-zA-Z0-9_-]{1,64}$/.test(id)
 export function navigationURL(value) {
@@ -18,6 +19,7 @@ export class BrowserEngine extends EventEmitter {
   constructor(directory, { environment = new Environment(directory), browserType = chromium } = {}) {
     super(); this.directory = directory; this.environment = environment; this.browserType = browserType
     this.options = new BrowserOptions(directory); this.configuring = new Set()
+    this.douyin = new DouyinAutomation(this)
     this.sessions = new Map(); this.starting = new Map(); this.stopping = new Set(); this.environmentJob = null; this.closed = false
   }
   async prepare({ force = false } = {}) {
@@ -59,7 +61,7 @@ export class BrowserEngine extends EventEmitter {
     const session = this.sessions.get(id)
     const options = { ...(session?.options || this.options.values.get(id) || DEFAULT_OPTIONS) }
     if (!session) return { id, state: 'stopped', tabs: [], activeTab: null, generation: 0, options }
-    return { id, state: session.context ? session.lease ? 'owner_control' : 'ready' : 'stopped', owner_login: !!session.ownerLogin, controller: session.controller || null, generation: session.generation, activeTab: session.active, options, tabs: [...session.tabs].map(([tabId, page]) => ({ id: tabId, title: session.titles.get(tabId) || '新标签页', url: page.url() })) }
+    return { id, state: session.context ? session.lease ? 'owner_control' : 'ready' : 'stopped', automation: !!session.automation, owner_login: !!session.ownerLogin, controller: session.controller || null, generation: session.generation, activeTab: session.active, options, tabs: [...session.tabs].map(([tabId, page]) => ({ id: tabId, title: session.titles.get(tabId) || '新标签页', url: page.url() })) }
   }
   async settings(id) { return this.options.get(id) }
   async configure(id, input) {
@@ -116,6 +118,7 @@ export class BrowserEngine extends EventEmitter {
     }
     context.on('page', register)
     context.on('close', () => {
+      this.douyin.revoke(session)
       this.cancelPointer(session)
       session.context = null; session.lease = null; session.controller = null; session.tabs.clear(); session.active = null; session.generation++
       this.changed(session)
@@ -130,13 +133,13 @@ export class BrowserEngine extends EventEmitter {
     try {
       await this.starting.get(id)?.catch(() => {})
       const session = this.sessions.get(id)
-      if (session?.context) { this.cancelPointer(session); session.lease = null; session.generation++; await session.context.close() }
+      if (session?.context) { this.douyin.revoke(session); this.cancelPointer(session); session.lease = null; session.generation++; await session.context.close() }
       return this.state(id)
     } finally { this.stopping.delete(id) }
   }
   claim(id, controller = null) {
     this.requireReady()
-    const session = this.get(id); this.cancelPointer(session); session.lease = randomUUID(); session.controller = controller; session.generation++; this.changed(session)
+    const session = this.get(id); this.douyin.revoke(session); this.cancelPointer(session); session.lease = randomUUID(); session.controller = controller; session.generation++; this.changed(session)
     return { lease: session.lease, generation: session.generation }
   }
   release(id, lease) {

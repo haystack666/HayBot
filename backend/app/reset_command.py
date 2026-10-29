@@ -83,6 +83,8 @@ class ResetCommands:
         count = self.bot.memory.data.reset_scope(sid)
         if self.bot.android:
             await self.bot.android.cancel_scope(self.bot,sid)
+        if self.bot.browser:
+            await self.bot.browser.cancel_scope(self.bot,sid)
         self.bot.inbox.clear_scope(sid)
         self.bot.last.pop(key, None)
         previous = self.bot.tasks_by_key.get(key)
