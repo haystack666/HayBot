@@ -37,6 +37,7 @@ test('engine passes actual mode to Chrome, uses same profile, and fences launch/
     await engine.launch('/same-profile', { headless: true })
     assert.equal(launches[0].options.headless, false)
     assert.equal(launches[1].options.headless, true)
+    for (const { options } of launches) assert.ok(options.args.includes('--mute-audio'))
     assert.equal(launches[0].profile, launches[1].profile)
     engine.sessions.set('a', { context: {} })
     await assert.rejects(engine.configure('a', { headless: false }), { code: 'settings_busy' })

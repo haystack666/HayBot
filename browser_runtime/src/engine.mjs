@@ -6,6 +6,7 @@ import { chromium } from 'playwright'
 import { Environment, RuntimeError } from './environment.mjs'
 import { BrowserOptions, DEFAULT_OPTIONS } from './options.mjs'
 import { xiaohongshuAccessIssue } from './access-issues.mjs'
+import { BrowserWindows } from './windows.mjs'
 
 const validId = id => typeof id === 'string' && /^[a-zA-Z0-9_-]{1,64}$/.test(id)
 export function navigationURL(value) {
@@ -47,7 +48,7 @@ export class BrowserEngine extends EventEmitter {
       channel: 'chrome', executablePath: this.environment.cached?.chrome.executable || undefined,
       headless: options.headless, viewport: { width: 1280, height: 800 },
       acceptDownloads: false, timeout: 30000,
-      args: ['--no-first-run', '--no-default-browser-check'],
+      args: ['--no-first-run', '--no-default-browser-check', '--mute-audio'],
     })
   }
   get(id) {
@@ -95,11 +96,13 @@ export class BrowserEngine extends EventEmitter {
     try { context = await this.launch(profile, options) } catch { throw new RuntimeError('launch_failed', 'Chrome 启动失败，请检查桌面环境与资料目录占用；不会自动切换启动模式') }
     if (this.closed || this.stopping.has(id)) { await context.close(); throw new RuntimeError('closed', '运行时正在停止') }
     const session = { id, context, options, ownerLogin, accessIssues: new Map(), tabs: new Map(), titles: new Map(), active: null, generation: 1, lease: null, stream: null, streamJob: Promise.resolve(), operation: Promise.resolve(), observers: 0, frame: 0 }
+    if (!options.headless) session.windows = new BrowserWindows(context)
     this.sessions.set(id, session)
     const register = page => {
       if ([...session.tabs.values()].includes(page)) return
       this.cancelPointer(session)
       const tabId = randomUUID(); session.tabs.set(tabId, page); session.active = tabId; session.generation++
+      if (session.windowAction) session.windows?.restorePage(page)
       page.on('domcontentloaded', () => { this.inspectAccessIssue(session, page).catch(() => {}) })
       page.on('load', () => { this.inspectAccessIssue(session, page).catch(() => {}) })
       page.on('dialog', dialog => dialog.dismiss().catch(() => {}))
@@ -269,6 +272,21 @@ export class BrowserEngine extends EventEmitter {
     this.requireReady()
     const { lease, generation, tabId, kind } = input || {}
     if (!session.context || !session.lease || lease !== session.lease || generation !== session.generation || tabId !== session.active) throw new RuntimeError('stale_control', '页面或操作权限已变化，请等待最新画面后重试')
+    // Avoid window queries for high-frequency pointer moves/wheel/text events.
+    // A gesture remembers its initial state and restores after release.
+    const capture = ['new_tab', 'switch_tab', 'close_tab', 'navigate', 'back', 'forward', 'reload', 'click', 'key'].includes(kind) || kind === 'pointer' && input.phase === 'start'
+    const restore = capture || kind === 'pointer' && ['end', 'cancel'].includes(input.phase)
+    if (capture) await session.windows?.capture()
+    if (!session.context || !session.lease || lease !== session.lease || generation !== session.generation || tabId !== session.active) throw new RuntimeError('stale_control', '页面或操作权限已变化，请等待最新画面后重试')
+    session.windowAction = restore
+    try { return await this.performInput(session, input) }
+    finally {
+      try { if (restore) await session.windows?.restore() }
+      finally { session.windowAction = false }
+    }
+  }
+  async performInput(session, input) {
+    const { tabId, kind } = input
     if (kind === 'new_tab') {
       if (session.pointer) { const pointer = session.pointer; session.pointer = null; await this.liftPointer(pointer, true) }
       await session.context.newPage(); this.changed(session); return this.state(session.id)
@@ -288,7 +306,7 @@ export class BrowserEngine extends EventEmitter {
     else if (kind === 'reload') await page.reload({ waitUntil: 'domcontentloaded', timeout: 20000 })
     else if (kind === 'switch_tab') {
       if (!session.tabs.has(input.target)) throw new RuntimeError('tab_closed', '标签页已关闭')
-      session.active = input.target; session.generation++; await session.tabs.get(input.target).bringToFront(); await this.refreshStream(session)
+      session.active = input.target; session.generation++; await this.refreshStream(session)
     } else if (kind === 'close_tab') await page.close()
     else if (kind === 'click') {
       const point = this.point(page, input)
