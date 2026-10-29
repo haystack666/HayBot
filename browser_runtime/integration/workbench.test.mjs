@@ -119,6 +119,36 @@ test('formal workbench through Docker relay: login, gestures, privacy, Bot switc
       await viewer.mouse.move(to.x, to.y, { steps: 12 }); await viewer.mouse.up()
       await viewer.waitForFunction(() => !document.querySelector('.browser-screen').dataset.inputBusy)
     }
+    for (const viewport of [{width:1366,height:768},{width:1280,height:720},{width:1024,height:600},{width:1440,height:900},{width:390,height:844}]) {
+      await viewer.setViewportSize(viewport)
+      await viewer.evaluate(()=>window.scrollTo(0,0))
+      await viewer.waitForFunction(()=>{
+        const root=document.querySelector('.browser-viewer'), screen=document.querySelector('.browser-screen-wrap')
+        return root.getBoundingClientRect().bottom<=innerHeight && screen.getBoundingClientRect().height>=64
+      })
+      assert.ok(await viewer.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'viewer fits viewport width')
+    }
+    await viewer.setViewportSize({width:1024,height:600})
+    const smallRange=await target.locator('#range').boundingBox()
+    await drag(await localPoint(smallRange.x+smallRange.width*.2,smallRange.y+smallRange.height/2),await localPoint(smallRange.x+smallRange.width*.8,smallRange.y+smallRange.height/2))
+    await target.waitForFunction(()=>Number(document.querySelector('#range').value)>=70)
+    // Clicking in the side letterbox must not trigger a remote click.
+    const downs=[]
+    const trackDown=r=>{if(r.url().endsWith('/action')&&JSON.parse(r.postData()||'{}').phase==='start')downs.push(r)}
+    viewer.on('request',trackDown)
+    const screenBox=await viewer.locator('.browser-screen').boundingBox()
+    await viewer.mouse.click(screenBox.x+2,screenBox.y+screenBox.height/2)
+    await viewer.waitForTimeout(80)
+    assert.equal(downs.length,0)
+    viewer.off('request',trackDown)
+    await viewer.getByRole('button',{name:'放大画面',exact:true}).click()
+    await viewer.setViewportSize({width:844,height:390})
+    await viewer.waitForFunction(()=>document.querySelector('.browser-screen-wrap').getBoundingClientRect().bottom<=innerHeight)
+    assert.ok(await viewer.locator('.browser-screen-wrap').evaluate(e=>e.getBoundingClientRect().height>60),'expanded landscape retains usable picture')
+    await viewer.keyboard.press('Escape')
+    await viewer.setViewportSize({width:1440,height:1100})
+    await viewer.waitForFunction(()=>document.querySelector('.browser-viewer').getBoundingClientRect().bottom<=innerHeight)
+    t.diagnostic('Viewer fits small laptops/tablets/phones; scaled dragging, letterbox rejection and short landscape expansion passed')
     await target.evaluate(() => {
       const host=document.createElement('div');host.id='hover-fixture'
       host.style.cssText='position:fixed;left:1000px;top:20px;width:200px;height:100px;z-index:9999;background:#ddd'

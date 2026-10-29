@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { ArrowLeft, ArrowRight, Maximize2, Minimize2, Plus, RefreshCw, X, MoreHorizontal, MousePointer2 } from 'lucide-react'
 import { Dialog } from 'radix-ui'
 import { Button } from '@/components/ui/button'
@@ -8,7 +8,7 @@ import { createBrowserSession } from './lib/browser-session'
 const initial = { state: { state: 'stopped', tabs: [] }, owned: false, busy: false, connected: false, canControl: false, stream: '浏览器已停止' }
 
 export default function BrowserViewer({ api, botId, ready, notify, onCheck }) {
-  const canvas = useRef(null), mode = useRef(null), controller = useRef(null), expandButton = useRef(null)
+  const viewer = useRef(null), canvas = useRef(null), mode = useRef(null), controller = useRef(null), expandButton = useRef(null)
   const [view, setView] = useState(initial), [expanded, setExpanded] = useState(false), [address, setAddress] = useState(''), [text, setText] = useState(''), [loginConfirm, setLoginConfirm] = useState(false), [menu, setMenu] = useState(false)
   const { state, owned, connected, canControl, busy, stream } = view
   const active = state.state !== 'stopped'
@@ -28,6 +28,34 @@ export default function BrowserViewer({ api, botId, ready, notify, onCheck }) {
     document.addEventListener('keydown', escape, true)
     return () => { document.body.style.overflow = old; document.removeEventListener('keydown', escape, true) }
   }, [expanded])
+  useLayoutEffect(() => {
+    const root = viewer.current, screen = canvas.current.parentElement
+    let pending
+    const fit = () => {
+      pending = null
+      if (expanded || !root.getClientRects().length) return
+      // Keep the budget independent of document scrolling, otherwise scrolling
+      // would enlarge the canvas and shift the page beneath the pointer.
+      const rect = root.getBoundingClientRect()
+      const controls = rect.height - screen.getBoundingClientRect().height
+      const below = [...root.parentElement.querySelectorAll('.browser-current-task, .browser-auto-strip')]
+        .reduce((height, element) => height + element.getBoundingClientRect().height, 0)
+      const viewportHeight = window.visualViewport?.height || window.innerHeight
+      const height = Math.max(64, Math.floor(viewportHeight - (rect.top + window.scrollY) - controls - below - 18))
+      const value = `${height}px`
+      if (root.style.getPropertyValue('--browser-screen-max-height') !== value) root.style.setProperty('--browser-screen-max-height', value)
+    }
+    const schedule = () => { if (!pending) pending = requestAnimationFrame(fit) }
+    const observer = new ResizeObserver(schedule)
+    observer.observe(root)
+    observer.observe(root.parentElement)
+    for (const element of root.children) if (element !== screen) observer.observe(element)
+    for (const element of root.parentElement.children) if (element !== root) observer.observe(element)
+    window.addEventListener('resize', schedule)
+    window.visualViewport?.addEventListener('resize', schedule)
+    fit()
+    return () => { observer.disconnect(); cancelAnimationFrame(pending); window.removeEventListener('resize', schedule); window.visualViewport?.removeEventListener('resize', schedule) }
+  }, [expanded, owned, state.owner_login])
   function act(value) { return controller.current?.act(value) }
   function keydown(event) {
     if (!canControl || event.isComposing || event.key === 'Escape' && expanded) return
@@ -35,7 +63,7 @@ export default function BrowserViewer({ api, botId, ready, notify, onCheck }) {
     const key = (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a' ? 'ControlOrMeta+A' : event.shiftKey && event.key === 'Tab' ? 'Shift+Tab' : event.key
     if (['Enter', 'Tab', 'Shift+Tab', 'Escape', 'Backspace', 'Delete', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'ControlOrMeta+A'].includes(key)) { event.preventDefault(); act({ kind: 'key', key }) }
   }
-  return <section className={`browser-viewer ${expanded ? 'is-expanded' : ''} ${owned ? 'is-owned' : ''}`} aria-label="浏览器画面">
+  return <section ref={viewer} className={`browser-viewer ${expanded ? 'is-expanded' : ''} ${owned ? 'is-owned' : ''}`} aria-label="浏览器画面">
     <div className="browser-heading"><div><b>{state.owner_login ? '主人登录中' : owned ? '正在接管' : state.state === 'owner_control' ? '其他连接已接管' : state.automation ? 'Bot 正在浏览' : active ? '浏览器运行中' : '浏览器已停止'}</b><span role="status">{stream}</span></div><div className="action-row">
       {!active ? <Button size="sm" disabled={busy || !ready} onClick={() => controller.current.start()}>启动浏览器</Button> : <>
         <Button size="sm" variant={owned ? 'default' : 'outline'} disabled={busy || !connected || !ready} onClick={() => controller.current.claim()}><MousePointer2 size={14}/>{owned ? '结束接管' : '接管浏览器'}</Button>
