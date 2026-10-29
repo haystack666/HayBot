@@ -396,6 +396,12 @@ class BrowserTasks:
         if re.search(r'私信',positive) and 'reply_dm' not in done: return True
         return bool(re.search(r'关注',positive))
 
+    @staticmethod
+    def verification_reason(kind):
+        return {'captcha':'抖音要求安全验证，请接管浏览器完成验证后继续',
+            'account_verification':'抖音要求短信本人验证，已暂停操作；请在浏览器开启主人登录并完成验证，互动结果需核对后再继续',
+            'login':'抖音需要登录，请接管并开启主人登录，完成登录后继续'}.get(kind,'抖音要求验证，请接管完成后继续')
+
     async def run(self, bot_id, task_id):
         runtime = self.manager.get(bot_id)
         task, cfg = self.get(bot_id, task_id), self.config(bot_id)
@@ -434,6 +440,9 @@ class BrowserTasks:
                 'owner_interests': cfg.owner_interests if scope in ('owner', 'shared') else '',
                 'content_constraints': cfg.content_constraints}
             for index in range(cfg.max_steps):
+                if observation.get('blocked'):
+                    self.update(task_id,state='blocked',result=self.verification_reason(observation['blocked']))
+                    break
                 if len(steps) >= cfg.max_steps:
                     self.update(task_id, state='paused', result='已达到本次步骤上限，浏览进度已保存')
                     break
@@ -446,12 +455,6 @@ class BrowserTasks:
                 elapsed = time.monotonic() - started
                 if elapsed >= cfg.timeout_minutes * 60:
                     self.update(task_id, state='paused', result='已达到本次时间上限，浏览进度已保存')
-                    break
-                if observation.get('blocked'):
-                    reason = {'captcha':'抖音要求安全验证，请接管浏览器完成验证后继续',
-                        'account_verification':'抖音要求短信本人验证，已暂停操作；请在浏览器开启主人登录并完成验证，互动结果需核对后再继续',
-                        'login':'抖音需要登录，请接管并开启主人登录，完成登录后继续'}.get(observation['blocked'],'抖音要求验证，请接管完成后继续')
-                    self.update(task_id, state='blocked', result=reason)
                     break
                 if cfg.interactions.messages_enabled:
                     # Refresh monitor observations after model/watch boundaries;
@@ -583,6 +586,9 @@ class BrowserTasks:
                     body = {'token': token, 'generation': observation['generation'], 'op': 'watch', 'seconds': 15, 'continue_segment': True}
                     if len(steps) >= cfg.max_steps:
                         break
+                if observation.get('blocked'):
+                    self.update(task_id,state='blocked',result=self.verification_reason(observation['blocked']))
+                    break
                 if repeated_count>=3:
                     break
             else:

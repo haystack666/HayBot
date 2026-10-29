@@ -1,6 +1,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import {profile,commentItems} from '../src/douyin-social.mjs'
+import {profile,commentItems,editorTextDOM} from '../src/douyin-social.mjs'
+
+test('empty Slate placeholder does not block writes but actual owner drafts remain protected',()=>{
+ assert.equal(editorTextDOM({innerText:'\u200B\uFEFF\n'}),'')
+ assert.equal(editorTextDOM({innerText:'\u200B主人的草稿\u200B'}),'主人的草稿')
+ assert.equal(editorTextDOM({value:'真实评论'}),'真实评论')
+})
 
 test('profile identity and inbound comment parsing retain stable fields without credentials',()=>{
  assert.equal(profile({user:{nickname:'同名'}}),null)

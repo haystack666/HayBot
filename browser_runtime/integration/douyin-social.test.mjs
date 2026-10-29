@@ -141,11 +141,11 @@ test('Chrome inbox enforces inbound/follower identity, sends owner cards and con
   <p data-message-id="inbound-server-1" data-direction="inbound">这个视频好看吗</p>
   ${shared?`<div class="MessageItemShareAwemecontainer" id="shared-card">视频卡片</div>`:''}
   <section id="messages">${outbound.map(m=>`<p data-message-id="${m.id}" data-direction="outbound">${m.text}</p>`).join('')}</section>
-  <div contenteditable="true"></div><button class="messageMsgInputiconAction" onclick="document.querySelector('.componentsemojiemojiPanel').hidden=false">表情</button>
+  <div contenteditable="true">&#8203;</div><button class="messageMsgInputiconAction" onclick="document.querySelector('.componentsemojiemojiPanel').hidden=false">表情</button>
   <div class="componentsemojiemojiPanel" hidden><img alt="好耶" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='30' height='30'%3E%3C/svg%3E" onclick="sendSticker()"></div>
   <script>const box=document.querySelector('[contenteditable]');let count=${outbound.length};
    async function append(text,sticker=''){const id='outbound-server-'+(++count);await fetch('/fixture/message',{method:'POST',body:JSON.stringify({id,text})});const p=document.createElement('p');p.dataset.messageId=id;p.dataset.direction='outbound';p.innerText=text;if(sticker)p.innerHTML='<img alt="'+sticker+'" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7">';document.querySelector('#messages').append(p)}
-   box.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();append(box.innerText);box.innerHTML=''}});function sendSticker(){append('','好耶')}
+   box.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();append(box.innerText.replaceAll(String.fromCharCode(8203),''));box.innerHTML=''}});function sendSticker(){append('','好耶')}
    const card=document.querySelector('#shared-card');if(card)card.__reactProps$fixture={children:{props:{message:Object.assign(Object.create({serverId:'new-card-id',sender:'10001',conversationId:''}),{isMyMessage:true,parsedContent:{itemId:'${video}'}})}}};
    fetch('/aweme/v1/web/user/profile/self/');fetch('/aweme/v1/web/user/profile/other/');
   </script>`

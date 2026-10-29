@@ -157,7 +157,7 @@ export class DouyinAutomation {
     if (!['observe', 'home', 'search', 'open', 'next', 'scroll', 'watch', 'comments', 'account', 'inbox', 'profile', 'owner_profile', 'conversation', 'stickers', 'reconcile', ...writeOps].includes(op)) throw new RuntimeError('invalid_action', '不支持此抖音操作', 400)
     if (input.generation !== session.generation) throw new RuntimeError('stale_observation', '页面已变化，请重新观察')
     if(input.reconciling) {
-      const drafts=await page.locator('[contenteditable="true"],textarea').evaluateAll(nodes=>nodes.some(e=>e.getClientRects().length&&(e.innerText||e.value||'').trim()))
+      const drafts=await page.locator('[contenteditable="true"],textarea').evaluateAll(nodes=>nodes.some(e=>e.getClientRects().length&&(e.innerText||e.value||'').replace(/[\u200B\uFEFF]/g,'').trim()))
       if(drafts)throw new RuntimeError('existing_draft','页面已有未发送草稿，请先保存草稿后核对')
     }
     if (!['home', 'search', 'account', 'inbox'].includes(op) && !platform(page.url())) throw new RuntimeError('wrong_platform', '当前已离开抖音，请先返回抖音')

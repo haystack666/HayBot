@@ -3,6 +3,7 @@ import { RuntimeError } from './environment.mjs'
 const clean = (v,n=1000) => typeof v==='string'?v.slice(0,n):''
 const id = v => typeof v==='string' && /^[A-Za-z0-9_-]{3,128}$/.test(v)
 export const writeOps = new Set(['like','comment','reply_comment','reply_dm','share','share_note'])
+export function editorTextDOM(e) {return (e.innerText||e.value||'').replace(/[\u200B\uFEFF]/g,'').trim()}
 // Detail pages render a second interaction bar. Its visible heart has no e2e
 // attribute; the e2e heart belongs to the hidden fullscreen player. Read only
 // the rendered icon's public type/state, then use a normal pointer click.
@@ -281,7 +282,7 @@ export class DouyinSocial {
     if(await editors.count()!==1)throw new RuntimeError('editor_missing','无法确认唯一的输入框，未发送')
     const box=editors.first();this.auto.guard(session,run);await box.click({timeout:2500})
     // Preserve owner drafts rather than clearing text left by a person.
-    const body=await box.evaluate(e=>(e.innerText||e.value||'').trim())
+    const body=await box.evaluate(editorTextDOM)
     if(body)throw new RuntimeError('existing_draft','输入框已有草稿，未覆盖或发送')
     return box
   }
@@ -493,7 +494,7 @@ export class DouyinSocial {
           if(hits.length!==1)throw new RuntimeError('sticker_missing','没有匹配的唯一表情，未发送')
           submit();await hits[0].click({timeout:2500})
         }
-        for(let i=0;i<20;i++){await a.wait(session,run,400);const view=await this.read(session,run);const sent=view.messages.find(m=>!ids.has(m.id)&&m.direction==='outbound'&&(grant.text?m.text.trim()===grant.text.trim():m.sticker===grant.sticker));if(sent)return Object.assign(result,{status:'confirmed',message_id:sent.id,peer_id:peer.id})}
+        for(let i=0;i<20;i++){await a.wait(session,run,400);const view=await this.read(session,run);const sent=view.messages.find(m=>!ids.has(m.id)&&m.direction==='outbound'&&(grant.text?m.text.replace(/[\u200B\uFEFF]/g,'').trim()===grant.text.replace(/[\u200B\uFEFF]/g,'').trim():m.sticker===grant.sticker));if(sent)return Object.assign(result,{status:'confirmed',message_id:sent.id,peer_id:peer.id})}
       } else if(op==='share') {
         if(!before.owner?.id||grant.peer_id!==before.owner.id)throw new RuntimeError('owner_mismatch','分享目标未确认')
         const baseline=run.messageBaselines.get(before.owner.id)

@@ -198,6 +198,25 @@ def test_autonomous_loop_interest_scope_buffering_and_visual_evidence(client, mo
     assert 'fixture-frame' not in json.dumps(task)
 
 
+def test_verification_on_last_step_is_blocked_not_step_limit_pause(client,monkeypatch):
+    decisions=iter([{'op':'home','reason':'浏览'}]*5)
+    tasks,host,_=setup(client,monkeypatch,decisions)
+    cfg=tasks.config('default');cfg.max_steps=5
+    client.portal.call(tasks.save_config,'default',cfg)
+    original=host.request;count=0
+    async def gateway(method,path,body=None):
+        nonlocal count
+        result=await original(method,path,body)
+        if path.endswith('/act') and body['op']=='home':
+            count+=1
+            if count==5:result['blocked']='account_verification'
+        return result
+    monkeypatch.setattr(tasks.browser.gateway,'request',gateway)
+    result=run_task(client,tasks,'去抖音看看')
+    assert result['state']=='blocked' and '短信本人验证' in result['result']
+    assert len(result['steps'])==5
+
+
 def test_captcha_blocks_without_retry_and_takeover_discards_model_action(client, monkeypatch):
     tasks, host, _ = setup(client, monkeypatch, iter([{'op': 'home', 'reason': '打开抖音'}]), captcha=True)
     task = run_task(client, tasks, '刷抖音')
