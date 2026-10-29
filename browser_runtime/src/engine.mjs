@@ -268,6 +268,14 @@ export class BrowserEngine extends EventEmitter {
     }
     const page = session.tabs.get(tabId)
     if (!page) throw new RuntimeError('tab_closed', '标签页已关闭')
+    if (kind === 'hover') {
+      // Late passive motion must never release a held drag or create a click.
+      if (!session.pointer) {
+        if (input.leave === true) await page.mouse.move(-1, -1)
+        else { const point = this.point(page, input); await page.mouse.move(point.x, point.y) }
+      }
+      return this.state(session.id)
+    }
     if (kind === 'pointer') {
       await this.pointerInput(session, page, input)
       return this.state(session.id)

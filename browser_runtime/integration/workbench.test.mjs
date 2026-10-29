@@ -119,6 +119,35 @@ test('formal workbench through Docker relay: login, gestures, privacy, Bot switc
       await viewer.mouse.move(to.x, to.y, { steps: 12 }); await viewer.mouse.up()
       await viewer.waitForFunction(() => !document.querySelector('.browser-screen').dataset.inputBusy)
     }
+    await target.evaluate(() => {
+      const host=document.createElement('div');host.id='hover-fixture'
+      host.style.cssText='position:fixed;left:1000px;top:20px;width:200px;height:100px;z-index:9999;background:#ddd'
+      host.innerHTML='悬停菜单<div class="popup" hidden>悬停弹层<button>弹层操作</button></div>'
+      host.addEventListener('mouseenter',()=>host.querySelector('.popup').hidden=false)
+      host.addEventListener('mouseleave',()=>host.querySelector('.popup').hidden=true)
+      host.addEventListener('mousedown',()=>window.hoverClicks=(window.hoverClicks||0)+1)
+      document.body.append(host)
+    })
+    const hoverPoint=await localPoint(1040,40)
+    await viewer.mouse.move(hoverPoint.x,hoverPoint.y)
+    await target.locator('#hover-fixture .popup').waitFor({state:'visible'})
+    assert.equal(await target.evaluate(()=>window.hoverClicks||0),0,'hover never presses a mouse button')
+    const popupPoint=await localPoint(1050,65)
+    await viewer.mouse.move(popupPoint.x,popupPoint.y)
+    await target.locator('#hover-fixture .popup').waitFor({state:'visible'})
+    await viewer.mouse.move(10,10)
+    await target.locator('#hover-fixture .popup').waitFor({state:'hidden'})
+    const hoverRequests=[]
+    const trackHover=request=>{if(request.url().endsWith('/action')&&JSON.parse(request.postData()||'{}').kind==='hover')hoverRequests.push(request)}
+    viewer.on('request',trackHover)
+    await viewer.locator('.browser-screen').evaluate((canvas,p)=>{
+      for(let i=0;i<100;i++)canvas.dispatchEvent(new PointerEvent('pointermove',{clientX:p.x,clientY:p.y,pointerType:'mouse',buttons:0,isPrimary:true}))
+    },hoverPoint)
+    await target.locator('#hover-fixture .popup').waitFor({state:'visible'})
+    assert.ok(hoverRequests.length<5,'fast mouse moves coalesce instead of queueing 100 requests')
+    viewer.off('request',trackHover)
+    await target.locator('#hover-fixture').evaluate(e=>e.remove())
+    t.diagnostic('Hover opens popup, moves into popup, leaves cleanly and coalesces rapid motion without clicks')
     const range = await target.locator('#range').boundingBox()
     await drag(await localPoint(range.x + range.width * .2, range.y + range.height / 2), await localPoint(range.x + range.width * .8, range.y + range.height / 2))
     await target.waitForFunction(() => Number(document.querySelector('#range').value) >= 70)

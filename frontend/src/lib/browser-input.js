@@ -20,6 +20,7 @@ export function bindScreenInput({ canvas, mode, getView, getContext, send, repor
   const events = new AbortController()
   const on = (target, name, listener, options = {}) => target.addEventListener(name, listener, { ...options, signal: events.signal })
   let gesture = null, wheel = null, wheelRunning = false
+  let hover = null, hoverRunning = false, hoverTimer = null, hovered = false
   const sameContext = expected => {
     const current = getContext()
     return current && ['session', 'lease', 'generation', 'tabId', 'epoch'].every(key => current[key] === expected[key])
@@ -31,7 +32,39 @@ export function bindScreenInput({ canvas, mode, getView, getContext, send, repor
   function releaseCapture(pointerId) {
     if (canvas.hasPointerCapture(pointerId)) canvas.releasePointerCapture(pointerId)
   }
+  function clearHover() {
+    hover = null; clearTimeout(hoverTimer); hoverTimer = null
+  }
+  function scheduleHover(value) {
+    hover = value
+    if (hoverTimer || hoverRunning) return
+    hoverTimer = setTimeout(pumpHover, 33)
+  }
+  async function pumpHover() {
+    hoverTimer = null
+    if (hoverRunning) return
+    const current = hover; hover = null
+    if (!current || gesture || !sameContext(current.context)) return
+    hoverRunning = true
+    try {
+      await send({ kind: 'hover', ...current.point }, current.context)
+    } catch (error) { if (sameContext(current.context)) report(error.message) }
+    finally {
+      hoverRunning = false
+      if (hover && !gesture) hoverTimer = setTimeout(pumpHover, 33)
+    }
+  }
+  function leaveHover() {
+    // Browsers may emit an out-of-frame move followed by pointerleave.
+    // Keep the already queued leave instead of cancelling it on the second event.
+    if (!hovered) return
+    clearHover()
+    const captured = capture()
+    if (hovered && !gesture && captured) scheduleHover({ context: captured.context, point: { leave: true } })
+    hovered = false
+  }
   function reset() {
+    clearHover(); hovered = false
     const previous = gesture; gesture = null; wheel = null
     if (previous) { previous.pending = null; previous.terminal = null; releaseCapture(previous.pointerId) }
     canvas.classList.remove('dragging')
@@ -71,18 +104,26 @@ export function bindScreenInput({ canvas, mode, getView, getContext, send, repor
     if (event.button !== 0 || !event.isPrimary || gesture) return
     const captured = capture(), point = captured && framePoint(canvas, captured.view, event.clientX, event.clientY)
     if (!point) return
+    clearHover(); hovered = false
     event.preventDefault(); canvas.focus({ preventScroll: true }); canvas.setPointerCapture(event.pointerId)
     gesture = { ...captured, id: crypto.randomUUID(), pointerId: event.pointerId, mode: mode.value === 'swipe' || mode.value === 'auto' && event.pointerType === 'touch' ? 'swipe' : 'drag', pending: { phase: 'start', ...point }, terminal: null, running: false }
     canvas.classList.add('dragging'); canvas.dataset.inputBusy = 'true'; pump(gesture)
   })
   on(canvas, 'pointermove', event => {
     const current = gesture
-    if (!current || current.pointerId !== event.pointerId || current.finishing) return
+    if (!current) {
+      if (!['mouse','pen'].includes(event.pointerType) || event.buttons) return
+      const captured = capture(), point = captured && framePoint(canvas, captured.view, event.clientX, event.clientY)
+      if (!point) { leaveHover(); return }
+      hovered = true; scheduleHover({ context: captured.context, point }); return
+    }
+    if (current.pointerId !== event.pointerId || current.finishing) return
     if (!sameContext(current.context)) { reset(); return }
     event.preventDefault()
     current.pending = { phase: 'move', ...framePoint(canvas, current.view, event.clientX, event.clientY, true) }
     pump(current)
   })
+  on(canvas, 'pointerleave', leaveHover)
   on(canvas, 'pointerup', event => finish(event))
   on(canvas, 'pointercancel', event => finish(event, true))
   on(canvas, 'lostpointercapture', event => {
@@ -114,6 +155,7 @@ export function bindScreenInput({ canvas, mode, getView, getContext, send, repor
     pumpWheel()
   }, { passive: false })
   function cancel() {
+    leaveHover()
     wheel = null
     const current = gesture
     if (!current) return
@@ -123,5 +165,5 @@ export function bindScreenInput({ canvas, mode, getView, getContext, send, repor
   on(mode, 'change', cancel)
   on(window, 'blur', cancel)
   on(document, 'visibilitychange', () => { if (document.hidden) cancel() })
-  return { reset, cancel, dispose: () => { cancel(); events.abort() }, sync: () => { if (gesture && !sameContext(gesture.context)) reset() } }
+  return { reset, cancel, dispose: () => { cancel(); clearHover(); events.abort() }, sync: () => { if (hover && !sameContext(hover.context)) clearHover(); if (gesture && !sameContext(gesture.context)) reset() } }
 }

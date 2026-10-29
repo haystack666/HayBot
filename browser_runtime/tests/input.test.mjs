@@ -66,3 +66,23 @@ test('swipe routes wheel to its anchor and cancellation never becomes a click', 
     await assert.rejects(send({ phase: 'start', mode: 'arbitrary', x: 0, y: 0 }), { code: 'invalid_pointer' })
   } finally { await fixture.close() }
 })
+
+test('hover moves without buttons, rejects invalid points, respects leases and cannot interrupt a drag', async () => {
+  const f = fakeSession()
+  const hover = input => f.engine.action('one', {kind:'hover',lease:f.session.lease,generation:f.session.generation,tabId:f.session.active,...input})
+  try {
+    await hover({x:50,y:60})
+    assert.deepEqual(f.events,[['move',50,60]])
+    await hover({leave:true})
+    assert.deepEqual(f.events.at(-1),['move',-1,-1])
+    await assert.rejects(hover({x:Infinity,y:0}),{code:'invalid_coordinates'})
+    await assert.rejects(hover({x:0,y:0,lease:'old'}),{code:'stale_control'})
+    await f.send({phase:'start',mode:'drag',x:10,y:10})
+    const count=f.events.length
+    await hover({x:100,y:100});await hover({leave:true})
+    assert.equal(f.events.length,count)
+    assert.ok(f.session.pointer)
+    await f.send({phase:'end',x:50,y:50})
+    assert.equal(f.events.filter(e=>e[0]==='up').length,1)
+  } finally {await f.close()}
+})
