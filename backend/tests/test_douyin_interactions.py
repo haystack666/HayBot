@@ -18,7 +18,7 @@ def cfg(**kwargs):
 
 
 def decision(op='comment',**kwargs):
-    return BrowseDecision(op=op,reason='实际内容值得回应',text='这段解释很清楚',**{'id':'1234567890123',**kwargs})
+    return BrowseDecision(op=op,reason='实际内容值得回应',**{'text':'这段解释很清楚','id':'1234567890123',**kwargs})
 
 
 def observation(**kwargs):
@@ -142,3 +142,46 @@ def test_history_includes_all_unknowns_even_older_than_recent_fifty(ledger):
         ledger.settle(row['operation_id'],{'status':'confirmed'})
     assert len(ledger.history('one'))==51
     assert any(x['id']==oldest['operation_id'] for x in ledger.history('one'))
+
+
+def test_history_shows_video_and_actual_authored_content(ledger):
+    grant = reserve(ledger, decision(text='第一行\n第二行 <img src=x>'))
+    ledger.settle(grant['operation_id'], {'status':'confirmed'})
+    item = ledger.history('one')[0]
+    assert item['details']['video_title'] == '猫咪'
+    assert item['details']['video_url'] == 'https://www.douyin.com/video/1234567890123'
+    assert item['details']['text'] == '第一行\n第二行 <img src=x>'
+    assert 'payload' not in item and 'task_id' not in item
+    assert ledger.history('other') == []
+    # Metadata is display-only and never extends an execution authorization.
+    assert 'video_title' not in grant
+
+
+def test_legacy_history_recovers_title_by_video_id_not_neighboring_video(ledger):
+    grant = reserve(ledger)
+    ledger.db.execute("UPDATE douyin_operations SET details='{}' WHERE id=?", (grant['operation_id'],))
+    ledger.db.execute('CREATE TABLE browser_tasks(id TEXT,bot_id TEXT,steps TEXT)')
+    import json
+    steps = [{'current':{'id':'another-video','title':'错误视频'}}, {'items':[{'id':'1234567890123','title':'原始视频标题'}]}]
+    ledger.db.execute('INSERT INTO browser_tasks VALUES (?,?,?)', ('first','one',json.dumps(steps)))
+    item = ledger.history('one')[0]
+    assert item['details']['video_title'] == '原始视频标题'
+    assert item['details']['text'] == '这段解释很清楚'
+
+
+def test_share_note_keeps_shared_video_not_current_page(ledger):
+    grant = reserve(ledger, decision('share',text=''))
+    ledger.settle(grant['operation_id'], {'status':'confirmed','message_id':'card-1'})
+    obs = observation(current={'id':'different','title':'不能关联此视频'},conversation={'id':'owner-sec'})
+    reserve(ledger,decision('share_note',text='这只猫太可爱了'),obs)
+    detail = ledger.history('one')[0]['details']
+    assert detail['video_title'] == '猫咪'
+    assert detail['video_id'] == '1234567890123'
+    assert detail['text'] == '这只猫太可爱了'
+    assert detail['recipient'] == '主人'
+
+
+def test_untrusted_video_id_does_not_become_clickable_link(ledger):
+    grant=reserve(ledger,decision('like'))
+    ledger.db.execute("UPDATE douyin_operations SET details=? WHERE id=?", ('{"video_id":"javascript:alert(1)"}',grant['operation_id']))
+    assert ledger.history('one')[0]['details']['video_url'] == ''

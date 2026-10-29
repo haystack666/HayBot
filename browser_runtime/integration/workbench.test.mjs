@@ -188,7 +188,7 @@ test('formal workbench through Docker relay: login, gestures, privacy, Bot switc
         {op:'open',reason:'跳过超长视频',skipped:{title:'超长候选',reason:'超过 60 分钟，未打开观看'}},
         {op:'watch',reason:'尝试另一片段',seekFailed:{requested:200,actual:17}}],
       decision_errors:[{sequence:1,attempt:1,error:'seconds: Input should be greater than or equal to 3',response:'<img src=x onerror="window.unexpectedExecution=true">'}]
-    }]}}))
+    }],operations:[{id:'interaction-fixture',op:'comment',status:'confirmed',created:1793260055,receipt:'{}',details:{video_title:'猫咪在窗边睡觉',video_url:'https://www.douyin.com/video/1234567890123',text:'第一行\n<img src=x onerror="window.unexpectedExecution=true">',mention_owner:true}}]}}))
     await viewer.getByRole('tab',{name:/任务记录/}).click()
     await viewer.locator('.browser-record').filter({hasText:'二次元cos'}).getByRole('button',{name:'查看',exact:true}).click()
     assert.match(await viewer.locator('.browser-detail-body small').innerText(),/累计播放：2–17 秒.*未完整播放/)
@@ -199,6 +199,15 @@ test('formal workbench through Docker relay: login, gestures, privacy, Bot switc
     assert.match(await viewer.locator('.browser-decision-errors pre').innerText(),/<img src=x/)
     assert.equal(await viewer.evaluate(()=>window.unexpectedExecution),undefined)
     await viewer.getByRole('button',{name:'关闭任务详情',exact:true}).click()
+    await viewer.getByRole('tab',{name:/互动记录/}).click()
+    await viewer.getByText('猫咪在窗边睡觉',{exact:true}).waitFor()
+    assert.match(await viewer.locator('.browser-interaction-text').innerText(),/第一行/)
+    assert.match(await viewer.locator('.browser-interaction-text').innerText(),/<img src=x/)
+    assert.equal(await viewer.getByRole('link',{name:'打开视频 ↗',exact:true}).getAttribute('href'),'https://www.douyin.com/video/1234567890123')
+    assert.equal(await viewer.evaluate(()=>window.unexpectedExecution),undefined)
+    await viewer.setViewportSize({width:390,height:844})
+    assert.ok(await viewer.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'interaction content fits a phone')
+    await viewer.setViewportSize({width:1440,height:1100})
     await viewer.getByRole('tab',{name:'工作台',exact:true}).click()
     await viewer.evaluate(() => document.documentElement.classList.add('dark'))
     assert.equal(await viewer.getByLabel('网页地址').isEnabled(), true, 'dark theme retains control')

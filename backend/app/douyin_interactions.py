@@ -72,6 +72,8 @@ class InteractionLedger:
           CREATE TABLE IF NOT EXISTS douyin_operation_checks(id INTEGER PRIMARY KEY AUTOINCREMENT,
             operation_id TEXT NOT NULL, status TEXT NOT NULL, receipt TEXT NOT NULL, checked REAL NOT NULL);
         ''')
+        if 'details' not in {row[1] for row in db.execute('PRAGMA table_info(douyin_operations)')}:
+            db.execute("ALTER TABLE douyin_operations ADD COLUMN details TEXT NOT NULL DEFAULT '{}'")
         with db:
             db.execute("UPDATE douyin_operations SET status='unknown' WHERE status='pending'")
 
@@ -188,6 +190,16 @@ class InteractionLedger:
             raise HTTPException(422,'评论与私信回复需要纯文字正文')
         if op=='share_note' and (not decision.text.strip() and not decision.sticker):
             raise HTTPException(422,'分享附言需要文字或表情')
+        details = {}
+        if payload.get('video_id'):
+            details = {'video_id': payload['video_id'], 'video_title': str(current.get('title') or '')[:2000]}
+        if op == 'share_note':
+            shared = self.db.execute("SELECT payload,details FROM douyin_operations WHERE account=? AND task_id=? AND op='share' AND status='confirmed' ORDER BY created DESC LIMIT 1", (account,task['id'])).fetchone()
+            details = json.loads(shared['details'])
+            details['video_id'] = json.loads(shared['payload']).get('video_id','')
+        if op in ('share','share_note','reply_dm'):
+            peer = observation.get('owner' if op in ('share','share_note') else 'conversation') or {}
+            details['recipient'] = str(peer.get('nickname') or peer.get('handle') or '')[:160]
         with self.db:
             remaining=self.availability(account,task['id'],cfg)
             key={'comment':'comments_remaining','reply_comment':'replies_remaining','share':'shares_remaining'}.get(op)
@@ -199,8 +211,8 @@ class InteractionLedger:
             if duplicate:
                 raise HTTPException(409,'该目标已操作或结果待核对，禁止重复发送')
             identifier=uuid.uuid4().hex; now=time.time()
-            self.db.execute('INSERT INTO douyin_operations VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-                (identifier,account,task['bot_id'],task['id'],self.day(),op,target,inbound,int(exempt),'pending','{}',json.dumps(payload,ensure_ascii=False),now,now))
+            self.db.execute('INSERT INTO douyin_operations (id,account,bot_id,task_id,day,op,target,inbound,exempt,status,receipt,payload,created,updated,details) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                (identifier,account,task['bot_id'],task['id'],self.day(),op,target,inbound,int(exempt),'pending','{}',json.dumps(payload,ensure_ascii=False),now,now,json.dumps(details,ensure_ascii=False)))
         return {'operation_id':identifier,'account_id':account,**payload}
 
     def settle(self, identifier, result):
@@ -211,9 +223,46 @@ class InteractionLedger:
             self.db.execute("UPDATE douyin_operations SET status=?,receipt=?,updated=? WHERE id=? AND status='pending'",(status,json.dumps(result,ensure_ascii=False),time.time(),identifier))
 
     def history(self, bot_id):
-        return [dict(row) for row in self.db.execute('''SELECT id,op,target,status,receipt,created FROM douyin_operations
+        rows = self.db.execute("""SELECT id,op,target,status,receipt,created,payload,details,task_id FROM douyin_operations
             WHERE bot_id=? AND (status IN ('pending','unknown') OR id IN
-              (SELECT id FROM douyin_operations WHERE bot_id=? ORDER BY created DESC LIMIT 50)) ORDER BY created DESC''',(bot_id,bot_id))]
+              (SELECT id FROM douyin_operations WHERE bot_id=? ORDER BY created DESC LIMIT 50)) ORDER BY created DESC""",(bot_id,bot_id)).fetchall()
+        result, task_steps = [], {}
+        has_tasks = self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='browser_tasks'").fetchone()
+        for row in rows:
+            value = dict(row)
+            payload = json.loads(value.pop('payload'))
+            details = json.loads(value.pop('details'))
+            task_id = value.pop('task_id')
+            video_id = str(details.get('video_id') or payload.get('video_id') or '')
+            if value['op'] == 'share_note' and not video_id:
+                # Legacy notes point at a previously confirmed card, not at the
+                # video currently open when the message was sent.
+                for shared in self.db.execute("SELECT payload,receipt,details FROM douyin_operations WHERE bot_id=? AND task_id=? AND op='share'", (bot_id,task_id)):
+                    if json.loads(shared['receipt']).get('message_id') == payload.get('share_id'):
+                        video_id = str(json.loads(shared['payload']).get('video_id') or '')
+                        details = {**json.loads(shared['details']), **details}
+                        break
+            if not details.get('video_title') and video_id and has_tasks:
+                if task_id not in task_steps:
+                    task = self.db.execute('SELECT steps FROM browser_tasks WHERE id=? AND bot_id=?', (task_id,bot_id)).fetchone()
+                    task_steps[task_id] = json.loads(task['steps']) if task else []
+                for step in task_steps[task_id]:
+                    candidates = [step.get('current') or {}, *(step.get('items') or [])]
+                    match = next((c for c in candidates if str(c.get('id') or '') == video_id and c.get('title')), None)
+                    if match:
+                        details['video_title'] = str(match['title'])[:2000]
+                        break
+            value['details'] = {
+                'video_id': video_id,
+                'video_title': details.get('video_title') or '',
+                'video_url': 'https://www.douyin.com/video/' + video_id if re.fullmatch(r'[0-9]{5,30}', video_id) else '',
+                'text': payload.get('text') or '',
+                'sticker': payload.get('sticker') or '',
+                'mention_owner': bool(payload.get('mention_owner')),
+                'recipient': details.get('recipient') or '',
+            }
+            result.append(value)
+        return result
 
     def verification_grant(self, bot_id, identifier):
         row=self.db.execute('SELECT * FROM douyin_operations WHERE bot_id=? AND id=?',(bot_id,identifier)).fetchone()

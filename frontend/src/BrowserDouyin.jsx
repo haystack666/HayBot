@@ -64,7 +64,17 @@ export default function BrowserDouyin({ api, notify, children, onCheck }) {
     <section id="browser-tab-operations" role="tabpanel" aria-labelledby="browser-tab-button-operations" hidden={page!=='operations'}><div className="browser-record-toolbar">{[['all','全部'],['unknown','待核对'],['confirmed','已确认'],['failed','未成功']].map(([key,label])=><Button key={key} size="sm" variant={operationFilter===key?'secondary':'ghost'} onClick={()=>setOperationFilter(key)}>{label}</Button>)}</div>
     <div className="douyin-operation-list">{operations.filter(item=>operationFilter==='all'||item.status===operationFilter).map(item=>{
       let receipt={};try{receipt=JSON.parse(item.receipt||'{}')}catch{}
-      return <div key={item.id}><span>{({comment:'新评论',reply_comment:'评论回复',reply_dm:'私信回复',like:'点赞',share:'站内分享',share_note:'分享附言'})[item.op]}</span><span>{({confirmed:'已确认',failed:'未成功',unknown:'待核对',pending:'提交中'})[item.status]}</span><time>{new Date(item.created*1000).toLocaleString()}</time>{item.status==='unknown'&&['like','comment','reply_comment','share'].includes(item.op)&&<Button size="sm" variant="outline" disabled={busy||!!current} onClick={()=>verify(item.id)}>核对结果</Button>}{receipt.reason&&<small>{receipt.reason}</small>}</div>
+      const detail=item.details||{}, videoOperation=['like','comment','reply_comment','share','share_note'].includes(item.op)
+      const contentLabel=({comment:'评论正文',reply_comment:'回复正文',reply_dm:'私信正文',share_note:'分享附言'})[item.op]
+      return <article className="browser-interaction" key={item.id}>
+        <header><b>{({comment:'新评论',reply_comment:'评论回复',reply_dm:'私信回复',like:'点赞',share:'站内分享',share_note:'分享附言'})[item.op]||item.op}</b><span data-status={item.status}>{({confirmed:'已确认',failed:'未成功',unknown:'待核对',pending:'提交中'})[item.status]||item.status}</span><time>{new Date(item.created*1000).toLocaleString('zh-CN',{hour12:false})}</time></header>
+        {videoOperation&&<div className="browser-interaction-video"><strong>{detail.video_title||'历史记录未保存视频标题'}</strong>{detail.video_url ? <a href={detail.video_url} target="_blank" rel="noreferrer">打开视频 ↗</a> : <span>未保存可用的视频链接</span>}</div>}
+        <dl><div><dt>互动内容</dt><dd>{item.op==='like'?'点赞此视频':item.op==='share'?`分享视频卡片${detail.recipient?'给 '+detail.recipient:'给主人'}`:contentLabel||'互动'}</dd></div>
+          {contentLabel&&<div><dt>{contentLabel}</dt><dd className="browser-interaction-text">{detail.text||detail.sticker||'历史记录未保存正文'}{detail.mention_owner&&<span className="browser-interaction-mention"> · @主人</span>}</dd></div>}
+          {detail.recipient&&item.op!=='share'&&<div><dt>接收人</dt><dd>{detail.recipient}</dd></div>}
+        </dl>
+        <footer>{receipt.reason&&<span>{receipt.reason}</span>}{item.status==='unknown'&&['like','comment','reply_comment','share'].includes(item.op)&&<Button size="sm" variant="outline" disabled={busy||!!current} onClick={()=>verify(item.id)}>核对结果</Button>}</footer>
+      </article>
     })}</div>
       {!operations.length&&<div className="empty">暂无互动记录</div>}
     </section>
