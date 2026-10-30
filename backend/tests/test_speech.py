@@ -328,13 +328,16 @@ async def test_napcat_voice_delivery_uses_record_segment(tmp_path):
 
 @pytest.mark.asyncio
 async def test_voice_disabled_keeps_visible_caption_instead_of_discarding_it(tmp_path):
-    store,bot,text=make_bot(tmp_path)
+    store,bot,text=make_bot(tmp_path);c=store.load()
+    c.speech.tts.provider_id='a'*32;c.speech.tts.model='tts';c.speech.tts.enabled=True;c.speech.tts.voice_follow_trigger=True
+    store.save(c);bot.speech.speak=AsyncMock(return_value=b'should-not-send')
     incoming=event();incoming['d']['content']='今天下雨了';incoming['d']['attachments']=[{'content_type':'audio/silk','url':'https://grouptalk.c2c.qq.com/a'}]
     await bot.handle(incoming)
     assert bot.generate.await_count==1
     assert '今天下雨了' in bot.generate.await_args.args[1][-1]['content']
     assert '无法读取' in bot.generate.await_args.args[1][-1]['content']
     assert bot.api.await_args_list[0].kwargs['json']['content']!='这条语音我暂时听不了，发文字给我吧。'
+    bot.speech.speak.assert_not_awaited()
     await bot.client.aclose();store.close()
 
 

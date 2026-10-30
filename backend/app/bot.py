@@ -473,9 +473,11 @@ class Bot:
                 self.store.log('info', f'合并 {len(batch["ids"])} 条用户消息，开始回复', category='message', event='message.batch_started')
             self.store.log('info', '开始处理群消息' if group else '开始处理单聊消息', category='message', event='message.received')
             images_requested = bool(attachments or audios)
+            audio_transcribed=False
             if audios:
                 try:
                     transcribed=await self.speech.listen(audios,c,group=group)
+                    audio_transcribed=True
                     context_text=(context_text+'\n' if context_text else '')+'[对方语音转写]\n'+transcribed
                     text=(text+'\n' if text else '')+transcribed
                     if not batch or self.inbox.live(batch):
@@ -489,7 +491,7 @@ class Bot:
                     if c.speech.stt.failure_policy=='ask_for_text' or not text and not attachments:raise
                     context_text+='\n[对方还发送了语音，当前无法读取；只回应可见内容，不猜测音频内容。]'
                     self.store.log('warn','本轮语音未读取，保留文字或图片继续回复',category='message',event='speech.caption_fallback')
-            voice_decision=decide_voice(c.speech.tts,text,has_audio=bool(audios),group=group,
+            voice_decision=decide_voice(c.speech.tts,text,has_audio=audio_transcribed,group=group,
                 event_key=f'{c.account_id}:{sid}:{batch["id"] if batch else d["id"]}',
                 last_auto_voice=self.store.last_auto_voice(c.account_id,sid),now=time.time())
             voice_requested=voice_decision.enabled
