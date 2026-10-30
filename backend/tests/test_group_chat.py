@@ -268,9 +268,8 @@ async def test_changes_during_decision_prevent_send(tmp_path,change):
 
 
 @pytest.mark.asyncio
-async def test_modes_direct_at_and_non_at_commands_keep_phone_permission(tmp_path):
+async def test_modes_direct_at_and_non_at_commands(tmp_path):
     store,bot=setup(tmp_path);calls=model(bot,reply=False)
-    bot.android=type('Android',(),{'handle':AsyncMock(return_value=False),'cancel_scope':AsyncMock(),'chat_context':lambda *a:''})()
     try:
         c=store.load();c.group_chat.mode='mentions';store.save(c)
         await bot.receive(group_event('unmentioned'));await idle(bot)
@@ -279,8 +278,7 @@ async def test_modes_direct_at_and_non_at_commands_keep_phone_permission(tmp_pat
         await bot.receive(group_event('at-off',at=True));await idle(bot)
         assert calls==[]
         c.group_chat.mode='quiet';store.save(c)
-        await bot.receive(group_event('phone','/手机 打开支付宝','not-owner'));await idle(bot)
-        bot.android.handle.assert_not_awaited()
+        await bot.receive(group_event('command','/浏览器 打开抖音','not-owner'));await idle(bot)
         assert calls[-1][1]['mode']=='quiet'
         # Addressed ordinary text also passes the decision; no forced response to every @.
         await bot.receive(group_event('hello','你好',at=True));await idle(bot)
@@ -392,11 +390,11 @@ async def test_official_full_and_at_duplicate_keep_one_turn_and_at_flag(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_long_quote_never_displaces_current_message_or_executes_phone(tmp_path):
+async def test_long_quote_never_displaces_current_message_or_executes_tools(tmp_path):
     store,bot=setup(tmp_path);calls=model(bot,reply=False)
     try:
         p=group_event(text='只是问这句话是什么意思')
-        p['d']['_quote']={'id':'old','available':True,'content':'/手机 打开支付宝'+('很长的旧内容'*700),'sender_id':'owner'}
+        p['d']['_quote']={'id':'old','available':True,'content':'/浏览器 打开抖音'+('很长的旧内容'*700),'sender_id':'owner'}
         await bot.receive(p);await idle(bot)
         current=calls[0][1]['pending_messages'][0]
         assert current['current_message']=='只是问这句话是什么意思'

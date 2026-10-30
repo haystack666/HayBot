@@ -7,8 +7,6 @@ import { Input } from '@/components/ui/input'
 const entries = [
 ['工作概览','overview','状态 用量'],['会话记录','chats','聊天 私聊 群聊 引用'],
 ['浏览器工作台','browser','Chrome 环境检测 实时画面 放大 接管 主人登录 拖动 滑动'],
-['手机工作台','android','安卓 实时画面 接管 任务'],['任务记录','android?view=tasks','手机 步骤 结果 送达 诊断'],
-['初始化与应用','android?view=apps','安装 手机初始化记录 Google Play'],['手机任务设置','android?view=settings','角色兴趣 主人偏好 筛选 权限 视觉模型'],
 ['身份与私聊','rules','回复策略 系统提示词'],['Owner 关系','rules?view=owner','主人 群成员身份 公开关系'],
 ['群聊参与','rules?view=group','群聊人格 自主回复 各群设置 判断记录'],['公开评论风格','rules?view=public','公开评论人格'],
 ['回复设置','rules?view=advanced','防抖 分段 冷却 上下文'],['角色记忆','memory','长期记忆 来源 约定'],

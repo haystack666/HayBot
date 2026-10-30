@@ -165,7 +165,6 @@ class BotManager:
     def attach(self, bot_id):
         runtime = BotRuntime(self.registry.directory(bot_id), self.inference_lock, self.providers, self.memes)
         runtime.id = bot_id
-        runtime.bot.android = getattr(self, 'android_qq', None)
         runtime.bot.browser = getattr(self, 'browser_qq', None)
         self.runtimes[bot_id] = runtime
         runtime.store.log('info', '机器人管理服务已就绪')
@@ -234,9 +233,6 @@ class BotManager:
             browser = getattr(self, 'browser_service', None)
             if browser:
                 await browser.stop_bot(bot_id)
-            android = getattr(self, 'android_service', None)
-            if android and not await android.cancel_bot(bot_id):
-                raise HTTPException(409, '安卓任务授权撤销未确认，请先在安卓页面人工接管，再归档')
             # Disable persisted auto-recovery before cancelling any in-flight work.
             runtime.store.set_enabled(False)
             self.registry.archive(bot_id, True)
@@ -289,12 +285,10 @@ class BotManager:
             store = runtime.store if runtime else Store(self.registry.directory(profile['id']))
             try:
                 config = store.load()
-                android = getattr(self, 'android_service', None)
-                android_reference = android and profile['id'] in android.references(provider_id)
-                if android_reference or provider_id in (config.ollama.provider_id, config.memory.embedding.provider_id, config.memory.rerank.provider_id,
+                if provider_id in (config.ollama.provider_id, config.memory.embedding.provider_id, config.memory.rerank.provider_id,
                                    config.memes.embedding.provider_id,config.memes.rerank.provider_id):
                     references.append({**profile, 'state': runtime.bot.state if runtime else 'stopped',
-                                       'busy': bool(android and android.busy(profile['id']) or runtime and (runtime.proactive.busy or runtime.bot.jobs or runtime.bot.schedule.lock.locked() or runtime.bot.diary.lock.locked()
+                                       'busy': bool(runtime and (runtime.proactive.busy or runtime.bot.jobs or runtime.bot.schedule.lock.locked() or runtime.bot.diary.lock.locked()
                                                                 or getattr(runtime.bot, 'memory', None) and runtime.bot.memory.busy
                                                                 or runtime.bot.memes.lock.locked()))})
             finally:

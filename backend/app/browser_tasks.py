@@ -14,8 +14,8 @@ from pydantic import Field, ValidationError, model_validator
 from .config import StrictModel
 from .douyin_schedule import AutoBrowseConfig, DouyinScheduler
 from .douyin_interactions import InteractionConfig, InteractionLedger, WRITE_OPS
-from .android_decisions import public_body, unique_object
-from .android_intent import interest_scope, explicit_links
+from .model_output import public_body, unique_object
+from .browsing_intent import interest_scope, explicit_links
 
 
 class ViewingConfig(StrictModel):
@@ -279,14 +279,6 @@ class BrowserTasks:
         row = self.db.execute('SELECT config FROM browser_config WHERE bot_id=?', (bot_id,)).fetchone()
         if row:
             return BrowsingConfig.model_validate_json(row['config'])
-        # Preserve explicit interests from the Android version, never derive them
-        # from a persona, and require a fresh opt-in for browser QQ execution.
-        android = getattr(self.manager, 'android_service', None)
-        if android:
-            old = android.config(bot_id)
-            return BrowsingConfig(qq_owner_id=old.qq_owner_id, owner_interests=old.companion.owner_interests,
-                character_interests=old.companion.character_interests, content_constraints=old.companion.content_constraints,
-                buffering_wait_seconds=old.companion.buffering_wait_seconds)
         return BrowsingConfig()
 
     def bound(self, bot_id):

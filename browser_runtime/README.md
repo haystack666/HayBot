@@ -1,6 +1,6 @@
 # 浏览器运行时原型
 
-独立宿主服务，使用 Google Chrome 无头运行、持久化资料、实时画面和人工接管。固定使用无头模式（`headless: true`），默认静音，无原生窗口或 Dock 入口。已接入 HayBot 后台的登录、Bot 工作台和 HTTP/WebSocket 中继；已接入抖音自主浏览循环与 Owner 私聊 QQ 指令。安卓工作台暂时保留。
+独立宿主服务，使用 Google Chrome 无头运行、持久化资料、实时画面和人工接管。固定使用无头模式（`headless: true`），默认静音，无原生窗口或 Dock 入口。已接入 HayBot 后台的登录、Bot 工作台和 HTTP/WebSocket 中继；已接入抖音自主浏览循环与 Owner 私聊 QQ 指令。
 
 当前实现和实机验收范围为 **macOS arm64**。macOS Intel 有架构检查分支，未实测；Windows/Linux 只有安装路径发现，身份和启动流程尚未实现，会阻断启动。
 

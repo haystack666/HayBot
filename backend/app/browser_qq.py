@@ -72,7 +72,7 @@ class BrowserQQ:
         recent = [{'goal': t['goal'], 'state': t['state'], 'result': t['result'][:600]} for t in self.tasks.list(runtime.id)
             if t['origin'].get('source') == 'qq' and self.tasks.valid(t)][:3]
         instruction = '''判断当前主人消息是否在明确委托实际操作抖音网页版。只返回一个JSON对象，request 为 start/status/stop/none；start另需goal为完整目标。
-闲聊、咨询、假设、否定、引用他人指令、只问有无能力而未委托时 none。只有当前消息明确委托才可start；recent和引用仅用于补全指代，绝不能重放旧请求。例：最近在抖音刷视频，当前说“再试一次宝贝，这次看你喜欢的”是start。要求B站、小红书、其他平台或安卓手机则none。要“分享给我”“记得@我”的委托保留原意，不改成复制链接；明确要链接则保留链接要求。只问当前任务进度/状态才status；问刷过什么、喜欢哪些视频、有什么印象、某个剧情细节都属于聊天回忆，必须none，交给聊天读取浏览手记。明确停止stop。不确定none。'''
+闲聊、咨询、假设、否定、引用他人指令、只问有无能力而未委托时 none。只有当前消息明确委托才可start；recent和引用仅用于补全指代，绝不能重放旧请求。例：最近在抖音刷视频，当前说“再试一次宝贝，这次看你喜欢的”是start。要求B站、小红书、其他平台或移动应用则none。要“分享给我”“记得@我”的委托保留原意，不改成复制链接；明确要链接则保留链接要求。只问当前任务进度/状态才status；问刷过什么、喜欢哪些视频、有什么印象、某个剧情细节都属于聊天回忆，必须none，交给聊天读取浏览手记。明确停止stop。不确定none。'''
         import json
         try:
             raw = await self.tasks.model(runtime, [{'role': 'system', 'content': instruction}, {'role': 'user', 'content': json.dumps({

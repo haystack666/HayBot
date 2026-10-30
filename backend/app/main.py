@@ -31,18 +31,12 @@ def create_app(data_dir=None, static_dir=None):
         from .browser import BrowserService
         app.state.browser = BrowserService()
         app.state.manager.browser_service = app.state.browser
-        from .android import AndroidTasks
-        app.state.android = AndroidTasks(app.state.manager, app.state.manager.registry.root)
-        app.state.manager.android_service = app.state.android
         from .browser_tasks import BrowserTasks
         from .browser_qq import BrowserQQ
         app.state.browser_tasks = BrowserTasks(app.state.manager, app.state.browser, app.state.manager.registry.root)
         app.state.manager.browser_tasks = app.state.browser_tasks
         app.state.manager.browser_qq = BrowserQQ(app.state.browser_tasks)
-        from .android_qq import AndroidQQ
-        app.state.manager.android_qq = AndroidQQ(app.state.android)
         for runtime in app.state.manager.runtimes.values():
-            runtime.bot.android = app.state.manager.android_qq
             runtime.bot.browser = app.state.manager.browser_qq
         app.state.browser_tasks.start()
         app.state.qq_connect = QQConnect(app.state.manager)
@@ -54,7 +48,6 @@ def create_app(data_dir=None, static_dir=None):
         finally:
             await app.state.browser_tasks.close()
             await app.state.browser.close()
-            await app.state.android.close()
             await app.state.qq_connect.close()
             await app.state.manager.close()
 
@@ -550,12 +543,8 @@ def create_app(data_dir=None, static_dir=None):
     from .diary_routes import register_diary_routes
     register_diary_routes(app,scoped_runtime)
 
-    from .android_routes import register_android_routes
-    register_android_routes(app, scoped_runtime)
     from .browser_routes import register_browser_routes
     register_browser_routes(app, scoped_runtime)
-    from .android_live import register_android_live
-    register_android_live(app)
 
     root = Path(static_dir or os.getenv('STATIC_DIR', '/app/static'))
     if (root / 'assets').exists():
@@ -581,7 +570,6 @@ def create_app(data_dir=None, static_dir=None):
     @app.get('/schedule')
     @app.get('/memory')
     @app.get('/memes')
-    @app.get('/android')
     @app.get('/browser')
     @app.get('/qzone')
     async def index():

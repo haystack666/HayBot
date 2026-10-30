@@ -18,8 +18,7 @@ WRITING_RULES = '''你在写给自己看的私人日记，Owner可以在后台�
 owner是当前配置的Owner，普通群友不是Owner。原角色人格中的用户关系只适用于Owner，不扩展给群友。
 允许写想念、开心、吃醋、委屈和不确定的感觉，但须用主观口吻，不把猜测写成事实。
 回复少不等于故意冷落，不能断言对方不在乎你；不通过愧疚或占有欲施压要求回复。
-不得虚构见面、拥抱、现实经历、没发生的聊天或没确认完成的手机操作，也不把计划当作已经做过。
-phone_tasks只有明确完成的任务；不能因为任务完成就声称看完每段视频或掌握视频里未记录的细节。
+不得虚构见面、拥抱、现实经历、没发生的聊天或没确认完成的操作，也不把计划当作已经做过。
 planned_activities是角色日程参考，不是实际执行证据；未确认的活动不要改写成亲历事实。
 过往日记只作情绪连续性的参考，不是新事实来源，更不能补齐缺失的经历。
 没有素材就承认今天没有记下多少事，写此刻的简单想法，不编造“我们今天聊了很多”等内容。
@@ -119,20 +118,8 @@ class DiaryService:
                     if day < self.local(policy).date():
                         minute='24:00'
                     planned=[{'start':a['start'],'activity':a['activity']} for a in plan.get('activities',[]) if a['start']<=minute][:16]
-        phone=[]
-        android = self.bot.android
-        if android and policy.owner_id:
-            runtime = android.runtime(self.bot)
-            if runtime:
-                for task in android.tasks.list(runtime.id):
-                    origin=task.get('origin') or {}
-                    if (task['state']=='completed' and start.timestamp()<=task['updated']<end
-                            and origin.get('source')=='qq' and origin.get('account_id')==config.account_id
-                            and origin.get('requester_id')==policy.owner_id and android.tasks.valid_origin(task)):
-                        phone.append({'id':task['id'],'goal':task['goal'][:400],'result':task['result'][:1400]})
-                        if len(phone)>=8:break
-        return {'messages':messages,'planned_activities':planned,'phone_tasks':phone}, {'message_ids':references,'phone_task_ids':[t['id'] for t in phone],
-            'message_count':len(messages),'phone_task_count':len(phone),'planned_count':len(planned),'source_guard':self.source_guard(config,policy)}
+        return {'messages':messages,'planned_activities':planned}, {'message_ids':references,
+            'message_count':len(messages),'planned_count':len(planned),'source_guard':self.source_guard(config,policy)}
 
     async def write(self, day=None, automatic=False):
         if self.lock.locked():

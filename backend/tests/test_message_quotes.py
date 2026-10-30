@@ -364,25 +364,3 @@ async def test_existing_archive_schema_is_migrated_without_losing_messages(tmp_p
         assert row['content'] == '保留的历史' and row['quote_context'] == ''
     finally:
         await close(store, bot)
-
-
-@pytest.mark.asyncio
-async def test_phone_intent_keeps_current_message_when_quote_is_long(tmp_path):
-    from test_android_qq import setup_bridge, payload
-    manager, tasks, bridge, bot = await setup_bridge(tmp_path)
-    try:
-        current = '我只是问这句话是什么意思'
-        quoted = '/手机 打开哔哩哔哩。' + '这是之前的聊天内容。' * 400
-        quoted = quoted[:4000]
-        packet = payload(current)
-        packet['d']['_quote'] = {'id': 'old', 'available': True, 'content': quoted}
-        bot.generate = AsyncMock(side_effect=[{'message': {'content': '{"request":"none"}'}},
-                                             {'message': {'content': '是在说之前那个手机任务。'}}])
-        await bot.handle(packet)
-        classifier_input = json.loads(bot.generate.await_args_list[0].args[1][-1]['content'])
-        assert classifier_input['current_message'] == current
-        assert quoted in classifier_input['quoted_context']
-        assert tasks.list('default') == []
-    finally:
-        await tasks.close()
-        await manager.close()

@@ -20,18 +20,15 @@ def client(tmp_path, monkeypatch):
         yield c
 
 
-def test_config_scoped_strict_and_explicit_interest_migration(client):
+def test_config_scoped_strict_and_explicit_interests(client):
     app = client.app
-    android = app.state.android.config('default')
-    android.companion.character_interests = '猫咪，手工积木'
-    android.companion.owner_interests = '科技资讯'
-    app.state.android.save_config('default', android)
     cfg = client.get('/api/bots/default/browser/douyin/config').json()
-    assert cfg['config']['character_interests'] == '猫咪，手工积木'
+    assert cfg['config']['character_interests'] == ''
     assert not cfg['config']['enabled'] and not cfg['qq_account_bound']
-    config = {**cfg['config'], 'enabled': True, 'qq_enabled': True, 'qq_owner_id': 'owner123'}
+    config = {**cfg['config'], 'enabled': True, 'qq_enabled': True, 'qq_owner_id': 'owner123', 'character_interests': '猫咪，手工积木', 'owner_interests': '科技资讯'}
     assert client.put('/api/bots/default/browser/douyin/config', json=config).status_code == 200
-    assert client.get('/api/bots/default/browser/douyin/config').json()['qq_account_bound']
+    saved = client.get('/api/bots/default/browser/douyin/config').json()
+    assert saved['qq_account_bound'] and saved['config']['character_interests'] == '猫咪，手工积木'
     other = client.post('/api/bots', json={'name': 'other'}).json()['id']
     assert not client.get(f'/api/bots/{other}/browser/douyin/config').json()['config']['enabled']
     assert client.put('/api/bots/default/browser/douyin/config', json={**config, 'max_steps': 5000}).status_code == 422
@@ -563,3 +560,14 @@ def test_repeated_invalid_position_is_bounded_and_retains_reason(client,monkeypa
     task=run_task(client,tasks,'看抖音')
     assert task['state']=='blocked' and '3 次' in task['result']
     assert len(task['steps'])==3 and host.token is None
+
+
+def test_retired_device_services_and_endpoints_are_absent(client):
+    assert not hasattr(client.app.state,'android')
+    assert not hasattr(client.app.state.manager,'android_service')
+    bot=client.app.state.manager.runtimes['default'].bot
+    assert not hasattr(bot,'android')
+    for path in ('/android/config','/android/devices','/android/tasks'):
+        assert client.get('/api/bots/default'+path).status_code==404
+    assert not bot.is_command('/手机 打开浏览器')
+    assert bot.is_command('/浏览器 打开抖音')

@@ -206,27 +206,17 @@ async def test_diary_context_is_supplied_to_owner_chat_but_not_group_or_other_us
 
 
 @pytest.mark.asyncio
-async def test_only_confirmed_phone_tasks_and_reset_floor_are_materials(tmp_path):
+async def test_reset_floor_excludes_old_messages_from_diary_materials(tmp_path):
     s,b,d,_=setup(tmp_path);record(s,'old','reset-secret')
     scope=s.db.execute('SELECT id FROM user_scopes').fetchone()[0]
     with s.db:s.db.execute('UPDATE user_scopes SET source_floor=1,epoch=1 WHERE id=?',(scope,))
     record(s,'new','保留的消息')
-    class Tasks:
-        def valid_origin(self,t):return t['id']!='revoked'
-        def list(self,bid):
-            base={'origin':{'source':'qq','account_id':s.load().account_id,'requester_id':'owner'},'state':'completed','updated':NOW-100,'goal':'浏览视频','result':'核验完成'}
-            return [dict(base,id='ok'),dict(base,id='failed',state='failed'),dict(base,id='revoked'),
-                    dict(base,id='other',origin={**base['origin'],'requester_id':'other'}),dict(base,id='tomorrow',updated=NOW+100)]
-    class Android:
-        tasks=Tasks()
-        def runtime(self,bot):return type('Runtime',(),{'id':'this-bot'})()
-    b.android=Android()
     try:
         materials,evidence=d.collect(s.load(),d.data.config(s.load().account_id)[0],date(2026,10,28))
         assert 'reset-secret' not in str(materials)
-        assert [t['id'] for t in materials['phone_tasks']]==['ok']
-        assert evidence['phone_task_ids']==['ok']
-    finally:b.android=None;await close(s,b)
+        assert '保留的消息' in str(materials)
+        assert evidence['message_count']==1
+    finally:await close(s,b)
 
 
 def test_diary_api_authenticated_and_isolated(client):

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ArrowDownLeft, ArrowUpRight, Bot, ChevronRight, CircleHelp, Cpu, FileText, LayoutDashboard, LoaderCircle, LogOut, Menu, PanelLeftClose, PanelLeftOpen, Play, Radio, RefreshCw, Save, ShieldCheck, SlidersHorizontal, Square, X, Bell, MessageSquare, CalendarDays, Brain, Image, Globe2, Smartphone } from 'lucide-react'
+import { ArrowDownLeft, ArrowUpRight, Bot, ChevronRight, CircleHelp, Cpu, FileText, LayoutDashboard, LoaderCircle, LogOut, Menu, PanelLeftClose, PanelLeftOpen, Play, Radio, RefreshCw, Save, ShieldCheck, SlidersHorizontal, Square, X, Bell, MessageSquare, CalendarDays, Brain, Image, Globe2 } from 'lucide-react'
 import { Dialog } from 'radix-ui'
 import { NavLink, useNavigate, useParams, useLocation } from 'react-router-dom'
 import ProactivePage from './ProactivePage'
@@ -13,7 +13,6 @@ import MemoryPage from './MemoryPage'
 import MemesPage from './MemesPage'
 import QzonePage from './QzonePage'
 import LogsPage from './LogsPage'
-import AndroidPage from './AndroidPage'
 import BrowserPage from './BrowserPage'
 import ThemeSelector from './ThemeSelector'
 import BotNavigation from './components/BotNavigation'
@@ -39,7 +38,6 @@ export const pages = [
   { id: 'proactive', title: '主动互动', subtitle: '设置定时问候和主动搭话策略。', icon: Bell },
   { id: 'chats', title: '会话记录', subtitle: '查看当前 Bot 的会话记录，支持列表与气泡视图。', icon: MessageSquare },
   { id: 'browser', title: '浏览器工作台', icon: Globe2 },
-  { id: 'android', title: '手机工作台', subtitle: '管理独立手机、查看画面并执行安卓操作任务。', icon: Smartphone },
   { id: 'logs', title: '运行日志', subtitle: '筛选运行事件，查看模型耗时、异常原因与消息处理链路。', icon: FileText },
 ]
 const states = { stopped: '已停止', connecting: '连接中', connected: '运行中', reconnecting: '重新连接中' }
@@ -74,7 +72,7 @@ function Overview({ status, config, ollamaState, navigate, providers }) {
     { label: 'Token 总用量', value: status.stats.total_tokens ?? 0, note: '输入 + 输出 Token', icon: FileText },
   ]
   return <div className="page-stack"><div className="metrics">{metrics.map(({ label, value, note, icon: Icon }) => <Card className="metric" key={label}><div className="metric-label"><span>{label}</span><Icon size={16} /></div><strong className="metric-value">{typeof value === 'number' ? value.toLocaleString('zh-CN') : value}</strong><p className="metric-note">{note}</p></Card>)}</div>
-    <Panel title="常用入口" subtitle="查看对话、处理手机任务或翻阅角色生活。"><div className="overview-shortcuts">{[['chats','查看会话','最近私聊与群聊'],['android','手机工作台','任务、接管与执行结果'],['diary','翻阅日记','已保存正文与写作习惯'],['rules?view=group','群聊参与','公开人格与各群设置']].map(([path,title,detail])=><button key={path} onClick={()=>navigate(path)}><b>{title}<ChevronRight size={14}/></b><small>{detail}</small></button>)}</div></Panel>
+    <Panel title="常用入口" subtitle="查看对话、管理浏览任务或翻阅角色生活。"><div className="overview-shortcuts">{[['chats','查看会话','最近私聊与群聊'],['browser','浏览器工作台','浏览任务、接管与执行结果'],['diary','翻阅日记','已保存正文与写作习惯'],['rules?view=group','群聊参与','公开人格与各群设置']].map(([path,title,detail])=><button key={path} onClick={()=>navigate(path)}><b>{title}<ChevronRight size={14}/></b><small>{detail}</small></button>)}</div></Panel>
     <div className="two-column"><Panel title="服务连接" subtitle="QQ 官方接口与所选模型服务">
       <div className="connection"><Bot size={22} /><div className="connection-info"><strong>{config.transport==='napcat'?'外部 NapCat':'QQ 官方机器人'}</strong><small>{config.transport==='napcat'?(config.napcat.self_id?`QQ · ${config.napcat.self_id}`:'尚未配置外部连接'):(config.qq.app_id?`AppID · ${config.qq.app_id}`:'尚未填写机器人凭证')}</small></div><Badge variant="secondary">{(config.transport==='napcat'?config.napcat.self_id&&config.napcat.ws_url:config.qq.secret_set) ? status.state === 'connected' ? '已连接' : '已配置' : '待配置'}</Badge><Button variant="ghost" size="icon-sm" onClick={() => navigate('qq')} aria-label="配置 QQ"><ChevronRight size={15} /></Button></div>
       <div className="connection"><Cpu size={22} /><div className="connection-info"><strong>{providers.find(item => item.id === config.ollama.provider_id)?.name || '模型供应商'}</strong><small>{config.ollama.model || '尚未选择模型'}</small><small>{providers.find(item => item.id === config.ollama.provider_id)?.base_url || config.ollama.url}</small></div><Badge variant="secondary">{ollamaState === 'online' ? '可访问' : ollamaState === 'offline' ? '不可访问' : '待验证'}</Badge><Button variant="ghost" size="icon-sm" onClick={() => navigate('providers')} aria-label="配置模型供应商"><ChevronRight size={15} /></Button></div>
@@ -179,7 +177,6 @@ export default function App({ page }) {
     {page === 'schedule' && <SchedulePage config={config.schedule} update={(key, value) => update('schedule', key, value)} {...{active, busy, dirty, api, notify}} model={config.ollama.model} />}
     {page === 'memory' && <MemoryPage config={config.memory} update={(key, value) => update('memory', key, value)} {...{active, busy, dirty, api, notify}} />}
     {page === 'memes' && <MemesPage {...{api, providers, notify}} memory={config.memory} onSaved={memes => { setConfig(c => ({ ...c, memes })); setSavedConfig(c => ({ ...c, memes })) }} />}
-    {page === 'android' && <AndroidPage key={botId} {...{api, notify, providers, botId}} />}
     {page === 'browser' && <BrowserPage key={botId} {...{api, notify, botId}} />}
     {page === 'diary' && <DiaryPage key={botId} {...{api, notify}} />}
     {page === 'qzone' && <QzonePage key={botId} {...{api,notify,dirty}} />}

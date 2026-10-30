@@ -25,7 +25,6 @@ from . import group_identity
 
 class Bot:
     def __init__(self, store, client=None, inference_lock=None, providers=None, memes=None):
-        self.android = None
         self.browser = None
         self.store = store
         self.providers = providers
@@ -206,8 +205,6 @@ class Bot:
         self.state = 'stopped'
         if self.browser:
             await self.browser.cancel_scope(self)
-        if self.android:
-            await self.android.cancel_scope(self)
         if self.task:
             self.task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -351,9 +348,8 @@ class Bot:
         return conversation_text(data)
 
     def is_command(self, text):
-        from .android_qq import AndroidQQ
         from .browser_qq import BrowserQQ
-        return (BrowserQQ.command(text) is not None or AndroidQQ.command(text) is not None or self.reset.action(text) is not None or text in ('/查看日程', '/重置日程', '/查看记忆')
+        return (BrowserQQ.command(text) is not None or self.reset.action(text) is not None or text in ('/查看日程', '/重置日程', '/查看记忆')
                 or text.startswith('/记住') or text.startswith('/忘记'))
 
     async def receive(self, payload):
@@ -463,8 +459,6 @@ class Bot:
                 return
             if group_turn is None and self.browser and await self.browser.handle(self,text,c,d,group,target,user,sid,incoming['id'] if incoming else 0,batch,key):
                 return True
-            if group_turn is None and self.android and (not self.browser or not self.browser.browser_mode(self) or text.startswith('/手机')) and await self.android.handle(self,text,c,d,group,target,user,sid,incoming['id'] if incoming else 0,batch,key):
-                return True
             if key in self.pending or (batch is None and group_turn is None and time.time() - self.last.get(key, 0) < c.rules.cooldown):
                 return
             if batch is None and group_turn is None and not self.store.claim(f'{target}:{d["id"]}'):
@@ -510,7 +504,7 @@ class Bot:
             qzone = getattr(self, 'qzone', None)
             qzone_context = qzone.chat_context(sid) if qzone and not group_turn else ''
             diary_context = self.diary.chat_context(user,group)
-            android_context = self.browser.chat_context(self,user,group) if self.browser and self.browser.browser_mode(self) else self.android.chat_context(self,user,group) if self.android else ''
+            browser_context = self.browser.chat_context(self,user,group) if self.browser and self.browser.browser_mode(self) else ''
             browser_experience = self.browser.experience_context(self,user,group,context_text) if self.browser else ''
             conversation_context = conversation_instruction(self.store, c, d, group, owner, incoming['id'] if incoming else 0, batch, bot=self)
             if group:
@@ -522,10 +516,10 @@ class Bot:
             if group_turn:
                 persona += ('\n[用户填写的公开兴趣]\n' + c.group_chat.interests +
                            '\n你正在自然参与群聊。根据本群公开背景回应本轮选中的消息，简洁自然，有具体内容再开口。'
-                           '不得引入私聊、手机任务或私人日程；不能声称实际操作了手机。不要朗读身份元数据。')
+                           '不得引入私聊、私人任务或私人日程。不要朗读身份元数据。')
                 # Include the complete public burst, even when the selected speaker spoke first.
                 conversation_context += '\n[本轮群聊公开背景]\n' + json.dumps(self.group_chat.public_messages(c,target,group_turn['through_id'],group_turn['ids']),ensure_ascii=False)
-            messages = [{'role': 'system', 'content': persona + android_context + browser_experience + memory_context + schedule_context + qzone_context + diary_context + dialogue_instruction + meme_instruction + conversation_context + (IMAGE_CHAT_INSTRUCTION if attachments or re.search(r'\[(?:QQ表情|表情包):[^\]\n]{0,120}\]',context_text) else '')}, *old, user_message]
+            messages = [{'role': 'system', 'content': persona + browser_context + browser_experience + memory_context + schedule_context + qzone_context + diary_context + dialogue_instruction + meme_instruction + conversation_context + (IMAGE_CHAT_INSTRUCTION if attachments or re.search(r'\[(?:QQ表情|表情包):[^\]\n]{0,120}\]',context_text) else '')}, *old, user_message]
             try:
                 answer = await self.generate(c.ollama, messages, max(2048, c.ollama.max_tokens) if dialogue_instruction or meme_instruction else c.ollama.max_tokens, thinking=self.provider(c.ollama).chat_thinking)
             except (ValueError, httpx.HTTPError):
