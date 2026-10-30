@@ -165,7 +165,7 @@ export class DouyinAutomation {
         run.response=response=>{try{this.social.ingestResponse(run,response)}catch{}}
         run.page.on('response',run.response)
       }
-      if(!['observe','conversation','inbox','reply_dm'].includes(input.op))throw new RuntimeError('invalid_action','私信通道不支持此操作',400)
+      if(!['observe','conversation','inbox','reply_dm','message_image'].includes(input.op))throw new RuntimeError('invalid_action','私信通道不支持此操作',400)
       if(input.op!=='observe'&&input.generation!==run.revision)throw new RuntimeError('stale_observation','私信会话已变化')
       const read=async()=>{
         this.guard(session,run)
@@ -177,6 +177,7 @@ export class DouyinAutomation {
         return {...social,generation:run.revision,version:monitor.version,channel:'dm'}
       }
       if(input.op==='observe')return read()
+      if(input.op==='message_image'){const before=await read();if(before.blocked)return before;return this.social.messageImage(session,run,input,before)}
       let result
       if(input.op==='reply_dm'){
         const before=await read();if(before.blocked)return before

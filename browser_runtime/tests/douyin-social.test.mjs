@@ -16,3 +16,15 @@ test('profile identity and inbound comment parsing retain stable fields without 
  assert.equal(c[0].parent_id,'parent');assert.doesNotMatch(JSON.stringify(c),/secret/)
  assert.deepEqual(commentItems({comments:[{text:'没有稳定身份不能操作'}]}),[])
 })
+
+test('sticker downloads restrict redirects, response types and streamed size',async()=>{
+ const {downloadSticker}=await import('../src/douyin-social.mjs')
+ const image=Buffer.from('image-bytes')
+ const good=async()=>new Response(image,{headers:{'content-type':'image/png'}})
+ assert.deepEqual(await downloadSticker('https://p3.douyinpic.com/sticker.png',good),image)
+ await assert.rejects(downloadSticker('http://p3.douyinpic.com/x',good))
+ await assert.rejects(downloadSticker('https://douyinpic.com.attacker.invalid/x',good))
+ await assert.rejects(downloadSticker('https://p3.douyinpic.com/x',async()=>new Response('',{status:302,headers:{location:'http://127.0.0.1/private'}})))
+ await assert.rejects(downloadSticker('https://p3.douyinpic.com/x',async()=>new Response('html',{headers:{'content-type':'text/html'}})))
+ await assert.rejects(downloadSticker('https://p3.douyinpic.com/x',async()=>new Response(new Uint8Array(5*1024*1024+1),{headers:{'content-type':'image/png'}})))
+})

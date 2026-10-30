@@ -296,3 +296,25 @@ test('native emoji and store stickers retain content without leaking asset URLs'
   assert.doesNotMatch(JSON.stringify(view),/private-asset|secret/)
  }finally{await engine.close();await fs.rm(dir,{recursive:true,force:true})}
 })
+
+test('sticker image reads stay bound to the inbound peer and fall back to a cropped bubble', {timeout:30000,skip:process.platform!=='darwin'},async()=>{
+ const dir=await fs.mkdtemp(path.join(os.tmpdir(),'haybot-sticker-image-')),engine=new BrowserEngine(dir)
+ try {
+  await engine.start('image');const session=engine.get('image'),page=session.tabs.get(session.active)
+  await page.setContent(`<div data-e2e="conversation-item" data-peer-id="${owner}" aria-selected="true">主人</div>
+   <div id="sticker" data-message-id="sticker-server" data-direction="inbound" class="MessageItemEmojiemojiBox" style="width:100px;height:100px;background:red"></div>`)
+  const grant=engine.douyin.begin('image',{interactions}),run=session.automation
+  run.people.set(owner,{id:owner,nickname:'主人',handle:'owner_handle',follows_me:true})
+  await page.locator('#sticker').evaluate(e=>{e.__reactProps$fixture={message:{serverId:'sticker-server',isMyMessage:false,parsedContent:{aweType:508,display_name:'嘻嘻',url:'http://127.0.0.1/never-fetch'}}}})
+  const social=engine.douyin.social,before=await social.read(session,run)
+  assert.doesNotMatch(JSON.stringify(before),/never-fetch|mediaSources/)
+  const input={peer_id:owner,message_id:'sticker-server',latest_message_id:'sticker-server'}
+  await assert.rejects(social.messageImage(session,run,{...input,peer_id:'wrong-peer'},before),{code:'stale_message'})
+  await assert.rejects(social.messageImage(session,run,{...input,latest_message_id:'outdated'},before),{code:'stale_message'})
+  const result=await social.messageImage(session,run,input,before)
+  assert.equal(result.source,'screenshot');assert.equal(result.message_id,'sticker-server')
+  assert.equal(Buffer.from(result.image_base64,'base64').subarray(0,2).toString('hex'),'ffd8')
+  assert.doesNotMatch(JSON.stringify(result),/never-fetch/)
+  engine.douyin.end('image',grant.token)
+ }finally{await engine.close();await fs.rm(dir,{recursive:true,force:true})}
+})

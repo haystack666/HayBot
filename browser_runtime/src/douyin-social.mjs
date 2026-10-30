@@ -1,5 +1,23 @@
 import { RuntimeError } from './environment.mjs'
 
+const stickerHosts=['douyinpic.com','byteimg.com','ibytedtos.com','douyincdn.com','pstatp.com','bytecdn.cn']
+export async function downloadSticker(value,fetcher=fetch) {
+  const allowed=value=>{const u=new URL(value);if(u.protocol!=='https:'||u.username||u.password||u.port&&!['443'].includes(u.port)||!stickerHosts.some(h=>u.hostname===h||u.hostname.endsWith('.'+h)))throw new Error('invalid image host');return u}
+  const signal=AbortSignal.timeout(8000),limit=5*1024*1024
+  let url=allowed(value)
+  for(let n=0;n<4;n++) {
+    const response=await fetcher(url.href,{redirect:'manual',signal,headers:{Accept:'image/*'}})
+    if([301,302,303,307,308].includes(response.status)){await response.body?.cancel();url=allowed(new URL(response.headers.get('location'),url).href);continue}
+    if(!response.ok||!/^image\//i.test(response.headers.get('content-type')||'')||Number(response.headers.get('content-length'))>limit){await response.body?.cancel();throw new Error('invalid image response')}
+    const reader=response.body.getReader(),chunks=[];let size=0
+    try {while(true){const {done,value}=await reader.read();if(done)break;size+=value.length;if(size>limit)throw new Error('image too large');chunks.push(Buffer.from(value))}}finally{await reader.cancel().catch(()=>{})}
+    if(!size)throw new Error('empty image')
+    return Buffer.concat(chunks)
+  }
+  throw new Error('too many redirects')
+}
+
+
 const clean = (v,n=1000) => typeof v==='string'?v.slice(0,n):''
 const id = v => typeof v==='string' && /^[A-Za-z0-9_-]{3,128}$/.test(v)
 export const writeOps = new Set(['like','comment','reply_comment','reply_dm','share','share_note'])
@@ -91,12 +109,12 @@ export function conversationDOM(element) {
 
 // This function executes inside the actual page, reads only visible UI and
 // whitelisted React message fields; it never invokes website stores or APIs.
-export function socialDOM() {
+export function socialDOM(captureMedia=false) {
   const visible=e=>{const r=e.getBoundingClientRect(),s=getComputedStyle(e);return r.width>0&&r.height>0&&r.bottom>0&&r.top<innerHeight&&s.visibility!=='hidden'&&s.display!=='none'}
   const short=(v,n=1000)=>typeof v==='string'?v.slice(0,n):''
   const identity=e=>e.querySelector('a[href*="/user/"]')?.getAttribute('href')?.match(/\/user\/([^/?]+)/)?.[1]||e.getAttribute('data-peer-id')||e.getAttribute('data-user-id')||''
   const conversations=[...document.querySelectorAll('[data-e2e="conversation-item"]')].filter(visible).slice(0,50).map(e=>({id:identity(e),nickname:short((e.querySelector('[class*="ConversationItemtitle"]')||e).innerText.split('\n')[0],80),unread:!!e.querySelector('[class*="badge"],[class*="Badge"],[class*="unread"],[data-unread="true"]')}))
-  const messages=[]
+  const messages=[],mediaSources={}
   // React can render messages in reverse DOM order (for example in a
   // column-reverse list). Use the visible conversation order, oldest first.
   const bubbles=[...document.querySelectorAll('[data-message-id],[data-msg-id],[class*="messageMessageBoxcontentBox"],[class*="MessageItemTextbubbleContent"],[class*="MessageItemShareAwemecontainer"],[class*="MessageItemEmojiemojiBox"]')].filter(visible)
@@ -131,6 +149,13 @@ export function socialDOM() {
     const isSticker=parsed?.aweType===508||e.matches('[class*="MessageItemEmojiemojiBox"]')
     const contentImage=e.matches('[class*="messageMessageBoxcontentBox"]')?e.querySelector('[class*="MessageItemEmoji"] img,[class*="TextMessageTextemoji"] img'):e.querySelector('img')
     const label=short(parsed?.display_name,120)||imageLabel(contentImage||e)
+    if(captureMedia&&isSticker) {
+      const value=parsed?.url
+      const url=typeof value==='string'?value:typeof value?.url_list?.[0]==='string'?value.url_list[0]:typeof value?.urlList?.[0]==='string'?value.urlList[0]:contentImage?.currentSrc||contentImage?.getAttribute('src')||''
+      const bubble=contentImage&&contentImage.getBoundingClientRect().width?contentImage:e.matches('[class*="MessageItemEmojiemojiBox"]')?e:e.querySelector('[class*="MessageItemEmojiemojiBox"]')
+      const r=bubble?.getBoundingClientRect()||{x:0,y:0,right:0,bottom:0}
+      mediaSources[mid]={url,box:{x:Math.max(0,r.x),y:Math.max(0,r.y),width:Math.min(1024,r.right,innerWidth)-Math.max(0,r.x),height:Math.min(1024,r.bottom,innerHeight)-Math.max(0,r.y)}}
+    }
     const sticker=isSticker?label:short(e.querySelector('img')?.getAttribute('alt'),80)
     const text=short(parsed?.text)||(isSticker?'[抖音表情包'+(label?'：'+label:'，无名称')+']':short(textDOM(e)))
     messages.push({id:short(mid,100),direction,sender:short(sender,100),conversation_id:short(conversation,100),text,video_id:cardId||card?.href.match(/\/video\/(\d+)/)?.[1]||'',sticker,
@@ -139,7 +164,7 @@ export function socialDOM() {
   const selected=[...document.querySelectorAll('[data-e2e="conversation-item"]')].filter(visible).filter(e=>e.getAttribute('aria-selected')==='true'||e.getAttribute('data-active')==='true'||/selected|Selected|active|Active/.test(e.className))
   const peer=selected.length===1?identity(selected[0]):''
   const stickers=[...document.querySelectorAll('[class*="componentsemoji"] img,.componentsemojiemojiPanel img')].filter(visible).map(e=>short(e.getAttribute('alt'),80)).filter(Boolean).slice(0,80)
-  return {conversations,messages,peer,stickers}
+  return {conversations,messages,peer,stickers,...(captureMedia?{mediaSources}:{})}
 }
 
 export class DouyinSocial {
@@ -235,7 +260,8 @@ export class DouyinSocial {
     throw new RuntimeError('conversation_loading','消息列表尚未加载出目标会话，请稍后重新观察；未重新发送')
   }
   async read(session,run) {
-    const data=await run.page.evaluate(socialDOM);this.auto.guard(session,run)
+    const data=await run.page.evaluate(socialDOM,true);this.auto.guard(session,run)
+    run.mediaSources=data.mediaSources||{}
     if(run.identityChanged||run.parent?.identityChanged)throw new RuntimeError('account_changed','登录的抖音账号已变化，请重新发起任务')
     data.conversations=[]
     const rows=run.page.locator('[data-e2e="conversation-item"]').filter({visible:true})
@@ -251,6 +277,27 @@ export class DouyinSocial {
       conversation:peer||null,conversations:data.conversations,pendingUnread:[...(run.inboxMonitor?.pending.values()||[])],
       inboxMonitor:run.inboxMonitor?{event_driven:true,checked_at:run.inboxMonitor.checkedAt,error:run.inboxMonitor.error}:null,messages:peer?messages:[],stickers:data.stickers,comments:[...run.comments.values()].slice(-60)}
   }
+  async messageImage(session,run,input,before) {
+    const latest=before.messages?.at(-1),message=before.messages?.find(m=>m.id===input.message_id)
+    const peer=before.conversation
+    if(peer?.id!==input.peer_id||latest?.id!==input.latest_message_id||latest?.direction!=='inbound'||message?.direction!=='inbound'||message?.message_type!=='sticker')throw new RuntimeError('stale_message','表情会话或消息已变化，未读取图片')
+    const white=run.social.whitelist?.some(p=>p.handle===peer.handle&&p.nickname===peer.nickname)
+    if(!white&&peer.follows_me!==true)throw new RuntimeError('dm_forbidden','未获准读取该会话图片')
+    const media=run.mediaSources?.[message.id]
+    if(!media)throw new RuntimeError('image_missing','表情图片尚未加载')
+    let image,source='download'
+    try {image=await downloadSticker(media.url)}catch {
+      source='screenshot'
+      if(!(media.box.width>0&&media.box.height>0))throw new RuntimeError('image_missing','表情图片尚未加载')
+      this.auto.guard(session,run)
+      image=await run.page.screenshot({type:'jpeg',quality:80,clip:media.box,scale:'css',timeout:3000})
+    }
+    this.auto.guard(session,run)
+    const fresh=await this.read(session,run)
+    if(fresh.conversation?.id!==peer.id||fresh.messages.at(-1)?.id!==latest.id)throw new RuntimeError('stale_message','图片读取期间会话已变化')
+    return {message_id:message.id,peer_id:peer.id,image_base64:image.toString('base64'),source}
+  }
+
   async navigate(session,run,input) {
     const page=run.page,op=input.op
     if(op==='account') {

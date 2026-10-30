@@ -355,3 +355,57 @@ async def test_dm_prompt_retains_native_emoji_and_sticker_labels(client):
     assert json.loads(prompt[1]['content'])['messages']==messages
     assert '不要把表情当作空消息' in prompt[0]['content']
     assert reply=='偷偷笑什么呀。'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('image_failure',[False,True])
+async def test_dm_attaches_real_sticker_image_or_falls_back_without_losing_reply(client,image_failure):
+    import asyncio,base64,io
+    from PIL import Image
+    t=client.app.state.browser_tasks
+    cfg=t.config('default');cfg.interactions.messages_enabled=True;t.save_config('default',cfg)
+    t,bot=seed(client,state='running')
+    peer={'id':'peer-sec','nickname':'朋友','handle':'friend','follows_me':True}
+    incoming={'id':'sticker-real','direction':'inbound','text':'[抖音表情包：嘻嘻]','sticker':'嘻嘻','message_type':'sticker'}
+    view={'generation':0,'version':1,'account':{'id':'platform-self','verified':True},'conversation':peer,'messages':[incoming],'pendingUnread':[]}
+    raw=io.BytesIO();Image.new('RGB',(20,20),'red').save(raw,'PNG')
+    observes=0;sent=[];prompts=[]
+    async def gateway(method,path,body):
+        nonlocal observes
+        if body['op']=='observe':
+            observes+=1
+            if observes>2:raise asyncio.CancelledError()
+            return view
+        if body['op']=='message_image':
+            assert body['message_id']==body['latest_message_id']=='sticker-real'
+            if image_failure:raise ValueError('image unavailable')
+            return {'peer_id':peer['id'],'message_id':'sticker-real','image_base64':base64.b64encode(raw.getvalue()).decode()}
+        sent.append(body['authorization']['message_id'])
+        return {**view,'interaction':{'status':'confirmed','message_id':'outbound-real'}}
+    async def model(runtime,prompt,tokens):
+        prompts.append(prompt)
+        return '{"reply":"笑得这么开心呀。"}'
+    t.browser.gateway.request=gateway;t.model=AsyncMock(side_effect=model)
+    with pytest.raises(asyncio.CancelledError):await t.dm.run(t.get('default','journal-one'),cfg,'capability')
+    assert sent==['sticker-real']
+    assert bool(prompts[0][1].get('images')) is not image_failure
+    if not image_failure:
+        assert base64.b64decode(prompts[0][1]['images'][0]).startswith(b'\xff\xd8')
+        assert json.loads(prompts[0][1]['content'])['messages'][0]['image_attached'] is True
+    assert not t.dm.pending(t.get('default','journal-one'),view)
+
+
+@pytest.mark.asyncio
+async def test_dm_vision_model_error_retries_once_without_image(client):
+    import copy
+    t,bot=seed(client,state='running');seen=[]
+    async def model(runtime,prompt,tokens):
+        seen.append(copy.deepcopy(prompt))
+        if len(seen)==1:raise ValueError('vision provider unavailable')
+        return '{"reply":"偷偷笑什么呢。"}'
+    t.model=AsyncMock(side_effect=model)
+    reply=await t.dm.generate(t,bot,t.get('default','journal-one'),{'nickname':'朋友'},
+        [{'id':'sticker','text':'[抖音表情包：嘻嘻]'}],False,'自然聊天',['encoded-image'])
+    assert reply=='偷偷笑什么呢。' and len(seen)==2
+    assert seen[0][1]['images']==['encoded-image'] and 'images' not in seen[1][1]
+    assert '不声称看见了画面' in seen[1][1]['content']
