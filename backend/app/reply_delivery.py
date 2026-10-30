@@ -22,6 +22,7 @@ class ReplyDelivery:
         self.meme_context = ''
         self.diary_context = None
         self.voice_requested=False
+        self.voice_reason=''
 
     def state_current(self):
         return (self.day.matches(self.schedule_stamp) and self.bot.memory.matches(self.sid, self.memory_stamp)
@@ -146,6 +147,8 @@ class ReplyDelivery:
             attachment_count=1,at=time.time(),source='voice',status='sent' if self.state_current() else 'sent_stale',
             reply_to=f'in:{self.config.account_id}:{self.target}:{self.data["id"]}',**receipt_metadata(receipt))
         self.source_ids.append(self.store.db.execute('SELECT id FROM chat_messages WHERE event_key=?',(key,)).fetchone()[0])
+        if self.voice_reason=='automatic':
+            self.store.mark_auto_voice(self.config.account_id,self.sid)
         self.store.record_result('sent','语音回复已确认送达',category='message',event='speech.sent',details={'sent_message_id':receipt['id']})
         return 'sent',receipt
 

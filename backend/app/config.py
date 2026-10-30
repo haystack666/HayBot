@@ -246,9 +246,6 @@ class MemeConfig(StrictModel):
 
 class SpeechModelConfig(MemoryModelConfig):
     enabled: bool = False
-    voice: str = Field(default='',max_length=200)
-    language: str = Field(default='auto',max_length=30)
-    speed: float = Field(default=1.0,ge=0.5,le=2.0)
 
     @model_validator(mode='after')
     def complete(self):
@@ -258,11 +255,56 @@ class SpeechModelConfig(MemoryModelConfig):
         return self
 
 
-class SpeechConfig(StrictModel):
-    tts: SpeechModelConfig = Field(default_factory=SpeechModelConfig)
-    stt: SpeechModelConfig = Field(default_factory=SpeechModelConfig)
-    reply_mode: Literal['on_request'] = 'on_request'
+class TTSConfig(SpeechModelConfig):
+    voice: str = Field(default='',max_length=200)
+    speed: float = Field(default=1.0,ge=0.5,le=2.0)
+    scope: Literal['private','private_and_group'] = 'private'
+    command_trigger: bool = True
+    imperative_trigger: bool = True
+    voice_follow_trigger: bool = False
+    auto_probability: int = Field(default=0,ge=0,le=100,strict=True)
+    auto_cooldown_seconds: int = Field(default=300,ge=0,le=86400)
     max_reply_chars: int = Field(default=600,ge=50,le=1500)
+
+
+class STTConfig(SpeechModelConfig):
+    language: str = Field(default='auto',max_length=30)
+    scope: Literal['private','private_and_group'] = 'private_and_group'
+    auto_transcribe: bool = True
+    max_audio_seconds: int = Field(default=120,ge=5,le=120)
+    failure_policy: Literal['continue_visible_content','ask_for_text'] = 'continue_visible_content'
+
+
+class SpeechConfig(StrictModel):
+    tts: TTSConfig = Field(default_factory=TTSConfig)
+    stt: STTConfig = Field(default_factory=STTConfig)
+
+    @model_validator(mode='before')
+    @classmethod
+    def migrate_legacy(cls,value):
+        if not isinstance(value,dict):return value
+        value=dict(value)
+        legacy='reply_mode' in value or 'max_reply_chars' in value
+        max_reply_chars=value.pop('max_reply_chars',600)
+        value.pop('reply_mode',None)
+        tts=dict(value.get('tts') or {})
+        stt=dict(value.get('stt') or {})
+        # The previous shared speech model serialized irrelevant fields into
+        # both selections. Accept those persisted values, but do not expose
+        # them through the new independent schemas.
+        tts.pop('language',None)
+        stt.pop('voice',None);stt.pop('speed',None)
+        tts.setdefault('max_reply_chars',max_reply_chars)
+        if legacy:
+            # Preserve the old explicit-request behavior, including direct
+            # group mentions that asked for a voice reply.
+            tts.setdefault('scope','private_and_group')
+            tts.setdefault('command_trigger',True)
+            tts.setdefault('imperative_trigger',True)
+            tts.setdefault('voice_follow_trigger',False)
+            tts.setdefault('auto_probability',0)
+        value['tts']=tts;value['stt']=stt
+        return value
 
 
 class Settings(StrictModel):

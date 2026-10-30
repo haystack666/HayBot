@@ -96,6 +96,7 @@ export default function App({ page }) {
   const [config, setConfig] = useState(null), [savedConfig, setSavedConfig] = useState(null), [dirty, setDirty] = useState(false)
   const [providerDirty,setProviderDirty]=useState(false)
   const [collapsed, setCollapsed] = useState(false), [mobileOpen, setMobileOpen] = useState(false)
+  const [botControlOpen,setBotControlOpen]=useState(false)
   const [status, setStatus] = useState({ state: 'stopped', stats: {}, logs: [], jobs: 0, uptime: 0 })
   const [models, setModels] = useState([]), [ollamaState, setOllamaState] = useState('unknown'), [busy, setBusy] = useState(''), [toast, setToast] = useState(null), [pollError, setPollError] = useState(false)
   const timer = useRef(null), mounted = useRef(true)
@@ -116,6 +117,7 @@ export default function App({ page }) {
     load().catch(error => { if (error.status === 401) setAuthed(false); else { setAuthed(true); setLoadError(error.message) } })
     return () => { mounted.current = false; clearTimeout(timer.current) }
   }, [load])
+  useEffect(()=>setBotControlOpen(false),[botId,page])
   useEffect(() => {
     if (!authed || loadError) return
     const poll = setInterval(() => {
@@ -184,6 +186,7 @@ export default function App({ page }) {
     {page === 'chats' && <><div className="page-quicklinks"><Button variant="outline" size="sm" onClick={()=>navigate('rules?view=group')}>群聊参与设置<ChevronRight size={13}/></Button><Button variant="ghost" size="sm" onClick={()=>navigate('memory')}>查看角色记忆</Button></div><ChatsPage api={api} botName={currentBot?.name} /></>}
     {page === 'logs' && <LogsPage key={botId} {...{api, notify}} />}
     <footer className="footer"><span>HayBot <span className="footer-dot">·</span> 本地机器人管理平台</span><span>{botId ? `已运行 ${Math.floor(status.uptime / 60)} 分钟` : '多个机器人独立运行'}</span></footer></main></div>
+    {botId&&page!=='providers'&&<div className={`bot-control-fab ${botControlOpen?'is-open':''}`}><button type="button" className="bot-control-trigger" aria-label="机器人开关" aria-expanded={botControlOpen} onClick={()=>setBotControlOpen(value=>!value)}>{busy==='toggle'?<LoaderCircle size={20} className="spin"/>:active?<Square size={18}/>:<Play size={19}/>}<span className={`status-dot ${active?'live':''}`}/></button>{botControlOpen&&<div className="bot-control-panel"><div className="bot-control-heading"><span><b>{currentBot?.name||'当前机器人'}</b><small>{states[status.state]}</small></span><Button variant="ghost" size="icon-sm" aria-label="收起机器人开关" onClick={()=>setBotControlOpen(false)}><X size={14}/></Button></div>{!active&&(dirty||providerDirty)&&<p>当前有未保存配置，请先保存或撤销后再启动。</p>}<Button className="bot-control-action" disabled={!!busy||!active&&(dirty||providerDirty)} variant={active?'destructive-outline':'default'} onClick={async()=>{await action('toggle',()=>api(active?'/bot/stop':'/bot/start','POST'),active?'机器人已停止':'机器人正在连接 QQ');setBotControlOpen(false)}}>{busy==='toggle'?<LoaderCircle size={14} className="spin"/>:active?<Square size={13}/>:<Play size={14}/>}{active?'停止机器人':'启动机器人'}</Button></div>}</div>}
     {toast && <div className={`toast ${toast.error ? 'error' : ''}`} role={toast.error ? 'alert' : 'status'}>{toast.error ? <CircleHelp size={16} /> : <ShieldCheck size={16} />}<span>{toast.text}</span><button aria-label="关闭提示" onClick={() => setToast(null)}><X size={14} /></button></div>}
   </div>
 }

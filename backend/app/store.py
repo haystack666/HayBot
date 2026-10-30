@@ -55,6 +55,11 @@ class Store:
                 at REAL NOT NULL, content TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
                 detail TEXT NOT NULL DEFAULT '', created REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS speech_state (
+                app_id TEXT NOT NULL, scope_id TEXT NOT NULL,
+                last_auto_voice REAL NOT NULL DEFAULT 0,
+                PRIMARY KEY(app_id, scope_id)
+            );
         ''')
         # 只在首次升级时恢复旧版留下的记录，之后以累计表为准，避免重启重复回填。
         with self.db:
@@ -162,6 +167,15 @@ class Store:
             self.db.execute('DELETE FROM history')
             self.db.execute("INSERT OR REPLACE INTO chat_meta(key,value) VALUES ('history_floor',?)",
                             (str(self.db.execute('SELECT COALESCE(MAX(id),0) FROM chat_messages').fetchone()[0]),))
+
+    def last_auto_voice(self, app_id, scope_id):
+        row=self.db.execute('SELECT last_auto_voice FROM speech_state WHERE app_id=? AND scope_id=?',(app_id,scope_id)).fetchone()
+        return row['last_auto_voice'] if row else 0
+
+    def mark_auto_voice(self, app_id, scope_id, at=None):
+        with self.db:
+            self.db.execute('''INSERT INTO speech_state(app_id,scope_id,last_auto_voice) VALUES (?,?,?)
+                ON CONFLICT(app_id,scope_id) DO UPDATE SET last_auto_voice=excluded.last_auto_voice''',(app_id,scope_id,at or time.time()))
 
     def contact(self, app_id, recipient):
         row = self.db.execute('SELECT * FROM proactive_contacts WHERE app_id=? AND id=?', (app_id, recipient)).fetchone()

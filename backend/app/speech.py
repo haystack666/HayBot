@@ -6,6 +6,7 @@ import hmac
 import io
 import json
 import re
+import time
 import uuid
 import wave
 from dataclasses import dataclass
@@ -41,15 +42,46 @@ def chat_attachments(data):
     return [*image_attachments(data),*audio_attachments(data)]
 
 
-def wants_voice(text):
-    # Only the current message may request spoken output. Quoted examples and
-    # statements about a previously sent recording are not requests.
-    text=re.sub(r'[“「『"].*?[”」』"]','',text,flags=re.S)
-    if re.search(r"(?:不要|不用|别|无需|don't|do not|no need to).{0,18}(?:语音|声音|voice|audio)",text,re.I):return False
-    return bool(re.search(
-        r'^/语音(?:\s|$)|(?:用|换成)语音(?:回复|回答|说|聊|读|讲|唱|告诉|念|跟我|和我|吧|嘛|吗|[？?]|$)'
+def voice_directive(text):
+    """Classify an explicit output-channel request in the current message."""
+    # Quoted examples and statements about a previous recording are not
+    # requests. A current negative request always overrides every trigger.
+    text=re.sub(r'[“「『"].*?[”」』"]','',text or '',flags=re.S)
+    if re.search(r"(?:不要|不用|别|无需|don't|do not|no need to).{0,18}(?:语音|声音|voice|audio)",text,re.I):return 'denied'
+    if re.search(r'^\s*/语音(?:\s|$)',text,re.I):return 'command'
+    if re.search(
+        r'(?:用|换成)语音(?:回复|回答|说|聊|读|讲|唱|告诉|念|跟我|和我|吧|嘛|吗|[？?]|$)'
         r'|(?:发|来|回)(?:个|一条|一段|条|段)?语音(?:[吧呗呀啊嘛吗？?！!。\s]|$)'
-        r'|想听你.{0,4}(?:声音|说话)|(?:reply|respond).{0,12}(?:voice|audio)',text,re.I))
+        r'|想听你.{0,4}(?:声音|说话)|(?:reply|respond).{0,12}(?:voice|audio)',text,re.I):return 'imperative'
+    return ''
+
+
+def wants_voice(text):
+    return voice_directive(text) in ('command','imperative')
+
+
+@dataclass(frozen=True)
+class VoiceDecision:
+    enabled:bool
+    reason:str
+
+
+def decide_voice(config,text,*,has_audio=False,group=False,event_key='',last_auto_voice=0,now=None):
+    """Choose the reply channel exactly once for one logical inbound turn."""
+    now=time.time() if now is None else now
+    if not config.enabled:return VoiceDecision(False,'disabled')
+    if group and config.scope!='private_and_group':return VoiceDecision(False,'scope')
+    directive=voice_directive(text)
+    if directive=='denied':return VoiceDecision(False,'denied')
+    if directive=='command' and config.command_trigger:return VoiceDecision(True,'command')
+    if directive=='imperative' and config.imperative_trigger:return VoiceDecision(True,'imperative')
+    if has_audio and config.voice_follow_trigger:return VoiceDecision(True,'incoming_voice')
+    if not config.auto_probability:return VoiceDecision(False,'not_selected')
+    if config.auto_cooldown_seconds and now-last_auto_voice<config.auto_cooldown_seconds:
+        return VoiceDecision(False,'cooldown')
+    seed=(event_key or text or 'speech').encode('utf-8','ignore')
+    bucket=int.from_bytes(hashlib.sha256(seed).digest()[:8],'big')%100
+    return VoiceDecision(bucket<config.auto_probability,'automatic' if bucket<config.auto_probability else 'probability')
 
 
 def pcm_wav(raw,rate=24000):
@@ -226,12 +258,12 @@ async def synthesize(client,provider,model,text,voice='',speed=None,instructions
     return SpeechAudio(raw,mime.split(';')[0])
 
 
-async def transcribe(client,provider,model,audio,language='auto',timeout=90):
+async def transcribe(client,provider,model,audio,language='auto',timeout=90,max_seconds=120):
     if provider.purpose!='stt':raise SpeechError('请选择 STT 供应商')
     if provider.type=='xiaomi_stt' and language not in ('auto','zh','en'):raise SpeechError('MiMo 识别语言请填写 auto、zh 或 en')
     if provider.type=='xfyun_stt' and language not in ('auto','zh','zh_cn'):raise SpeechError('讯飞星火当前接口使用中文识别，语言请填写 auto 或 zh')
     if not model:raise SpeechError('请填写识别模型')
-    wav=await to_wav(audio,60 if provider.type=='xfyun_stt' else 120)
+    wav=await to_wav(audio,min(max_seconds,60 if provider.type=='xfyun_stt' else 120))
     if provider.type=='xfyun_stt':return await xfyun_transcribe(provider,wav,timeout)
     if provider.type=='xiaomi_stt':
         body={'model':model,'messages':[{'role':'user','content':[{'type':'input_audio','input_audio':{'data':'data:audio/wav;base64,'+base64.b64encode(wav).decode()}}]}],
@@ -291,15 +323,16 @@ class SpeechService:
         self.bot=bot;self.lock=asyncio.Lock()
         self.last_transcripts=contextvars.ContextVar('transcripts_'+str(id(self)),default=[])
 
-    async def listen(self,attachments,config):
+    async def listen(self,attachments,config,group=False):
         selection=config.speech.stt
-        if not selection.enabled:raise SpeechError('这条语音我暂时听不了，发文字给我吧。')
+        if not selection.enabled or not selection.auto_transcribe or group and selection.scope!='private_and_group':
+            raise SpeechError('这条语音我暂时听不了，发文字给我吧。')
         provider=self.bot.provider(selection);texts=[];self.last_transcripts.set([])
         try:
             async with self.lock:
                 for attachment in attachments:
                     raw=await fetch_audio(self.bot.client,attachment.get('url',''),qq=True)
-                    text=await transcribe(self.bot.client,provider,selection.model,raw,selection.language)
+                    text=await transcribe(self.bot.client,provider,selection.model,raw,selection.language,max_seconds=selection.max_audio_seconds)
                     texts.append((attachment.get('_source_message_id',''),text))
         except (ProviderHTTPError,httpx.HTTPError):
             raise SpeechError('这条语音暂时没听清，发文字给我，或稍后再试吧。') from None
@@ -308,7 +341,7 @@ class SpeechService:
 
     async def speak(self,text,config):
         selection=config.speech.tts
-        if not selection.enabled or len(text)>config.speech.max_reply_chars:raise SpeechError('本轮使用文字回复')
+        if not selection.enabled or len(text)>selection.max_reply_chars:raise SpeechError('本轮使用文字回复')
         async with self.lock:
             result=await synthesize(self.bot.client,self.bot.provider(selection),selection.model,text,selection.voice,selection.speed)
             return await to_silk(result.data)

@@ -9,7 +9,7 @@ from urllib.parse import quote, urlsplit
 import httpx
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed, WebSocketException
-from .speech import SpeechError, SpeechService, audio_attachments, chat_attachments, wants_voice
+from .speech import SpeechError, SpeechService, audio_attachments, chat_attachments, decide_voice
 from .images import IMAGE_CHAT_INSTRUCTION, ImageMessageError, image_attachments, load_images
 from .ollama import CONTEXT_WINDOW, ContextLimitError, chat_response
 from .providers import ProviderConfig, ProviderHTTPError, endpoint, headers, list_models, generate, read_response, ollama_native
@@ -475,7 +475,7 @@ class Bot:
             images_requested = bool(attachments or audios)
             if audios:
                 try:
-                    transcribed=await self.speech.listen(audios,c)
+                    transcribed=await self.speech.listen(audios,c,group=group)
                     context_text=(context_text+'\n' if context_text else '')+'[对方语音转写]\n'+transcribed
                     text=(text+'\n' if text else '')+transcribed
                     if not batch or self.inbox.live(batch):
@@ -486,10 +486,16 @@ class Bot:
                                 caption=row['content'].split('[语音转写]',1)[0].rstrip() if row else ''
                                 self.store.db.execute("UPDATE chat_messages SET content=? WHERE event_key=? AND role='user'",((caption+'\n' if caption else '')+'[语音转写] '+transcript,event_key))
                 except SpeechError:
-                    if not text and not attachments:raise
+                    if c.speech.stt.failure_policy=='ask_for_text' or not text and not attachments:raise
                     context_text+='\n[对方还发送了语音，当前无法读取；只回应可见内容，不猜测音频内容。]'
                     self.store.log('warn','本轮语音未读取，保留文字或图片继续回复',category='message',event='speech.caption_fallback')
-            voice_requested=bool(c.speech.tts.enabled and wants_voice(text) and group_turn is None)
+            voice_decision=decide_voice(c.speech.tts,text,has_audio=bool(audios),group=group,
+                event_key=f'{c.account_id}:{sid}:{batch["id"] if batch else d["id"]}',
+                last_auto_voice=self.store.last_auto_voice(c.account_id,sid),now=time.time())
+            voice_requested=voice_decision.enabled
+            if voice_requested:
+                self.store.log('info','本轮选择语音回复',category='message',event='speech.tts_selected',
+                    details={'reason':voice_decision.reason,'auto_probability':c.speech.tts.auto_probability})
             user_message = {'role': 'user', 'content': context_text}
             if attachments:
                 provider = self.provider(c.ollama)
@@ -605,6 +611,7 @@ class Bot:
             delivery = ReplyDelivery(self, c, d, group, target, user, sid, key, day, schedule_stamp, memory_stamp, old, history_text, batch=batch, group_turn=group_turn)
             delivery.diary_context = diary_context
             delivery.voice_requested=voice_requested
+            delivery.voice_reason=voice_decision.reason
             receipt = await delivery.send(content, prepared, update, meme=meme, meme_candidates=meme_candidates if meme_fallback else None)
             schedule_stamp = delivery.schedule_stamp
             if not isinstance(receipt, dict) or not receipt.get('id'):

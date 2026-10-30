@@ -7,10 +7,10 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-from app.config import Settings,OllamaConfig
+from app.config import Settings,OllamaConfig,SpeechConfig
 from app.providers import ProviderConfig,ProviderStore,generate,headers
 from app.provider_catalog import CATALOG
-from app.speech import (SpeechError,pcm_wav,to_wav,to_silk,synthesize,transcribe,fetch_audio,wants_voice)
+from app.speech import (SpeechError,pcm_wav,to_wav,to_silk,synthesize,transcribe,fetch_audio,wants_voice,decide_voice)
 from test_providers import client
 from test_reply_segments import make_bot,event
 
@@ -24,7 +24,11 @@ def test_catalog_and_defaults():
     for kind,info in CATALOG.items():
         p=ProviderConfig(type=kind)
         assert p.purpose==info['purpose'] and p.base_url==info['url']
-    assert not Settings().speech.stt.enabled and not Settings().speech.tts.enabled
+    speech=Settings().speech
+    assert not speech.stt.enabled and not speech.tts.enabled
+    assert speech.tts.scope=='private' and speech.tts.command_trigger and speech.tts.imperative_trigger
+    assert not speech.tts.voice_follow_trigger and speech.tts.auto_probability==0 and speech.tts.max_reply_chars==600
+    assert speech.stt.scope=='private_and_group' and speech.stt.auto_transcribe and speech.stt.max_audio_seconds==120
     with pytest.raises(ValueError):ProviderConfig(type='openai_tts',purpose='stt')
     with pytest.raises(ValueError):ProviderConfig(type='xfyun_stt',base_url='https://wrong.test')
     with pytest.raises(ValueError):ProviderConfig(app_id='bad\nheader')
@@ -54,6 +58,30 @@ def test_two_secrets_are_encrypted_bound_to_endpoint_and_never_public(tmp_path):
     ('不要发语音，打字就好',False),('不用语音回复',False),('你会识别语音吗',False),('我刚发了条语音',False),('“用语音回复”是什么意思',False),
 ])
 def test_voice_requires_explicit_current_request(text,expected):assert wants_voice(text)==expected
+
+
+def test_legacy_speech_config_migrates_without_changing_request_behavior():
+    speech=SpeechConfig.model_validate({'tts':{'provider_id':'','model':'','enabled':False,'voice':'','language':'auto','speed':1},
+        'stt':{'provider_id':'','model':'','enabled':False,'voice':'','language':'zh','speed':1},
+        'reply_mode':'on_request','max_reply_chars':420})
+    assert speech.tts.scope=='private_and_group' and speech.tts.max_reply_chars==420
+    assert speech.tts.command_trigger and speech.tts.imperative_trigger and not speech.tts.voice_follow_trigger
+    assert speech.stt.language=='zh' and not hasattr(speech.stt,'voice') and not hasattr(speech.tts,'language')
+
+
+def test_tts_trigger_precedence_probability_scope_and_cooldown():
+    c=Settings().speech.tts;c.enabled=True;c.auto_probability=100
+    assert decide_voice(c,'不要发语音，用文字说',event_key='1',now=1000).reason=='denied'
+    assert decide_voice(c,'/语音 晚安',event_key='2',last_auto_voice=999,now=1000).reason=='command'
+    assert decide_voice(c,'用语音回复我',event_key='3',last_auto_voice=999,now=1000).reason=='imperative'
+    c.command_trigger=False;c.imperative_trigger=False;c.voice_follow_trigger=True
+    assert decide_voice(c,'今天有点累',has_audio=True,event_key='4',last_auto_voice=999,now=1000).reason=='incoming_voice'
+    c.voice_follow_trigger=False;c.scope='private'
+    assert decide_voice(c,'晚安',group=True,event_key='5',now=1000).reason=='scope'
+    assert decide_voice(c,'晚安',event_key='6',last_auto_voice=900,now=1000).reason=='cooldown'
+    decision=decide_voice(c,'晚安',event_key='same-message',last_auto_voice=0,now=1000)
+    assert decision.enabled and decision.reason=='automatic'
+    assert decide_voice(c,'晚安',event_key='same-message',last_auto_voice=0,now=1000)==decision
 
 
 @pytest.mark.asyncio
@@ -203,7 +231,7 @@ async def test_qq_voice_requested_confirmation_and_text_fallback(tmp_path,scenar
 @pytest.mark.asyncio
 async def test_voice_incoming_transcribes_then_defaults_to_text(tmp_path):
     store,bot,text=make_bot(tmp_path)
-    async def listen(a,c):
+    async def listen(a,c,group=False):
         bot.speech.last_transcripts.set([('m1','今天有点累')]);return '今天有点累'
     bot.speech.listen=AsyncMock(side_effect=listen)
     incoming=event();incoming['d']['content']='';incoming['d']['attachments']=[{'content_type':'audio/silk','url':'https://grouptalk.c2c.qq.com/a'}]
@@ -213,6 +241,31 @@ async def test_voice_incoming_transcribes_then_defaults_to_text(tmp_path):
     assert all(call.kwargs['json']['msg_type']==0 for call in bot.api.await_args_list)
     row=store.db.execute("SELECT content FROM chat_messages WHERE role='user'").fetchone()
     assert '今天有点累' in row[0]
+    await bot.client.aclose();store.close()
+
+
+@pytest.mark.asyncio
+async def test_automatic_tts_cooldown_starts_only_after_confirmed_voice(tmp_path):
+    store,bot,text=make_bot(tmp_path);c=store.load()
+    c.speech.tts.provider_id='a'*32;c.speech.tts.model='tts';c.speech.tts.enabled=True
+    c.speech.tts.command_trigger=False;c.speech.tts.imperative_trigger=False;c.speech.tts.auto_probability=100;c.speech.tts.auto_cooldown_seconds=300
+    store.save(c);bot.speech.speak=AsyncMock(return_value=b'fake-silk')
+    bot.api.side_effect=lambda *a,**kw:{'file_info':'media'} if a[1].endswith('/files') else {'id':'confirmed'}
+    first=event('auto-1');first['d']['content']='晚安';await bot.handle(first)
+    assert bot.speech.speak.await_count==1 and store.last_auto_voice(c.account_id,store.scopes.ensure(c.account_id,'user','alice','alice')['id'])>0
+    bot.api.reset_mock();second=event('auto-2');second['d']['content']='再聊一句';await bot.handle(second)
+    assert bot.speech.speak.await_count==1
+    assert bot.api.await_args_list and all(call.kwargs['json'].get('msg_type')==0 for call in bot.api.await_args_list)
+    await bot.client.aclose();store.close()
+
+
+@pytest.mark.asyncio
+async def test_stt_ask_for_text_policy_does_not_guess_visible_caption(tmp_path):
+    store,bot,text=make_bot(tmp_path);c=store.load();c.speech.stt.failure_policy='ask_for_text';store.save(c)
+    incoming=event();incoming['d']['content']='今天下雨了';incoming['d']['attachments']=[{'content_type':'audio/silk','url':'https://grouptalk.c2c.qq.com/a'}]
+    await bot.handle(incoming)
+    bot.generate.assert_not_awaited()
+    assert bot.api.await_args.kwargs['json']['content']=='这条语音我暂时听不了，发文字给我吧。'
     await bot.client.aclose();store.close()
 
 
