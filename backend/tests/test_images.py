@@ -56,6 +56,9 @@ async def test_image_only_reply_routing_dedup_and_no_binary_history(tmp_path, ki
             body = json.loads(request.content)
             user = body['messages'][-1]
             assert user['content']
+            assert '请看看' not in user['content']
+            assert '没有附加文字' in user['content']
+            assert '不要固定先点评图片，再聊天' in body['messages'][0]['content']
             decoded = Image.open(io.BytesIO(base64.b64decode(user['images'][0])))
             assert decoded.format == 'JPEG' and decoded.size == (80, 60)
             return httpx.Response(200, json={'message': {'content': '红色图片'}, 'prompt_eval_count': 100, 'eval_count': 7})
@@ -105,6 +108,8 @@ async def test_gif_caption_and_text_followup(tmp_path):
         message = chats[0]['messages'][-1]
         assert message['content'].startswith('说说这个表情包')
         assert '从左到右' in message['content']
+        assert '不向对方复述' in message['content']
+        assert '按实际请求准确回答' in chats[0]['messages'][0]['content']
         decoded = Image.open(io.BytesIO(base64.b64decode(message['images'][0])))
         assert decoded.size == (240, 82)
         assert decoded.getpixel((40, 50))[0] > 200
@@ -114,6 +119,7 @@ async def test_gif_caption_and_text_followup(tmp_path):
         await bot.handle(followup)
         assert '红绿蓝三个画面' == chats[1]['messages'][-2]['content']
         assert all('images' not in item for item in chats[1]['messages'])
+        assert '[本轮图片聊天方式]' not in chats[1]['messages'][0]['content']
         assert bot.stats['sent'] == 2
     store.close()
 
@@ -190,3 +196,27 @@ def test_image_pixel_limit_and_host_validation(monkeypatch):
                 'file:///etc/passwd', 'https://gchat.qpic.cn:8080/a'):
         with pytest.raises(ImageMessageError):
             cdn_url(url)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('text',['[QQ表情:14]','[表情包:嘻嘻]'])
+async def test_native_qq_expressions_get_chat_guidance_without_image_download(tmp_path,text):
+    store=Store(tmp_path);config=Settings();config.rules.cooldown=0;store.save(config)
+    prompts=[]
+    def transport(request):
+        assert request.url.host!='gchat.qpic.cn'
+        if request.url.path=='/api/chat':
+            body=json.loads(request.content);prompts.append(body['messages'])
+            return httpx.Response(200,json={'message':{'content':'还笑，快说嘛。'}})
+        if request.url.path.endswith('/getAppAccessToken'):
+            return httpx.Response(200,json={'access_token':'test-token','expires_in':7200})
+        return httpx.Response(200,json={'id':'reply-id'})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+        bot=Bot(store,client);payload=event(text=text);payload['d']['attachments']=[]
+        await bot.handle(payload)
+    assert prompts[0][-1]['content']==text
+    assert '不要固定先点评图片，再聊天' in prompts[0][0]['content']
+    assert '不据此猜测具体表情' in prompts[0][0]['content']
+    assert all('images' not in message for message in prompts[0])
+    assert bot.stats['sent']==1 and bot.stats['errors']==0
+    store.close()

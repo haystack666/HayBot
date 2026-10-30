@@ -9,7 +9,7 @@ from urllib.parse import quote, urlsplit
 import httpx
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed, WebSocketException
-from .images import ImageMessageError, image_attachments, load_images
+from .images import IMAGE_CHAT_INSTRUCTION, ImageMessageError, image_attachments, load_images
 from .ollama import CONTEXT_WINDOW, ContextLimitError, chat_response
 from .providers import ProviderConfig, ProviderHTTPError, endpoint, headers, list_models, generate, read_response, ollama_native
 from .schedule import ScheduleService, ScheduleError, ScheduleChanged
@@ -491,9 +491,9 @@ class Bot:
                         raise ImageMessageError('当前模型不支持看图，请在配置平台选择支持视觉的模型。')
                 async with self.image_lock:
                     images, notes = await load_images(self.client, attachments)
-                user_message['content'] = context_text or '请看看这些图片或表情包，结合当前对话自然回复。'
+                user_message['content'] = context_text or '[对方发送了图片或表情包，没有附加文字。]'
                 if notes:
-                    user_message['content'] += '\n' + '\n'.join(notes)
+                    user_message['content'] += '\n[图片处理备注，仅供理解，不向对方复述：' + '；'.join(notes) + ']'
                 user_message['images'] = images
             schedule_context = '' if group_turn else await day.context()
             schedule_stamp = day.stamp()
@@ -525,7 +525,7 @@ class Bot:
                            '不得引入私聊、手机任务或私人日程；不能声称实际操作了手机。不要朗读身份元数据。')
                 # Include the complete public burst, even when the selected speaker spoke first.
                 conversation_context += '\n[本轮群聊公开背景]\n' + json.dumps(self.group_chat.public_messages(c,target,group_turn['through_id'],group_turn['ids']),ensure_ascii=False)
-            messages = [{'role': 'system', 'content': persona + android_context + browser_experience + memory_context + schedule_context + qzone_context + diary_context + dialogue_instruction + meme_instruction + conversation_context}, *old, user_message]
+            messages = [{'role': 'system', 'content': persona + android_context + browser_experience + memory_context + schedule_context + qzone_context + diary_context + dialogue_instruction + meme_instruction + conversation_context + (IMAGE_CHAT_INSTRUCTION if attachments or re.search(r'\[(?:QQ表情|表情包):[^\]\n]{0,120}\]',context_text) else '')}, *old, user_message]
             try:
                 answer = await self.generate(c.ollama, messages, max(2048, c.ollama.max_tokens) if dialogue_instruction or meme_instruction else c.ollama.max_tokens, thinking=self.provider(c.ollama).chat_thinking)
             except (ValueError, httpx.HTTPError):
