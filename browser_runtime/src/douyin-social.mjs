@@ -99,12 +99,12 @@ export function socialDOM() {
   const messages=[]
   // React can render messages in reverse DOM order (for example in a
   // column-reverse list). Use the visible conversation order, oldest first.
-  const bubbles=[...document.querySelectorAll('[data-message-id],[data-msg-id],[class*="MessageItemTextbubbleContent"],[class*="MessageItemShareAwemecontainer"],[class*="MessageItemEmojiemojiBox"]')].filter(visible)
+  const bubbles=[...document.querySelectorAll('[data-message-id],[data-msg-id],[class*="messageMessageBoxcontentBox"],[class*="MessageItemTextbubbleContent"],[class*="MessageItemShareAwemecontainer"],[class*="MessageItemEmojiemojiBox"]')].filter(visible)
   bubbles.sort((a,b)=>a.getBoundingClientRect().top-b.getBoundingClientRect().top)
   for(const e of bubbles.slice(-80)) {
     let metadata=null
     let ancestor=e
-    for(let n=0;n<6&&ancestor&&!metadata;n++,ancestor=ancestor.parentElement) {
+    for(let n=0;n<10&&ancestor&&!metadata;n++,ancestor=ancestor.parentElement) {
       const props=Object.keys(ancestor).find(k=>k.startsWith('__reactProps$'))
       if(!props)continue
       const walk=(v,d)=>{if(!v||typeof v!=='object'||d>3)return null
@@ -123,7 +123,18 @@ export function socialDOM() {
     // message's itemId; never pass arbitrary message content or assets onward.
     let parsed;try{parsed=metadata?.parsedContent}catch{}
     const cardId=typeof parsed?.itemId==='string'&&/^\d{6,30}$/.test(parsed.itemId)?parsed.itemId:''
-    messages.push({id:short(mid,100),direction,sender:short(sender,100),conversation_id:short(conversation,100),text:short(e.innerText),video_id:cardId||card?.href.match(/\/video\/(\d+)/)?.[1]||'',sticker:e.querySelector('img')?.getAttribute('alt')||''})
+    // Native emoji are images whose alt can be empty; their actual text is
+    // retained in parsedContent.text (e.g. [色]). Store stickers separately
+    // from normal text and read only the platform's display label, never URLs.
+    const imageLabel=img=>short(img.getAttribute('alt')||img.getAttribute('title')||img.getAttribute('aria-label')||'',80)
+    const textDOM=node=>node.nodeType===Node.TEXT_NODE?node.textContent:node.nodeType!==Node.ELEMENT_NODE?'':node.tagName==='IMG'?imageLabel(node):node.tagName==='BR'?'\n':[...node.childNodes].map(textDOM).join('')
+    const isSticker=parsed?.aweType===508||e.matches('[class*="MessageItemEmojiemojiBox"]')
+    const contentImage=e.matches('[class*="messageMessageBoxcontentBox"]')?e.querySelector('[class*="MessageItemEmoji"] img,[class*="TextMessageTextemoji"] img'):e.querySelector('img')
+    const label=short(parsed?.display_name,120)||imageLabel(contentImage||e)
+    const sticker=isSticker?label:short(e.querySelector('img')?.getAttribute('alt'),80)
+    const text=short(parsed?.text)||(isSticker?'[抖音表情包'+(label?'：'+label:'，无名称')+']':short(textDOM(e)))
+    messages.push({id:short(mid,100),direction,sender:short(sender,100),conversation_id:short(conversation,100),text,video_id:cardId||card?.href.match(/\/video\/(\d+)/)?.[1]||'',sticker,
+      message_type:isSticker?'sticker':e.querySelector('[class*="TextMessageTextemoji"] img')||e.matches('[class*="MessageItemTextbubbleContent"]')&&e.querySelector('img')?'emoji':'text'})
   }
   const selected=[...document.querySelectorAll('[data-e2e="conversation-item"]')].filter(visible).filter(e=>e.getAttribute('aria-selected')==='true'||e.getAttribute('data-active')==='true'||/selected|Selected|active|Active/.test(e.className))
   const peer=selected.length===1?identity(selected[0]):''
@@ -171,8 +182,8 @@ export class DouyinSocial {
         if(person.unread && monitor.opened.get(person.id)!==JSON.stringify([person.unreadCount,person.preview]))monitor.pending.set(person.id,person)
         if(!person.unread){monitor.pending.delete(person.id);monitor.opened.delete(person.id)}
       }
-      const messages=(await page.evaluate(socialDOM)).messages.slice(-10).map(m=>m.id).join('|')
-      const signature=JSON.stringify([...monitor.pending.values()].map(p=>[p.id,p.unreadCount,p.preview]))+messages
+      const messages=(await page.evaluate(socialDOM)).messages.slice(-10).map(m=>[m.id,m.text,m.sticker,m.message_type])
+      const signature=JSON.stringify([...monitor.pending.values()].map(p=>[p.id,p.unreadCount,p.preview]))+JSON.stringify(messages)
       if(signature!==monitor.signature){monitor.signature=signature;monitor.version++;for(const wake of [...monitor.waiters])wake()}
       monitor.checkedAt=Date.now();monitor.error=''
     }

@@ -274,3 +274,25 @@ test('message snapshots follow visual order in reversed React lists and retain r
   assert.deepEqual(view.messages.map(m=>m.id),['new-inbound','old-outbound','old-inbound'])
  }finally{await engine.close();await fs.rm(dir,{recursive:true,force:true})}
 })
+
+test('native emoji and store stickers retain content without leaking asset URLs', {timeout:30000,skip:process.platform!=='darwin'},async()=>{
+ const dir=await fs.mkdtemp(path.join(os.tmpdir(),'haybot-dm-emoji-')),engine=new BrowserEngine(dir)
+ try {
+  await engine.start('emoji');const session=engine.get('emoji'),page=session.tabs.get(session.active)
+  await page.setContent(`<div id="native" class="MessageItemTextbubbleContent"><img title="[色]" style="width:20px;height:20px"><img title="[色]" style="width:20px;height:20px"></div>
+   <div id="mixed" data-message-id="mixed" data-direction="inbound">来了<img title="[看]" style="width:20px;height:20px">宝宝</div>
+   <div id="sticker" class="messageMessageBoxcontentBox" style="width:100px;height:40px"><img class="avatar" style="width:30px;height:30px"><div class="MessageItemEmojiemojiBox" style="width:0;height:0"><img></div></div>
+   <div data-message-id="anonymous" data-direction="inbound" class="MessageItemEmojiemojiBox" style="width:40px;height:40px"></div>`)
+  await page.evaluate(()=>{
+   const bind=(id,parsed)=>{document.getElementById(id).__reactProps$fixture={message:{serverId:id,sender:'peer',isMyMessage:false,parsedContent:parsed}}}
+   bind('native',{text:'[色][色]',aweType:0})
+   bind('sticker',{display_name:'嘻嘻',aweType:508,url:'https://private-asset.invalid/?token=secret'})
+  })
+  const view=await page.evaluate(socialDOM),byId=Object.fromEntries(view.messages.map(m=>[m.id,m]))
+  assert.equal(byId.native.text,'[色][色]');assert.equal(byId.native.message_type,'emoji')
+  assert.equal(byId.mixed.text,'来了[看]宝宝')
+  assert.equal(byId.sticker.text,'[抖音表情包：嘻嘻]');assert.equal(byId.sticker.sticker,'嘻嘻');assert.equal(byId.sticker.direction,'inbound')
+  assert.equal(byId.anonymous.text,'[抖音表情包，无名称]')
+  assert.doesNotMatch(JSON.stringify(view),/private-asset|secret/)
+ }finally{await engine.close();await fs.rm(dir,{recursive:true,force:true})}
+})

@@ -342,3 +342,16 @@ async def test_dm_discards_draft_if_new_message_arrives_during_generation(client
     with pytest.raises(asyncio.CancelledError):await t.dm.run(t.get('default','journal-one'),cfg,'capability')
     assert sent==[] and t.model.await_count==1
     assert t.dm.pending(t.get('default','journal-one'),base)[0]['message_id']=='incoming-old'
+
+
+@pytest.mark.asyncio
+async def test_dm_prompt_retains_native_emoji_and_sticker_labels(client):
+    t,bot=seed(client,state='running')
+    t.model=AsyncMock(return_value='{"reply":"偷偷笑什么呀。"}')
+    messages=[{'id':'emoji','direction':'inbound','text':'[色][色]','message_type':'emoji'},
+        {'id':'sticker','direction':'inbound','text':'[抖音表情包：嘻嘻]','message_type':'sticker','sticker':'嘻嘻'}]
+    reply=await t.dm.generate(t,bot,t.get('default','journal-one'),{'nickname':'朋友'},messages,False,'自然聊天')
+    prompt=t.model.call_args.args[1]
+    assert json.loads(prompt[1]['content'])['messages']==messages
+    assert '不要把表情当作空消息' in prompt[0]['content']
+    assert reply=='偷偷笑什么呀。'
