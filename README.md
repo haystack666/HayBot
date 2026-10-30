@@ -338,3 +338,17 @@ NapCat 读取 OneBot `reply` 消息段，优先恢复当前会话归档；未归
 允许 Owner 私聊发起并保存 QQ 授权后，官方 QQBot 与 NapCat 均可用 `/抖音 任务内容`、`/抖音进度`、`/停止抖音`，也支持自然语言委托。QQ 权限绑定当前接入账号；群聊和其他用户不能启动任务。浏览记录保存在后台，QQ 回报以发送回执为准。
 
 已接入按用户设置及额度执行的评论发布、真实 @、点赞、站内分享和受限私信回复，关注尚未接入。不用链接冒充 @；明确索要链接时从实际观看记录取得。验证中断时暂停并向已授权的 QQ Owner 自然求助；待核对互动提供只读核验入口，防止重复提交。详细运行方式、接口与验证边界见 [浏览器运行时说明](browser_runtime/README.md)。
+
+## 供应商中心与 QQ 语音
+
+`/providers` 分为「连接管理 / 服务目录 / 模型分配」。连接管理按对话、语音合成、语音识别、Embedding、Rerank 筛选和搜索；服务目录提供 35 个模板。连接可重复添加、独立命名，API Key / APISecret 加密保存。修改地址、类型或 AppID 时不会沿用旧凭证。测试状态只代表最近一次针对当前配置的测试结果，模型列表连通与实际调用通过分别显示。
+
+对话模板包括原有 Ollama、OpenAI Compatible、OpenAI Responses、Anthropic Compatible、DeepSeek，以及 DeepSeek Responses、Kimi、Kimi Code Plan、MiniMax、MiniMax Token Plan、Zhipu、Xiaomi、Xiaomi Token Plan、xAI、OpenRouter、Azure OpenAI、Gemini OpenAI API、Gemini Compatible。后者使用 Gemini 原生 `generateContent` 协议；Azure 模型填写部署名称，支持 `/openai/v1` 和显式 API 版本的旧版部署接口。套餐连接需填写对应套餐的地址和凭证，能否用于当前场景由供应商订阅权限决定。
+
+TTS 支持 OpenAI、小米 MiMo、阿里云百炼、MiniMax、火山引擎、Azure、Gemini；STT 支持小米 MiMo、Whisper（Local）、Whisper（API）、讯飞星火。Whisper（Local）连接自行部署在本机的 OpenAI 兼容 Whisper 服务（默认 `http://host.docker.internal:8001/v1`），HayBot 不自动下载或启动识别模型。讯飞星火使用语音听写大模型 V2.0，需要 AppID、APIKey、APISecret，当前适配中文识别。Azure TTS、火山引擎的模型栏可填写引擎名称作分配标识，实际请求分别由音色和 Resource ID 决定。
+
+先在连接抽屉填写模型、音色及凭证，使用「合成试听」或上传音频进行「转写测试」；测试不发送 QQ 消息。随后在「模型分配」选择机器人，或进入该机器人的「QQ 与模型 → 模型分配」，配置 TTS / STT 并开启对应开关。保存前需停止机器人；全局分配仅修改所选机器人的对话、语音和记忆模型，不覆盖人格与其他配置。
+
+QQ 官方和外部 NapCat 均接入语音收发。STT 开启后，收到可读取 QQ 媒体地址的语音会先转写，再进入现有聊天流程；聊天档案保留转写文字，音频仅在内存和转换管道中处理。新功能默认关闭，收到语音不自动触发语音回复。TTS 开启后，只有本轮明确要求“用语音回复我”等才发语音，普通聊天仍回复文字；合成失败或回复过长时使用文字。QQ 发出请求后若结果不确定，不自动补发，避免重复消息。语音经 FFmpeg 与 `pilk-nogil` 转为 QQ SILK（媒体上传格式参考[腾讯官方 SDK](https://github.com/tencent-connect/qqbot-nodejs/blob/main/src/protocol/api/media.ts)）；输入文件上限 6 MB，普通转写最长 120 秒，讯飞最长 60 秒。
+
+协议参考：[OpenAI 语音](https://developers.openai.com/api/reference/resources/audio/subresources/speech/methods/create)、[MiMo 合成](https://mimo.mi.com/docs/en-US/quick-start/usage-guide/audio/speech-synthesis-v2.5)、[MiMo 识别](https://mimo.mi.com/docs/en-US/api/audio/Speech-Recognition)、[百炼 TTS](https://help.aliyun.com/zh/model-studio/qwen-audio-tts-http-api)、[MiniMax TTS](https://platform.minimax.io/docs/api-reference/speech-t2a-http)、[火山引擎 TTS](https://docs.volcengine.com/docs/doubao-voice/unidirectional-streaming-text-to-speech-http?lang=zh)、[Azure TTS](https://learn.microsoft.com/azure/ai-services/speech-service/rest-text-to-speech)、[Gemini TTS](https://ai.google.dev/gemini-api/docs/generate-content/speech-generation)、[讯飞星火](https://www.xfyun.cn/doc/spark/spark_zh_iat_new.html)。

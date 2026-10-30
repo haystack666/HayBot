@@ -65,7 +65,7 @@ def test_provider_switch_roundtrips_live_without_resetting_context(client):
     pid = client.portal.call(lambda: runtime.store.load().ollama.provider_id)
     original = client.get('/api/providers').json()['providers'][0]
     assert original['chat_thinking'] is False
-    payload = {k:v for k,v in original.items() if k not in ('id','api_key_set','used_by')}
+    payload = {k:v for k,v in original.items() if k in ProviderConfig.model_fields}
     client.portal.call(runtime.store.save_history, 'user:alice:alice', [{'role':'user','content':'keep history'}], 2)
     runtime.bot.state = 'connected'
     for enabled in (True, False):

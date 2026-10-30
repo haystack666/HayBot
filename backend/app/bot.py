@@ -9,6 +9,7 @@ from urllib.parse import quote, urlsplit
 import httpx
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed, WebSocketException
+from .speech import SpeechError, SpeechService, audio_attachments, chat_attachments, wants_voice
 from .images import IMAGE_CHAT_INSTRUCTION, ImageMessageError, image_attachments, load_images
 from .ollama import CONTEXT_WINDOW, ContextLimitError, chat_response
 from .providers import ProviderConfig, ProviderHTTPError, endpoint, headers, list_models, generate, read_response, ollama_native
@@ -29,7 +30,7 @@ class Bot:
         self.store = store
         self.providers = providers
         if providers is not None:
-            self.store.events.secret_resolver = lambda catalog=providers: [catalog.get(pid).api_key for pid in catalog.ids()]
+            self.store.events.secret_resolver = lambda catalog=providers: [secret for pid in catalog.ids() for secret in catalog.get(pid).secret_values]
         self.client = client or httpx.AsyncClient(timeout=15, trust_env=False)
         self.task = None
         self.jobs = set()
@@ -43,6 +44,7 @@ class Bot:
         self.expires = 0
         self.token_lock = asyncio.Lock()
         self.image_lock = asyncio.Lock()
+        self.speech=SpeechService(self)
         self.inference_lock = inference_lock or asyncio.Lock()
         self.schedule = ScheduleService(store, self)
         from .memory import MemoryService
@@ -320,7 +322,7 @@ class Bot:
         target = data.get('group_openid') if is_group(kind) else sender
         prepare_quote(data, self.store.chat, config, is_group(kind), target)
         content = (data.get('content') or '').strip() or self.message_text(data)
-        attachments = image_attachments(data)
+        attachments = chat_attachments(data)
         if not sender or not target or not data.get('id') or len(content) > 12000 or (not content and not attachments):
             return
         at = time.time()
@@ -366,7 +368,7 @@ class Bot:
         user = sender_id(data, group)
         target = data.get('group_openid') if group else user
         text = self.message_text(data)
-        if not user or not target or not data.get('id') or len(text) > 12000 or not (text or image_attachments(data)):
+        if not user or not target or not data.get('id') or len(text) > 12000 or not (text or chat_attachments(data)):
             return
         owner = self.store.scopes.ensure(c.account_id, 'group' if group else 'user', target, user,
                                          author.get('username') or author.get('nickname') or '')
@@ -420,7 +422,8 @@ class Bot:
             text = self.message_text(d)
             context_text = self.conversation_text(d)
             attachments = image_attachments(d)
-            if not target or not user or not d.get('id') or (not text and not attachments) or len(text) > 12000:
+            audios=audio_attachments(d)
+            if not target or not user or not d.get('id') or (not text and not attachments and not audios) or len(text) > 12000:
                 return
             if batch is None and not group and not self.store.db.execute('SELECT 1 FROM seen WHERE id=?', (f'{target}:{d["id"]}',)).fetchone():
                 self.store.remember_contact(c.account_id, user, time.time(), d['id'])
@@ -469,7 +472,24 @@ class Bot:
             if batch:
                 self.store.log('info', f'合并 {len(batch["ids"])} 条用户消息，开始回复', category='message', event='message.batch_started')
             self.store.log('info', '开始处理群消息' if group else '开始处理单聊消息', category='message', event='message.received')
-            images_requested = bool(attachments)
+            images_requested = bool(attachments or audios)
+            if audios:
+                try:
+                    transcribed=await self.speech.listen(audios,c)
+                    context_text=(context_text+'\n' if context_text else '')+'[对方语音转写]\n'+transcribed
+                    text=(text+'\n' if text else '')+transcribed
+                    if not batch or self.inbox.live(batch):
+                        with self.store.db:
+                            for mid,transcript in self.speech.last_transcripts.get():
+                                event_key=f'in:{c.account_id}:{target}:{mid or d["id"]}'
+                                row=self.store.db.execute("SELECT content FROM chat_messages WHERE event_key=? AND role='user'",(event_key,)).fetchone()
+                                caption=row['content'].split('[语音转写]',1)[0].rstrip() if row else ''
+                                self.store.db.execute("UPDATE chat_messages SET content=? WHERE event_key=? AND role='user'",((caption+'\n' if caption else '')+'[语音转写] '+transcript,event_key))
+                except SpeechError:
+                    if not text and not attachments:raise
+                    context_text+='\n[对方还发送了语音，当前无法读取；只回应可见内容，不猜测音频内容。]'
+                    self.store.log('warn','本轮语音未读取，保留文字或图片继续回复',category='message',event='speech.caption_fallback')
+            voice_requested=bool(c.speech.tts.enabled and wants_voice(text) and group_turn is None)
             user_message = {'role': 'user', 'content': context_text}
             if attachments:
                 provider = self.provider(c.ollama)
@@ -519,7 +539,7 @@ class Bot:
                            '不得引入私聊、私人任务或私人日程。不要朗读身份元数据。')
                 # Include the complete public burst, even when the selected speaker spoke first.
                 conversation_context += '\n[本轮群聊公开背景]\n' + json.dumps(self.group_chat.public_messages(c,target,group_turn['through_id'],group_turn['ids']),ensure_ascii=False)
-            messages = [{'role': 'system', 'content': persona + browser_context + browser_experience + memory_context + schedule_context + qzone_context + diary_context + dialogue_instruction + meme_instruction + conversation_context + (IMAGE_CHAT_INSTRUCTION if attachments or re.search(r'\[(?:QQ表情|表情包):[^\]\n]{0,120}\]',context_text) else '')}, *old, user_message]
+            messages = [{'role': 'system', 'content': persona + browser_context + browser_experience + memory_context + schedule_context + qzone_context + diary_context + dialogue_instruction + meme_instruction + conversation_context + (IMAGE_CHAT_INSTRUCTION if attachments or re.search(r'\[(?:QQ表情|表情包):[^\]\n]{0,120}\]',context_text) else '') + ('\n本轮将把你的回复正文合成为语音。直接说话，不写动作括号、Markdown或发语音的说明。' if voice_requested else '')}, *old, user_message]
             try:
                 answer = await self.generate(c.ollama, messages, max(2048, c.ollama.max_tokens) if dialogue_instruction or meme_instruction else c.ollama.max_tokens, thinking=self.provider(c.ollama).chat_thinking)
             except (ValueError, httpx.HTTPError):
@@ -584,6 +604,7 @@ class Bot:
             from .reply_delivery import ReplyDelivery
             delivery = ReplyDelivery(self, c, d, group, target, user, sid, key, day, schedule_stamp, memory_stamp, old, history_text, batch=batch, group_turn=group_turn)
             delivery.diary_context = diary_context
+            delivery.voice_requested=voice_requested
             receipt = await delivery.send(content, prepared, update, meme=meme, meme_candidates=meme_candidates if meme_fallback else None)
             schedule_stamp = delivery.schedule_stamp
             if not isinstance(receipt, dict) or not receipt.get('id'):
@@ -608,8 +629,8 @@ class Bot:
             return True
         except (ScheduleChanged, StaleMemory) as error:
             self.store.log('warn', str(error))
-        except ImageMessageError as e:
-            self.store.record_result('errors', f'回复失败：{e}', category='message', event='message.image_failed', details=exception_details(e))
+        except (ImageMessageError,SpeechError) as e:
+            self.store.record_result('errors', f'回复失败：{e}', category='message', event='message.speech_failed' if isinstance(e,SpeechError) else 'message.image_failed', details=exception_details(e))
             if claimed and group_turn is None:
                 try:
                     if batch is not None and not self.inbox.mark_sending(batch):
@@ -619,18 +640,18 @@ class Bot:
                                    before_send=(lambda: self.inbox.live(batch)) if batch else None,
                                    json={'msg_type': 0, 'content': str(e), 'msg_id': d['id'], 'msg_seq': 1})
                     if not isinstance(notice, dict) or not notice.get('id'):
-                        self.store.log('warn', 'QQ 未确认图片提示送达')
+                        self.store.log('warn', 'QQ 未确认媒体处理提示送达')
                         return
                     self.store.chat.record(c.account_id, 'group' if group else 'user', target, 'assistant', str(e),
-                                           f'reply:{c.account_id}:{target}:{d["id"]}', at=time.time(), source='image_notice',
+                                           f'reply:{c.account_id}:{target}:{d["id"]}', at=time.time(), source='speech_notice' if isinstance(e,SpeechError) else 'image_notice',
                                            **receipt_metadata(notice))
                     self.last[key] = time.time()
                     if len(self.last) > 500:
                         self.last.pop(next(iter(self.last)))
-                    self.store.record_result('sent', f'{"群聊" if group else "单聊"}图片处理提示已发送')
+                    self.store.record_result('sent', f'{"群聊" if group else "单聊"}媒体处理提示已发送')
                     return True
                 except Exception:
-                    self.store.log('warn', '图片处理提示发送失败')
+                    self.store.log('warn', '媒体处理提示发送失败')
         except asyncio.CancelledError:
             raise
         except Exception as e:

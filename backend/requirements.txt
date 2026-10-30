@@ -6,3 +6,4 @@ cryptography==44.0.3
 pytest==8.3.5
 pytest-asyncio==0.26.0
 pillow==13.0.0
+pilk-nogil==0.4.3

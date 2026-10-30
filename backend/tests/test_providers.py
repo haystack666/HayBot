@@ -139,7 +139,7 @@ def test_provider_edit_guard_during_generation_and_start(client):
     pid = client.portal.call(lambda: runtime.store.load().ollama.provider_id)
     original = client.portal.call(manager.providers.public, pid)
     def payload(name='renamed'):
-        return {k: v for k, v in {**original, 'name': name}.items() if k not in ('id', 'api_key_set')}
+        return {k: v for k, v in {**original, 'name': name}.items() if k in ProviderConfig.model_fields}
     runtime.bot.state = 'connecting'
     assert client.put(f'/api/providers/{pid}', json=payload()).status_code == 200
     assert client.put(f'/api/providers/{pid}', json={**payload(), 'base_url': 'https://changed.test'}).status_code == 409

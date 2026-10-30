@@ -244,6 +244,27 @@ class MemeConfig(StrictModel):
         return self
 
 
+class SpeechModelConfig(MemoryModelConfig):
+    enabled: bool = False
+    voice: str = Field(default='',max_length=200)
+    language: str = Field(default='auto',max_length=30)
+    speed: float = Field(default=1.0,ge=0.5,le=2.0)
+
+    @model_validator(mode='after')
+    def complete(self):
+        self.model=self.model.strip()
+        if bool(self.provider_id)!=bool(self.model):raise ValueError('语音供应商与模型名称必须同时填写')
+        if self.enabled and not self.provider_id:raise ValueError('请先选择语音供应商和模型')
+        return self
+
+
+class SpeechConfig(StrictModel):
+    tts: SpeechModelConfig = Field(default_factory=SpeechModelConfig)
+    stt: SpeechModelConfig = Field(default_factory=SpeechModelConfig)
+    reply_mode: Literal['on_request'] = 'on_request'
+    max_reply_chars: int = Field(default=600,ge=50,le=1500)
+
+
 class Settings(StrictModel):
     transport: Literal['qq_official','napcat'] = 'qq_official'
     napcat: NapCatConfig = Field(default_factory=NapCatConfig)
@@ -255,6 +276,7 @@ class Settings(StrictModel):
     schedule: ScheduleConfig = Field(default_factory=ScheduleConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     memes: MemeConfig = Field(default_factory=MemeConfig)
+    speech: SpeechConfig = Field(default_factory=SpeechConfig)
 
     @property
     def account_id(self):

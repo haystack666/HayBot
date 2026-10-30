@@ -94,6 +94,7 @@ export default function App({ page }) {
   const loadBotList = useCallback(async () => { const result = await requestApi('/bots'); setBots(result.bots); return result.bots }, [])
   const [authed, setAuthed] = useState(null), [password, setPassword] = useState(''), [loginError, setLoginError] = useState('')
   const [config, setConfig] = useState(null), [savedConfig, setSavedConfig] = useState(null), [dirty, setDirty] = useState(false)
+  const [providerDirty,setProviderDirty]=useState(false)
   const [collapsed, setCollapsed] = useState(false), [mobileOpen, setMobileOpen] = useState(false)
   const [status, setStatus] = useState({ state: 'stopped', stats: {}, logs: [], jobs: 0, uptime: 0 })
   const [models, setModels] = useState([]), [ollamaState, setOllamaState] = useState('unknown'), [busy, setBusy] = useState(''), [toast, setToast] = useState(null), [pollError, setPollError] = useState(false)
@@ -147,7 +148,7 @@ export default function App({ page }) {
   function setTransport(value) { setConfig(c => ({...c,transport:value,proactive:{...c.proactive,enabled:false,recipient_id:''}}));setDirty(true) }
   function cancel() { setConfig(structuredClone(savedConfig)); setDirty(false); checkModels(savedConfig.ollama).catch(() => {}) }
   function navigate(next) { routerNavigate(`/bots/${botId}/${next}`); setMobileOpen(false) }
-  function guardLeave() { return !dirty || window.confirm('当前机器人有未保存的配置。确定离开当前页面吗？') }
+  function guardLeave() { return (!dirty&&!providerDirty) || window.confirm('有未保存的配置。确定离开当前页面吗？') }
   function switchBot(next) { if (next && next !== botId && guardLeave()) { routerNavigate(`/bots/${next}/${!botId ? 'overview' : page}`); setMobileOpen(false) } }
   const active = !!botId && status.state !== 'stopped', current = page === 'bots' ? { title: '机器人管理', subtitle: '' } : pages.find(p => p.id === page)
   const { search } = useLocation()
@@ -172,7 +173,7 @@ export default function App({ page }) {
     {page === 'overview' && <Overview status={status} config={config} ollamaState={ollamaState} navigate={navigate} providers={providers} />}
     {page === 'qq' && connections.tabs}
     {botId && <ConfigurationPages {...{page, config, active, busy, dirty, update, action, api, notify, checkModels, models, ollamaState, setTransport}} connectionView={connections.value} guardLeave={guardLeave} />}
-    {(page === 'providers' || page === 'qq' && connections.value === 'models') && <ProvidersPage key={botId || 'shared'} providers={providers} refreshProviders={loadProviders} globalApi={requestApi} assignmentOnly={!!botId} guardLeave={guardLeave} {...{config, update, active, busy, dirty, notify}} />}
+    {(page === 'providers' || page === 'qq' && connections.value === 'models') && <ProvidersPage onDirtyChange={setProviderDirty} bots={bots} key={botId || 'shared'} providers={providers} refreshProviders={loadProviders} globalApi={requestApi} assignmentOnly={!!botId} guardLeave={guardLeave} {...{config, update, active, busy, dirty, notify}} />}
     {page === 'proactive' && <ProactivePage config={config.proactive} update={(key, value) => update('proactive', key, value)} active={active} busy={busy} dirty={dirty} api={api} notify={notify} Panel={Panel} Field={Field} space={<QzonePage key={botId} {...{api,notify,dirty}} />} />}
     {page === 'schedule' && <SchedulePage config={config.schedule} update={(key, value) => update('schedule', key, value)} {...{active, busy, dirty, api, notify}} model={config.ollama.model} />}
     {page === 'memory' && <MemoryPage config={config.memory} update={(key, value) => update('memory', key, value)} {...{active, busy, dirty, api, notify}} />}

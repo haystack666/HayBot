@@ -6,7 +6,7 @@ import time
 import uuid
 
 from .event_logs import exception_details
-from .images import image_attachments
+from .speech import chat_attachments
 
 
 class ConversationInbox:
@@ -97,7 +97,7 @@ class ConversationInbox:
         for row in rows:
             payload = json.loads(self.store.cipher.decrypt(row['payload'].encode()))
             text = self.bot.message_text(payload['d'])
-            images = image_attachments(payload['d'])
+            images = [{**a,'_source_message_id':payload['d']['id']} for a in chat_attachments(payload['d'])]
             part = {'content': text, **({'_quote': payload['d']['_quote']} if '_quote' in payload['d'] else {})}
             if selected and (len('\n'.join([*texts, text])) > 12000 or len(attachments) + len(images) > 3
                              or sum(len(self.bot.conversation_text(p)) for p in [*parts, part]) > 20000):

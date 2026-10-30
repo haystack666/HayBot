@@ -1,5 +1,6 @@
 """Send and archive confirmed QQ bubbles; logical conversation state stays one turn."""
 import asyncio
+import base64
 import time
 from urllib.parse import quote
 
@@ -20,6 +21,7 @@ class ReplyDelivery:
         self.old, self.question, self.confirmed, self.source_ids = old, question, [], []
         self.meme_context = ''
         self.diary_context = None
+        self.voice_requested=False
 
     def state_current(self):
         return (self.day.matches(self.schedule_stamp) and self.bot.memory.matches(self.sid, self.memory_stamp)
@@ -98,6 +100,55 @@ class ReplyDelivery:
         except Exception as error:
             self.store.log('warn','表情包发送失败，文字回复已保留',category='message',event='meme.send_failed',details=exception_details(error))
 
+    async def send_voice(self,content,prepared=None,update=None):
+        # Only pre-submission failures may fall back to text. An uncertain QQ
+        # receipt must never cause a second automatic submission.
+        guard=lambda:self.current() and self.bot.store.load().speech==self.config.speech and self.bot.store.load().account_id==self.config.account_id
+        try:
+            audio=await self.bot.speech.speak(content,self.config)
+            if not guard():raise ScheduleChanged('语音生成期间会话或配置已变化')
+            file_info=None
+            if self.config.transport!='napcat':
+                uploaded=await self.bot.api('POST',f'/v2/{"groups" if self.group else "users"}/{quote(self.target,safe="")}/files',
+                    before_send=guard,json={'file_type':3,'file_data':base64.b64encode(audio).decode(),'srv_send_msg':False},timeout=30)
+                file_info=uploaded.get('file_info') if isinstance(uploaded,dict) else None
+                if not file_info:raise ValueError('QQ 未返回语音媒体凭据')
+        except (asyncio.CancelledError,ScheduleChanged):raise
+        except Exception as error:
+            self.store.log('warn','语音生成未完成，本轮保留文字回复',category='message',event='speech.text_fallback',details=exception_details(error))
+            return 'fallback',None
+        async def post():
+            if not guard():raise ScheduleChanged('发送前会话或语音配置已变化')
+            if self.batch is not None and not self.bot.inbox.mark_sending(self.batch):raise ScheduleChanged('批次已取消')
+            if self.config.transport=='napcat':return await self.bot.napcat.send_voice(self.group,self.target,audio,before_send=guard)
+            return await self.bot.api('POST',f'/v2/{"groups" if self.group else "users"}/{quote(self.target,safe="")}/messages',
+                before_send=guard,json={'msg_type':7,'content':' ','media':{'file_info':file_info},'msg_id':self.data['id'],'msg_seq':1})
+        try:
+            if prepared:
+                async with self.day.lock:
+                    if not guard():raise ScheduleChanged('会话已变化')
+                    latest=self.day.dialogue.prepare(update)
+                    receipt=await post()
+                    if isinstance(receipt,dict) and receipt.get('id') and self.state_current():
+                        self.day.dialogue.apply(latest,{'kind':'group' if self.group else 'user','target':self.target,'sender_id':self.user,'message_id':self.data['id']})
+                        self.schedule_stamp=self.day.stamp()
+            else:receipt=await post()
+        except (asyncio.CancelledError,ScheduleChanged):raise
+        except Exception as error:
+            self.store.log('warn','语音发送结果待核对，未自动补发',category='message',event='speech.receipt_unknown',details=exception_details(error))
+            return 'unknown',None
+        if not isinstance(receipt,dict) or not receipt.get('id'):
+            self.store.log('warn','QQ 未确认语音送达，未自动补发',category='message',event='speech.receipt_unknown')
+            return 'unknown',None
+        self.confirmed.append(content)
+        key=f'reply:{self.config.account_id}:{self.target}:{self.data["id"]}'
+        self.store.chat.record(self.config.account_id,'group' if self.group else 'user',self.target,'assistant',content,key,
+            attachment_count=1,at=time.time(),source='voice',status='sent' if self.state_current() else 'sent_stale',
+            reply_to=f'in:{self.config.account_id}:{self.target}:{self.data["id"]}',**receipt_metadata(receipt))
+        self.source_ids.append(self.store.db.execute('SELECT id FROM chat_messages WHERE event_key=?',(key,)).fetchone()[0])
+        self.store.record_result('sent','语音回复已确认送达',category='message',event='speech.sent',details={'sent_message_id':receipt['id']})
+        return 'sent',receipt
+
     async def send(self, content, prepared=None, update=None, meme=None, meme_candidates=None):
         content = public_reply(content)
         rules = self.config.rules
@@ -107,6 +158,11 @@ class ReplyDelivery:
         parts = split_reply(content, rules.split_length, max_parts) if rules.split_enabled else [content]
         complete, receipt = False, None
         try:
+            if self.voice_requested:
+                outcome,receipt=await self.send_voice(content,prepared,update)
+                if outcome!='fallback':
+                    complete=outcome=='sent'
+                    return receipt
             for index, part in enumerate(parts, 1):
                 if index > 1 and rules.split_delay:
                     await asyncio.sleep(rules.split_delay)

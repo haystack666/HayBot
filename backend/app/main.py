@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import hmac
 import os
 import secrets
@@ -13,8 +14,8 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, field_validator
-from .config import Settings, OllamaConfig
+from pydantic import BaseModel, Field, ValidationError, field_validator
+from .config import Settings, OllamaConfig, SpeechConfig, MemoryModelConfig
 from .registry import BotManager, BotRuntime
 from .providers import ProviderConfig, ProviderHTTPError, list_models, generate, read_response
 from .qq_connect import QQConnect
@@ -55,7 +56,7 @@ def create_app(data_dir=None, static_dir=None):
 
     @app.middleware('http')
     async def security(request: Request, call_next):
-        max_body = 10 * 1024 * 1024 if request.url.path.endswith(('/memes/upload','/qzone/images')) else 131072
+        max_body = 10 * 1024 * 1024 if request.url.path.endswith(('/memes/upload','/qzone/images','/providers/test-speech')) else 131072
         if request.headers.get('content-length', '').isdigit() and int(request.headers['content-length']) > max_body:
             return JSONResponse({'detail': '请求内容过大'}, status_code=413)
         if request.url.path.startswith('/api/'):
@@ -170,6 +171,11 @@ def create_app(data_dir=None, static_dir=None):
             {'id': p['id'], 'name': p['name'], 'archived': bool(p['archived']), 'state': p['state']}
             for p in manager.provider_references(provider_id)]}
 
+    @app.get('/api/provider-types')
+    async def provider_types():
+        from .provider_catalog import CATALOG
+        return {'types': CATALOG}
+
     @app.get('/api/providers')
     async def providers():
         return {'providers': [public_provider(pid) for pid in app.state.manager.providers.ids()]}
@@ -194,11 +200,16 @@ def create_app(data_dir=None, static_dir=None):
             return {'models': [], 'models_supported': False, 'message': '请填写实际模型名称，使用「模型调用测试」验证嵌入或重排接口'}
         try:
             models = await list_models(provider_request, provider)
+            app.state.manager.providers.checked(provider_id,provider,'connected')
             return {'models': models, 'models_supported': True, 'message': f'连接成功，发现 {len(models)} 个模型'}
         except ProviderHTTPError as error:
             if provider.type == 'ollama' or error.status not in (404, 405, 501):
+                app.state.manager.providers.checked(provider_id,provider,'failed')
                 raise
             return {'models': [], 'models_supported': False, 'message': '此地址不提供模型列表，请手动填写模型，并使用生成测试验证连接'}
+        except Exception:
+            app.state.manager.providers.checked(provider_id,provider,'failed')
+            raise
 
     class GenerationProbe(ProviderConfig):
         model: str = Field(min_length=1, max_length=200)
@@ -208,14 +219,26 @@ def create_app(data_dir=None, static_dir=None):
 
     @app.post('/api/providers/test-generation')
     async def test_generation(body: GenerationProbe, provider_id: str = ''):
+        try:
+            return await run_generation_probe(body,provider_id)
+        except Exception:
+            config=ProviderConfig.model_validate(body.model_dump(exclude={'model','temperature','timeout','max_tokens'}))
+            prepared=app.state.manager.providers.prepare(config,provider_id)
+            app.state.manager.providers.checked(provider_id,prepared,'failed')
+            raise
+
+    async def run_generation_probe(body,provider_id):
         provider = app.state.manager.providers.prepare(ProviderConfig.model_validate(body.model_dump(exclude={'model', 'temperature', 'timeout', 'max_tokens'})), provider_id)
+        if provider.purpose in ('tts','stt'):raise ValueError('语音服务请使用试听或转写测试')
         if provider.purpose != 'chat':
             from .retrieval import embed, rerank
             if provider.purpose == 'embedding':
                 result = await embed(provider_request, provider, body.model, ['用户喜欢喝茶', '喜欢饮茶'], 'document', body.timeout)
+                app.state.manager.providers.checked(provider_id,provider,'verified')
                 return {'content': f'嵌入测试成功：返回 {len(result["vectors"])} 条向量，每条 {len(result["vectors"][0])} 维',
                         'dimensions': len(result['vectors'][0]), 'input_tokens': result['input_tokens'], 'output_tokens': 0}
             result = await rerank(provider_request, provider, body.model, '喜欢喝茶', ['用户喜欢喝茶', '用户正在修自行车'], 2, body.timeout)
+            app.state.manager.providers.checked(provider_id,provider,'verified')
             return {'content': '重排测试成功', 'results': result['results'], 'input_tokens': result['input_tokens'], 'output_tokens': 0}
         if provider.type == 'anthropic' and provider.anthropic_version == '2023-06-01' and provider.send_temperature and body.temperature > 1:
             raise ValueError('Anthropic 温度范围为 0–1')
@@ -226,7 +249,37 @@ def create_app(data_dir=None, static_dir=None):
         content = result['message']['content'].strip()
         if not content:
             raise ValueError('服务未返回文本回答，请检查模型、协议和输出 Token 限制')
+        app.state.manager.providers.checked(provider_id,provider,'verified')
         return {'content': content[:500], 'input_tokens': result.get('prompt_eval_count', 0), 'output_tokens': result.get('eval_count', 0)}
+
+    class SpeechProbe(ProviderConfig):
+        model: str = Field(min_length=1,max_length=200)
+        text: str = Field(default='你好，今天过得怎么样？',max_length=2000)
+        audio: str = Field(default='',max_length=8*1024*1024)
+        voice: str = Field(default='',max_length=200)
+        speed: float = Field(default=1,ge=0.5,le=2)
+
+    @app.post('/api/providers/test-speech')
+    async def test_speech(body: SpeechProbe,provider_id:str=''):
+        from .speech import synthesize,transcribe,decode_audio,to_wav,MAX_AUDIO
+        provider=app.state.manager.providers.prepare(ProviderConfig.model_validate(body.model_dump(exclude={'model','text','audio','voice','speed'})),provider_id)
+        try:
+            async with httpx.AsyncClient(trust_env=False,follow_redirects=False) as client:
+                if provider.purpose=='tts':
+                    result=await synthesize(client,provider,body.model,body.text,body.voice,body.speed)
+                    wav=await to_wav(result.data,120)
+                    response={'audio':base64.b64encode(wav).decode(),'mime':'audio/wav','message':'合成成功，仅在此页面试听，不发送 QQ 消息'}
+                elif provider.purpose=='stt':
+                    audio=decode_audio(body.audio)
+                    if len(audio)>MAX_AUDIO:raise ValueError('测试音频不能超过 6 MB')
+                    text=await transcribe(client,provider,body.model,audio,language=provider.language)
+                    response={'text':text,'message':'转写成功，不发送 QQ 消息'}
+                else:raise ValueError('请选择 TTS 或 STT 服务')
+            app.state.manager.providers.checked(provider_id,provider,'verified')
+            return response
+        except Exception:
+            app.state.manager.providers.checked(provider_id,provider,'failed')
+            raise
 
     @app.put('/api/providers/{provider_id}')
     async def update_provider(provider_id: str, body: ProviderConfig):
@@ -335,7 +388,19 @@ def create_app(data_dir=None, static_dir=None):
     @app.put('/api/settings')
     @app.put('/api/bots/{bot_id}/settings')
     async def save_settings(c: Settings, runtime: BotRuntime = Depends(scoped_runtime)):
+        return await save_bot_settings(c,runtime)
+
+    async def save_bot_settings(c,runtime,assignment=None):
         async with runtime.control_lock, app.state.manager.config_lock:
+            if assignment is not None:
+                c=runtime.store.load().model_copy(deep=True)
+                c.ollama=assignment.chat
+                c.speech=assignment.speech
+                c.memory.embedding=assignment.embedding
+                c.memory.rerank=assignment.rerank
+                try:c=Settings.model_validate(c.model_dump())
+                except ValidationError:
+                    raise ValueError('模型分配无效：供应商与模型名称须同时填写；已启用的记忆必须保留嵌入模型。') from None
             if runtime.bot.state != 'stopped':
                 raise HTTPException(409, '请先停止当前机器人再保存配置')
             if runtime.bot.schedule.lock.locked() or runtime.bot.memory.busy or runtime.bot.diary.lock.locked():
@@ -353,6 +418,9 @@ def create_app(data_dir=None, static_dir=None):
                     selection = getattr(section, purpose)
                     if selection.provider_id and app.state.manager.providers.get(selection.provider_id).purpose != purpose:
                         raise ValueError('检索模型的供应商用途不匹配')
+            for purpose in ('tts','stt'):
+                selected=getattr(c.speech,purpose)
+                if selected.provider_id and app.state.manager.providers.get(selected.provider_id).purpose!=purpose:raise ValueError('语音模型的供应商用途不匹配')
             c.ollama.url = provider.base_url
             if provider.type == 'anthropic' and provider.anthropic_version == '2023-06-01' and provider.send_temperature and c.ollama.temperature > 1:
                 raise ValueError('Anthropic 温度范围为 0–1')
@@ -376,6 +444,28 @@ def create_app(data_dir=None, static_dir=None):
                 runtime.store.clear_history()
             runtime.store.log('info', '配置已保存')
             return public_settings(runtime)
+
+    class ModelAssignments(BaseModel):
+        model_config={'extra':'forbid'}
+        chat: OllamaConfig
+        speech: SpeechConfig
+        embedding: MemoryModelConfig
+        rerank: MemoryModelConfig
+
+    def public_assignments(runtime):
+        c=runtime.store.load()
+        return {'chat':c.ollama.model_dump(),'speech':c.speech.model_dump(),
+                'embedding':c.memory.embedding.model_dump(),'rerank':c.memory.rerank.model_dump(),
+                'state':runtime.bot.state}
+
+    @app.get('/api/bots/{bot_id}/model-assignments')
+    async def model_assignments(runtime:BotRuntime=Depends(scoped_runtime)):
+        return public_assignments(runtime)
+
+    @app.put('/api/bots/{bot_id}/model-assignments')
+    async def save_model_assignments(body:ModelAssignments,runtime:BotRuntime=Depends(scoped_runtime)):
+        await save_bot_settings(None,runtime,assignment=body)
+        return public_assignments(runtime)
 
     @app.get('/api/status')
     @app.get('/api/bots/{bot_id}/status')

@@ -6,7 +6,7 @@ import { Card } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
 
-const sources = { incoming: '用户消息', reply: '机器人回复', greeting: '定时问候', idle: '主动搭话', reminder: '提醒', test: '推送测试', image_notice: '图片提示', legacy_context: '旧上下文', schedule: '日程指令', reset: '重置指令', meme: '表情包' }
+const sources = { incoming: '用户消息', reply: '机器人回复', greeting: '定时问候', idle: '主动搭话', reminder: '提醒', test: '推送测试', image_notice: '图片提示', legacy_context: '旧上下文', schedule: '日程指令', reset: '重置指令', meme: '表情包', voice: '语音回复', speech_notice: '语音提示' }
 const showTime = at => at == null ? '时间未记录' : new Date(at * 1000).toLocaleString('zh-CN', { hour12: false })
 const shortTime = at => new Date(at * 1000).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
 function mergeMessages(previous, incoming) { return [...new Map([...previous, ...incoming].map(message => [message.id, message])).values()].sort((a, b) => a.id - b.id) }
@@ -113,7 +113,7 @@ export default function ChatsPage({ api, botName }) {
   const olderButton = hasOlder && <Button className="older-messages" variant="ghost" size="sm" disabled={loadingOlder} onClick={loadOlder}>{loadingOlder ? <LoaderCircle className="spin" size={14} /> : <ChevronUp size={14} />}加载更早记录</Button>
   function content(message) {
     const quote = message.quote_context
-    return <>{quote && <blockquote className="message-quote"><strong>引用 · {quote.sender_name || (quote.is_bot ? '机器人' : quote.sender_id || '原消息')}</strong><div>{quote.available ? quote.content || quote.card || (quote.nested_messages?.length ? '引用中包含聊天记录' : '原消息包含附件') : '原文暂时无法读取'}</div>{quote.attachment_note && <small>{quote.attachment_note}</small>}</blockquote>}{message.meme_id ? <img className="chat-meme-image" src={`/api/bots/${encodeURIComponent(botId)}/memes/${message.meme_id}/image?sent=${message.meme_original?'false':'true'}`} alt={message.content} loading="lazy" /> : <>{message.content && <div className="message-content">{message.content}</div>}{message.attachment_count > 0 && <div className="message-attachment"><ImageIcon size={14} /><span>图片 / 表情包 × {message.attachment_count} · 原图未保存</span></div>}</>}</>
+    return <>{quote && <blockquote className="message-quote"><strong>引用 · {quote.sender_name || (quote.is_bot ? '机器人' : quote.sender_id || '原消息')}</strong><div>{quote.available ? quote.content || quote.card || (quote.nested_messages?.length ? '引用中包含聊天记录' : '原消息包含附件') : '原文暂时无法读取'}</div>{quote.attachment_note && <small>{quote.attachment_note}</small>}</blockquote>}{message.meme_id ? <img className="chat-meme-image" src={`/api/bots/${encodeURIComponent(botId)}/memes/${message.meme_id}/image?sent=${message.meme_original?'false':'true'}`} alt={message.content} loading="lazy" /> : <>{message.content && <div className="message-content">{message.content}</div>}{message.attachment_count > 0 && <div className="message-attachment"><ImageIcon size={14} /><span>{message.source==='voice'||message.source==='speech_notice'||message.content?.includes('[语音转写]')?'语音':'图片 / 附件'} × {message.attachment_count} · 原文件未保存</span></div>}</>}</>
   }
   return <div className="chat-page"><div className="chat-toolbar"><p>仅查看聊天记录 · 每 5 秒自动刷新</p><Button variant="outline" size="sm" disabled={refreshing} onClick={refresh}><RefreshCw size={14} className={refreshing ? 'spin' : ''} />刷新记录</Button></div>
     {listError && <div className="notice" role="alert">会话加载失败：{listError}</div>}

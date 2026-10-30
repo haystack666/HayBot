@@ -1,31 +1,41 @@
 """Shared encrypted provider catalog and protocol adapters. No remote conversation state."""
 import json
+import hashlib
 import os
 import sqlite3
 import time
 import uuid
 from pathlib import Path
 from typing import Literal
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, quote
 
 from cryptography.fernet import Fernet
 from fastapi import HTTPException
 from pydantic import Field, field_validator, model_validator
 from .config import StrictModel
+from .provider_catalog import CATALOG, ProviderType, protocol
 from .ollama import ContextLimitError, chat_response as ollama_chat
 
 
 class ProviderConfig(StrictModel):
     name: str = Field(default='', max_length=60)
     default_model: str = Field(default='', max_length=200)
-    type: Literal['ollama', 'openai_chat', 'openai_responses', 'anthropic', 'deepseek',
-                  'openai_embedding', 'gemini_embedding', 'ollama_embedding', 'dashscope_embedding',
-                  'dashscope_rerank', 'xinference_rerank'] = 'ollama'
-    purpose: Literal['chat', 'embedding', 'rerank'] = 'chat'
+    type: ProviderType = 'ollama'
+    purpose: Literal['chat', 'tts', 'stt', 'embedding', 'rerank'] = 'chat'
     embedding_dimensions: int | None = Field(default=None, ge=1, le=65536)
-    base_url: str = Field(default='http://ollama:11434', max_length=2048)
+    base_url: str = Field(default='', max_length=2048)
     api_key: str = Field(default='', max_length=4096, repr=False)
     clear_api_key: bool = False
+    api_secret: str = Field(default='',max_length=4096,repr=False)
+    clear_api_secret: bool = False
+    app_id: str = Field(default='',max_length=200)
+    resource_id: str = Field(default='',max_length=200)
+    region: str = Field(default='',max_length=100)
+    api_version: str = Field(default='',max_length=60)
+    default_voice: str = Field(default='',max_length=200)
+    language: str = Field(default='auto',max_length=30)
+    speech_speed: float = Field(default=1.0,ge=0.5,le=2.0)
+    speech_instructions: str = Field(default='',max_length=1000)
     vision: bool = True
     ollama_api: Literal['auto', 'native', 'openai'] = 'auto'
     chat_thinking: bool = False
@@ -42,8 +52,9 @@ class ProviderConfig(StrictModel):
     @classmethod
     def valid_url(cls, value):
         value = value.strip().rstrip('/')
+        if not value:return value
         u = urlsplit(value)
-        if u.scheme not in ('http', 'https') or not u.hostname or u.username or u.password or u.query or u.fragment:
+        if u.scheme not in ('http', 'https', 'wss') or not u.hostname or u.username or u.password or u.query or u.fragment:
             raise ValueError('请输入有效的 HTTP 或 HTTPS 服务地址')
         try:
             u.port
@@ -51,7 +62,7 @@ class ProviderConfig(StrictModel):
             raise ValueError('服务端口无效') from None
         return value
 
-    @field_validator('api_key')
+    @field_validator('api_key','api_secret','app_id','resource_id','api_version')
     @classmethod
     def valid_key(cls, value):
         value = value.strip()
@@ -61,13 +72,19 @@ class ProviderConfig(StrictModel):
 
     @model_validator(mode='after')
     def valid_clear(self):
-        expected = 'embedding' if self.type.endswith('_embedding') else 'rerank' if self.type.endswith('_rerank') else 'chat'
+        expected = CATALOG[self.type]['purpose']
+        self.base_url = self.valid_url(self.base_url or CATALOG[self.type]['url'])
+        if urlsplit(self.base_url).scheme=='wss' and self.type!='xfyun_stt':raise ValueError('此供应商需要 HTTP 或 HTTPS 地址')
+        if self.type=='xfyun_stt' and urlsplit(self.base_url).scheme!='wss':raise ValueError('讯飞识别需要 WSS 服务地址')
         if self.purpose not in ('chat', expected):
             raise ValueError('供应商用途与接口类型不一致')
         self.purpose = expected
-        if self.clear_api_key and self.api_key:
-            raise ValueError('不能同时填写和清除 API Key')
+        for key in ('api_key','api_secret'):
+            if getattr(self,'clear_'+key) and getattr(self,key):raise ValueError('不能同时填写和清除凭证')
         return self
+
+    @property
+    def secret_values(self):return [self.api_key,self.api_secret]
 
 
 class ProviderHTTPError(ValueError):
@@ -113,6 +130,7 @@ class ProviderStore:
         self.db.row_factory = sqlite3.Row
         self.db.executescript('''PRAGMA journal_mode=WAL;
             CREATE TABLE IF NOT EXISTS providers (id TEXT PRIMARY KEY, value TEXT NOT NULL, created REAL NOT NULL, updated REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS provider_checks (id TEXT PRIMARY KEY,fingerprint TEXT NOT NULL,state TEXT NOT NULL,checked REAL NOT NULL);
         ''')
 
     def get(self, provider_id):
@@ -120,28 +138,32 @@ class ProviderStore:
         if not row:
             raise HTTPException(404, '模型供应商不存在')
         value = json.loads(row['value'])
-        if value.get('api_key'):
-            value['api_key'] = self.cipher.decrypt(value['api_key'].encode()).decode()
+        for key in ('api_key','api_secret'):
+            if value.get(key):value[key] = self.cipher.decrypt(value[key].encode()).decode()
         return ProviderConfig.model_validate(value)
 
     def ids(self):
         return [r['id'] for r in self.db.execute('SELECT id FROM providers ORDER BY created,id')]
 
     def public(self, provider_id):
-        value = self.get(provider_id).model_dump(exclude={'clear_api_key'})
-        value['api_key_set'] = bool(value.pop('api_key'))
-        return {'id': provider_id, **value}
+        provider=self.get(provider_id)
+        value = provider.model_dump(exclude={'clear_api_key','clear_api_secret'})
+        for key in ('api_key','api_secret'):value[key+'_set']=bool(value.pop(key))
+        check=self.db.execute('SELECT * FROM provider_checks WHERE id=?',(provider_id,)).fetchone()
+        current=check and check['fingerprint']==self.fingerprint(provider)
+        return {'id':provider_id,**value,'check_state':check['state'] if current else 'untested','checked_at':check['checked'] if current else None}
 
     def prepare(self, config, provider_id=''):
         result = config.model_copy(deep=True)
         if provider_id:
             old = self.get(provider_id)
             # Never silently carry credentials to a different address or protocol.
-            if not result.api_key and not result.clear_api_key and (old.base_url, old.type) == (result.base_url, result.type):
-                result.api_key = old.api_key
-        if result.clear_api_key:
-            result.api_key = ''
-        result.clear_api_key = False
+            if (old.base_url,old.type,old.app_id)==(result.base_url,result.type,result.app_id):
+                for key in ('api_key','api_secret'):
+                    if not getattr(result,key) and not getattr(result,'clear_'+key):setattr(result,key,getattr(old,key))
+        for key in ('api_key','api_secret'):
+            if getattr(result,'clear_'+key):setattr(result,key,'')
+            setattr(result,'clear_'+key,False)
         return result
 
     def save(self, config, provider_id=''):
@@ -160,9 +182,9 @@ class ProviderStore:
             created = self.db.execute('SELECT created FROM providers WHERE id=?', (provider_id,)).fetchone()['created']
         else:
             provider_id, created = uuid.uuid4().hex, now
-        value = config.model_dump(exclude={'clear_api_key'})
-        if value['api_key']:
-            value['api_key'] = self.cipher.encrypt(value['api_key'].encode()).decode()
+        value = config.model_dump(exclude={'clear_api_key','clear_api_secret'})
+        for key in ('api_key','api_secret'):
+            if value[key]:value[key] = self.cipher.encrypt(value[key].encode()).decode()
         with self.db:
             self.db.execute('INSERT OR REPLACE INTO providers VALUES (?,?,?,?)', (provider_id, json.dumps(value), created, now))
         return provider_id
@@ -178,6 +200,15 @@ class ProviderStore:
         self.get(provider_id)
         with self.db:
             self.db.execute('DELETE FROM providers WHERE id=?', (provider_id,))
+            self.db.execute('DELETE FROM provider_checks WHERE id=?',(provider_id,))
+
+    @staticmethod
+    def fingerprint(config):
+        return hashlib.sha256(json.dumps(config.model_dump(exclude={'name','clear_api_key','clear_api_secret'}),sort_keys=True).encode()).hexdigest()
+
+    def checked(self,provider_id,config,state):
+        if provider_id and provider_id in self.ids() and self.fingerprint(self.get(provider_id))==self.fingerprint(config):
+            with self.db:self.db.execute('INSERT OR REPLACE INTO provider_checks VALUES (?,?,?,?)',(provider_id,self.fingerprint(config),state,time.time()))
 
     def close(self):
         self.db.close()
@@ -202,17 +233,32 @@ def endpoint(provider, operation):
 
 def headers(provider):
     result = {}
+    kind=protocol(provider)
     if provider.api_key:
-        if provider.type == 'anthropic':
+        if kind in ('gemini','gemini_tts'):result['x-goog-api-key']=provider.api_key
+        elif kind in ('xiaomi','xiaomi_tts','xiaomi_stt','azure'):result['api-key']=provider.api_key
+        elif kind == 'anthropic':
             result['x-api-key'] = provider.api_key
         else:
             result['Authorization'] = 'Bearer ' + provider.api_key
-    if provider.type == 'anthropic':
+    if kind == 'anthropic':
         result['anthropic-version'] = provider.anthropic_version
     return result
 
 
 async def list_models(request, provider):
+    if provider.purpose!='chat':raise ValueError('此服务不提供统一模型列表，请填写模型名称后执行实际测试')
+    if protocol(provider)=='gemini':
+        models=[];cursor='';seen=set()
+        for _ in range(50):
+            data=await request('GET',provider.base_url+'/models',headers=headers(provider),timeout=15,**({'params':{'pageToken':cursor}} if cursor else {}))
+            if not isinstance(data.get('models'),list):raise ValueError('模型列表格式无效')
+            models.extend(m['name'].removeprefix('models/') for m in data['models'] if isinstance(m,dict) and isinstance(m.get('name'),str) and 'generateContent' in m.get('supportedGenerationMethods',['generateContent']))
+            cursor=data.get('nextPageToken')
+            if not cursor:return list(dict.fromkeys(models))
+            if not isinstance(cursor,str) or cursor in seen:raise ValueError('模型列表分页无效')
+            seen.add(cursor)
+        raise ValueError('模型列表过大，请手动填写模型名称')
     models, cursors, params = [], set(), {}
     for _ in range(50):
         data = await request('GET', endpoint(provider, 'tags' if ollama_native(provider) else 'models'), headers=headers(provider), timeout=15, **({'params': params} if params else {}))
@@ -270,6 +316,10 @@ def normalized(data, kind):
 async def generate(request, provider, selection, messages, max_tokens, *, thinking=None):
     if provider.purpose != 'chat':
         raise ValueError('此供应商不支持对话生成，请选择对话供应商')
+    kind=protocol(provider)
+    if kind=='gemini':
+        from .gemini import generate_content
+        return await generate_content(request,provider,selection,messages,max_tokens)
     if ollama_native(provider):
         # Reuse existing precise context-overflow retry and Ollama tuning.
         config = selection.model_copy(update={'url': provider.base_url.removesuffix('/api')})
@@ -284,7 +334,7 @@ async def generate(request, provider, selection, messages, max_tokens, *, thinki
             body['reasoning_effort'] = 'medium' if thinking else 'none'
         if provider.send_temperature and not (provider.type == 'anthropic' and provider.anthropic_version == '2026-10-21'):
             body['temperature'] = selection.temperature
-        if provider.type == 'openai_responses':
+        if kind == 'responses':
             inputs = []
             for message in working:
                 if message.get('images'):
@@ -294,7 +344,7 @@ async def generate(request, provider, selection, messages, max_tokens, *, thinki
                 inputs.append({'role': message['role'], 'content': content})
             body.update(input=inputs, max_output_tokens=max_tokens, store=False)
             operation = 'responses'
-        elif provider.type == 'anthropic':
+        elif kind == 'anthropic':
             body['system'] = '\n'.join(message['content'] for message in working if message['role'] == 'system')
             converted = []
             for message in working:
@@ -319,8 +369,13 @@ async def generate(request, provider, selection, messages, max_tokens, *, thinki
             body['max_tokens' if provider.type == 'deepseek' else provider.token_limit_field] = max_tokens
             operation = 'chat/completions'
         try:
-            data = await request('POST', endpoint(provider, operation), headers=headers(provider), timeout=selection.timeout, json=body)
-            return normalized(data, provider.type)
+            url=endpoint(provider,operation);params={}
+            if kind=='azure' and provider.api_version:
+                base=provider.base_url.rstrip('/').removesuffix('/v1').removesuffix('/openai')
+                url=base+'/openai/deployments/'+quote(selection.model,safe='')+'/'+operation
+                params={'api-version':provider.api_version}
+            data = await request('POST',url,headers=headers(provider),timeout=selection.timeout,json=body,**({'params':params} if params else {}))
+            return normalized(data, 'openai_responses' if kind=='responses' else 'anthropic' if kind=='anthropic' else provider.type)
         except ContextLimitError:
             if len(working) <= 2:
                 raise

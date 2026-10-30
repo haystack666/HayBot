@@ -286,7 +286,7 @@ class BotManager:
             try:
                 config = store.load()
                 if provider_id in (config.ollama.provider_id, config.memory.embedding.provider_id, config.memory.rerank.provider_id,
-                                   config.memes.embedding.provider_id,config.memes.rerank.provider_id):
+                                   config.memes.embedding.provider_id,config.memes.rerank.provider_id,config.speech.tts.provider_id,config.speech.stt.provider_id):
                     references.append({**profile, 'state': runtime.bot.state if runtime else 'stopped',
                                        'busy': bool(runtime and (runtime.proactive.busy or runtime.bot.jobs or runtime.bot.schedule.lock.locked() or runtime.bot.diary.lock.locked()
                                                                 or getattr(runtime.bot, 'memory', None) and runtime.bot.memory.busy

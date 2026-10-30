@@ -56,6 +56,12 @@ def normalize_event(event,config):
             if url:
                 images.append({'content_type':'image/png','url':url,'filename':'napcat-image.png'})
             else:texts.append('[收到图片，但 NapCat 未提供可读取的 QQ 图片地址]')
+        elif kind=='record':
+            from .images import cdn_url,ImageMessageError
+            try:url=cdn_url(data.get('url'))
+            except ImageMessageError:url=None
+            if url and len(images)<3:images.append({'content_type':'audio/qq','url':url,'filename':'voice.silk'})
+            else:texts.append('[收到语音，但没有可读取的 QQ 音频地址]')
         elif kind=='face':texts.append('[QQ表情:'+str(data.get('id',''))[:30]+']')
         elif kind=='mface':texts.append('[表情包:'+str(data.get('summary',''))[:100]+']')
     mode=config.group_chat.policy(config.account_id,target)['mode'] if group else 'mentions'
@@ -266,3 +272,7 @@ class NapCatTransport:
     async def send_picture(self,group,target,data,before_send=None):
         if not data or len(data)>10*1024*1024:raise NapCatError('图片大小超出限制')
         return await self.send(group,target,[{'type':'image','data':{'file':'base64://'+base64.b64encode(data).decode(),'summary':'[图片]'}}],before_send)
+
+    async def send_voice(self,group,target,data,before_send=None):
+        if not data or len(data)>6*1024*1024:raise NapCatError('语音大小超出限制')
+        return await self.send(group,target,[{'type':'record','data':{'file':'base64://'+base64.b64encode(data).decode()}}],before_send)
