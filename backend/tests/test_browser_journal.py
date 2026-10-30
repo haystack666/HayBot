@@ -313,3 +313,32 @@ async def test_dm_never_treats_unknown_direction_as_already_replied(client):
     with pytest.raises(asyncio.CancelledError):await t.dm.run(t.get('default','journal-one'),cfg,'capability')
     assert t.dm.pending(t.get('default','journal-one'),view)
     assert t.dm.events('journal-one')[0]['detail']=='无法确认会话最近一条消息的发送方向，已保留待处理状态'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('direction',['inbound','outbound'])
+async def test_dm_discards_draft_if_new_message_arrives_during_generation(client,direction):
+    import asyncio
+    t=client.app.state.browser_tasks
+    cfg=t.config('default');cfg.interactions.messages_enabled=True;t.save_config('default',cfg)
+    t,bot=seed(client,state='running')
+    peer={'id':'peer-sec','nickname':'朋友','handle':'friend','follows_me':True}
+    incoming={'id':'incoming-old','direction':'inbound','text':'在吗'}
+    base={'generation':0,'version':1,'account':{'id':'platform-self','verified':True},
+        'conversation':peer,'pendingUnread':[]}
+    observes=0;sent=[]
+    async def gateway(method,path,body):
+        nonlocal observes
+        if body['op']=='observe':
+            observes+=1
+            if observes==1:return {**base,'messages':[incoming]}
+            if observes==2:return {**base,'version':2,'messages':[incoming,
+                {'id':'new-message','direction':direction,'text':'更新了'}]}
+            raise asyncio.CancelledError()
+        sent.append(body)
+        return {**base,'interaction':{'status':'confirmed','message_id':'should-not-send'}}
+    t.browser.gateway.request=gateway
+    t.model=AsyncMock(return_value='{"reply":"在呀。"}')
+    with pytest.raises(asyncio.CancelledError):await t.dm.run(t.get('default','journal-one'),cfg,'capability')
+    assert sent==[] and t.model.await_count==1
+    assert t.dm.pending(t.get('default','journal-one'),base)[0]['message_id']=='incoming-old'

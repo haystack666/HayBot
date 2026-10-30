@@ -97,7 +97,11 @@ export function socialDOM() {
   const identity=e=>e.querySelector('a[href*="/user/"]')?.getAttribute('href')?.match(/\/user\/([^/?]+)/)?.[1]||e.getAttribute('data-peer-id')||e.getAttribute('data-user-id')||''
   const conversations=[...document.querySelectorAll('[data-e2e="conversation-item"]')].filter(visible).slice(0,50).map(e=>({id:identity(e),nickname:short((e.querySelector('[class*="ConversationItemtitle"]')||e).innerText.split('\n')[0],80),unread:!!e.querySelector('[class*="badge"],[class*="Badge"],[class*="unread"],[data-unread="true"]')}))
   const messages=[]
-  for(const e of [...document.querySelectorAll('[data-message-id],[data-msg-id],[class*="MessageItemTextbubbleContent"],[class*="MessageItemShareAwemecontainer"],[class*="MessageItemEmojiemojiBox"]')].filter(visible).slice(-80)) {
+  // React can render messages in reverse DOM order (for example in a
+  // column-reverse list). Use the visible conversation order, oldest first.
+  const bubbles=[...document.querySelectorAll('[data-message-id],[data-msg-id],[class*="MessageItemTextbubbleContent"],[class*="MessageItemShareAwemecontainer"],[class*="MessageItemEmojiemojiBox"]')].filter(visible)
+  bubbles.sort((a,b)=>a.getBoundingClientRect().top-b.getBoundingClientRect().top)
+  for(const e of bubbles.slice(-80)) {
     let metadata=null
     let ancestor=e
     for(let n=0;n<6&&ancestor&&!metadata;n++,ancestor=ancestor.parentElement) {

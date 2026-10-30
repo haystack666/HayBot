@@ -4,7 +4,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { BrowserEngine } from '../src/engine.mjs'
-import {likeControlDOM,likeStateDOM} from '../src/douyin-social.mjs'
+import {likeControlDOM,likeStateDOM,socialDOM} from '../src/douyin-social.mjs'
 
 const video='7566833210012345678',self='MS4_self_12345',owner='MS4_owner_12345',peer='MS4_peer_12345'
 const interactions={comments_enabled:true,replies_enabled:true,likes_enabled:true,messages_enabled:true,shares_enabled:true,owner:{handle:'owner_handle',nickname:'主人'},whitelist:[]}
@@ -254,4 +254,23 @@ test('independent inbox is event-driven, bypasses the video queue and closes on 
   const lease=engine.claim('poll','owner').lease;await monitor.page.waitForEvent('close').catch(()=>{})
   assert.ok(monitor.page.isClosed());assert.equal(session.automation,null);engine.release('poll',lease)
  } finally{await engine.close();await fs.rm(dir,{recursive:true,force:true})}
+})
+
+
+test('message snapshots follow visual order in reversed React lists and retain real IDs', {timeout:30000,skip:process.platform!=='darwin'},async()=>{
+ const dir=await fs.mkdtemp(path.join(os.tmpdir(),'haybot-dm-order-')),engine=new BrowserEngine(dir)
+ try {
+  await engine.start('order');const session=engine.get('order'),page=session.tabs.get(session.active)
+  await page.setContent(`<section style="display:flex;flex-direction:column-reverse">
+   <p data-message-id="new-inbound" data-direction="inbound">y</p>
+   <p data-message-id="old-outbound" data-direction="outbound">之前回复</p>
+   <p data-message-id="old-inbound" data-direction="inbound">早上好</p>
+  </section>`)
+  let view=await page.evaluate(socialDOM)
+  assert.deepEqual(view.messages.map(m=>m.id),['old-inbound','old-outbound','new-inbound'])
+  assert.equal(view.messages.at(-1).direction,'inbound')
+  await page.locator('section').evaluate(e=>e.style.flexDirection='column')
+  view=await page.evaluate(socialDOM)
+  assert.deepEqual(view.messages.map(m=>m.id),['new-inbound','old-outbound','old-inbound'])
+ }finally{await engine.close();await fs.rm(dir,{recursive:true,force:true})}
 })
