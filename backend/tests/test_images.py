@@ -117,7 +117,7 @@ async def test_gif_caption_and_text_followup(tmp_path):
         followup = event(text='再说一次')
         followup['d'].update(id='followup', attachments=[])
         await bot.handle(followup)
-        assert '红绿蓝三个画面' == chats[1]['messages'][-2]['content']
+        assert any(m['role'] == 'assistant' and m['content'] == '红绿蓝三个画面' for m in chats[1]['messages'])
         assert all('images' not in item for item in chats[1]['messages'])
         assert '[本轮图片聊天方式]' not in chats[1]['messages'][0]['content']
         assert bot.stats['sent'] == 2

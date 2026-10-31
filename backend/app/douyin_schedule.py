@@ -159,10 +159,11 @@ class DouyinScheduler:
             due=next_allowed((now+timedelta(days=1)).replace(hour=0,minute=0,second=0,microsecond=0),cfg.auto_browse)
         elif row and due and row['next_attempt']>due.timestamp():
             due=next_allowed(datetime.fromtimestamp(row['next_attempt'],BEIJING),cfg.auto_browse)
-        return {**period(now),'enabled':cfg.auto_browse.enabled,'today_watched':count,
+        active = self.tasks.bot_enabled(bot_id)
+        return {**period(now),'bot_enabled':active,'enabled':cfg.auto_browse.enabled,'today_watched':count,
             'daily_video_limit':cfg.auto_browse.daily_video_limit,'remaining':max(0,cfg.auto_browse.daily_video_limit-count),
-            'hold_reason':hold,'next_run_at':due.isoformat() if due and cfg.enabled and cfg.auto_browse.enabled else None,
-            'timezone':'Asia/Shanghai','allowed_now':allowed_at(now,cfg.auto_browse),'within_custom_hours':within_windows(now,cfg.auto_browse),
+            'hold_reason':hold,'next_run_at':due.isoformat() if active and due and cfg.enabled and cfg.auto_browse.enabled else None,
+            'timezone':'Asia/Shanghai','allowed_now':active and allowed_at(now,cfg.auto_browse),'within_custom_hours':within_windows(now,cfg.auto_browse),
             'only_off_peak':cfg.auto_browse.only_off_peak,'custom_hours':cfg.auto_browse.custom_hours,'time_windows':[w.model_dump() for w in cfg.auto_browse.time_windows]}
 
     def stop_reason(self, task):
@@ -187,6 +188,11 @@ class DouyinScheduler:
         for bot in tasks.manager.registry.list():
             bid=bot['id']
             cfg=tasks.config(bid)
+            if not tasks.bot_enabled(bid):
+                await tasks.stop_dm_monitor(bid)
+                await tasks.cancel_bot(bid)
+                continue
+            tasks.refresh_dm(bid)
             if not cfg.enabled or not cfg.auto_browse.enabled or tasks.busy(bid):
                 continue
             state=self.status(bid)
@@ -206,7 +212,7 @@ class DouyinScheduler:
                 if browser.get('automation'):
                     continue
                 latest=tasks.config(bid)
-                if not latest.enabled or not latest.auto_browse.enabled or tasks.busy(bid) or self.status(bid)['hold_reason'] or not allowed_at(self.clock(),latest.auto_browse):
+                if not tasks.bot_enabled(bid) or not latest.enabled or not latest.auto_browse.enabled or tasks.busy(bid) or self.status(bid)['hold_reason'] or not allowed_at(self.clock(),latest.auto_browse):
                     continue
                 tasks.submit(bid,'去抖音看你自己感兴趣的视频，自行选择浏览路线；按已有内容与互动设置执行。',
                     {'source':'auto','day':self.clock().date().isoformat()})

@@ -5,12 +5,15 @@ import { useNavigate } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 const entries = [
+['图片创作','image-generation','文生图 生图 OpenAI 火山引擎 Seedream 三视图 参考图 自拍 基础提示词 摄影风格'],
+['情感系统','emotion','情绪 信任 熟悉 关系 精力 衰减 动作 语音 证据 修复'],['情感策略','emotion?view=settings','强度 半衰期 基线 暂停 重置'],
 ['工作概览','overview','状态 用量'],['会话记录','chats','聊天 私聊 群聊 引用'],
 ['浏览器工作台','browser','Chrome 环境检测 实时画面 放大 接管 主人登录 拖动 滑动'],
 ['身份与私聊','rules','回复策略 系统提示词'],['Owner 关系','rules?view=owner','主人 群成员身份 公开关系'],
 ['群聊参与','rules?view=group','群聊人格 自主回复 各群设置 判断记录'],['公开评论风格','rules?view=public','公开评论人格'],
-['回复设置','rules?view=advanced','防抖 分段 冷却 上下文'],['角色记忆','memory','长期记忆 来源 约定'],
+['回复设置','rules?view=advanced','显示思考内容 摘要 流式输出 用户识别 现实世界时间感知 防抖 分段 冷却 上下文'],['角色记忆','memory','长期记忆 来源 约定'],
 ['记忆设置','memory?view=settings','整理 检索 索引'],['每日日程','schedule','时间线 穿着 生活'],
+['上下文诊断','memory?view=context','Token 预算 裁剪 摘要 版本 工作状态 来源 重建'],
 ['私人日记','diary','日记本 正文 版本'],['写作习惯','diary?view=settings','自动写作 自主分享'],
 ['主动互动','proactive','搭话 问候'],['一次性提醒','proactive?view=reminders','定时消息'],
 ['QQ 空间','proactive?view=qzone','动态 草稿 定时发布'],['发送记录','proactive?view=history','主动消息 推送状态'],

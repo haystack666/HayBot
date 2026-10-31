@@ -1,8 +1,8 @@
 import { NavLink } from 'react-router-dom'
 const groups = [
   ['工作台', ['overview', 'chats', 'browser']],
-  ['角色与生活', ['rules', 'memory', 'schedule', 'diary']],
-  ['互动', ['proactive', 'memes']],
+  ['角色与生活', ['rules', 'memory', 'emotion', 'schedule', 'diary']],
+  ['互动', ['proactive', 'image-generation', 'memes']],
   ['配置与诊断', ['qq', 'logs']],
 ]
 export default function BotNavigation({ botId, pages, closeMenu, mobile, guardLeave }) {

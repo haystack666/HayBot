@@ -60,6 +60,31 @@ def wants_voice(text):
     return voice_directive(text) in ('command','imperative')
 
 
+def split_voice_actions(text):
+    """Extract balanced round-bracket actions without guessing at malformed text."""
+    actions=[];spoken=[];stack=[];start=0;cursor=0
+    for index,char in enumerate(text):
+        if char in ('(', '（'):
+            if not stack:
+                spoken.append(text[cursor:index]);start=index
+            stack.append(')' if char=='(' else '）')
+        elif char in (')', '）'):
+            if not stack or stack.pop()!=char:raise SpeechError('动作括号不完整，本轮使用文字回复')
+            if not stack:
+                actions.append(text[start:index+1]);cursor=index+1
+    if stack:raise SpeechError('动作括号不完整，本轮使用文字回复')
+    spoken.append(text[cursor:])
+    return '\n'.join(actions), '\n'.join(part.strip() for part in spoken if part.strip())
+
+
+def voice_reply_instruction(config):
+    if config.separate_actions:
+        return ('\n本轮采用动作文字与语音台词分离：可以自然描写动作，但所有动作描写必须放在成对的中文圆括号（…）或英文圆括号(...)内，'
+                '括号内会原样作为文字发送，不会朗读；括号外只写实际说出口的台词，会合成为语音。'
+                '不要为了使用此格式刻意添加动作；不要写Markdown或发语音的说明。')
+    return '\n本轮将把你的回复正文合成为语音。直接说话，不写动作括号、Markdown或发语音的说明。'
+
+
 @dataclass(frozen=True)
 class VoiceDecision:
     enabled:bool
@@ -339,9 +364,21 @@ class SpeechService:
         self.last_transcripts.set(texts)
         return '\n'.join(text for _,text in texts)
 
-    async def speak(self,text,config):
+    async def speak(self,text,config,*,style=None):
         selection=config.speech.tts
         if not selection.enabled or len(text)>selection.max_reply_chars:raise SpeechError('本轮使用文字回复')
         async with self.lock:
-            result=await synthesize(self.bot.client,self.bot.provider(selection),selection.model,text,selection.voice,selection.speed)
+            provider=self.bot.provider(selection)
+            speed=selection.speed
+            instructions=provider.speech_instructions
+            if style:
+                speed=max(.5,min(2.,speed*style['speed_factor']))
+                if provider.type in ('openai_tts','xiaomi_tts','gemini_tts'):
+                    instructions+='\n'+style['delivery']
+            try:
+                result=await synthesize(self.bot.client,provider,selection.model,text,selection.voice,speed,instructions=instructions)
+            except (SpeechError,ProviderHTTPError,httpx.HTTPError):
+                if not style:raise
+                self.bot.store.log('warn','情感语音风格不可用，尝试普通语音',category='message',event='emotion.voice_fallback')
+                result=await synthesize(self.bot.client,provider,selection.model,text,selection.voice,selection.speed)
             return await to_silk(result.data)

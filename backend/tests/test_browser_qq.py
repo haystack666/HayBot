@@ -31,6 +31,7 @@ async def setup(tmp_path, transport):
     cfg.rules.cooldown = 0
     bot.store.save(cfg)
     bot.state = 'connected'
+    bot.store.set_enabled(True)
     tasks.save_config('default', BrowsingConfig(enabled=True, qq_enabled=True, qq_owner_id='10001'))
     bot.api = AsyncMock(return_value={'id': 'receipt'})
     async def run(bot_id, task_id):

@@ -137,7 +137,9 @@ async def test_reply_routes_dedup_and_member_isolation(tmp_path):
         group['d']['id'], group['d']['author']['member_openid'] = 'msg3', 'member2'
         await bot.handle(group)
         # 新群成员不会看到其他成员的历史。
-        assert len(json.loads(requests[-2].content)['messages']) == 2
+        assembled = json.loads(requests[-2].content)['messages']
+        assert not any(m['role'] == 'assistant' for m in assembled)
+        assert assembled[-1]['role'] == 'user'
         assert bot.stats['sent'] == 3
         assert bot.stats['received'] == 3
         assert bot.stats['input_tokens'] == 36

@@ -55,10 +55,10 @@ class DayPlan(StrictModel):
     @model_validator(mode='after')
     def complete_day(self):
         end = 0
-        for item in self.activities:
+        for index, item in enumerate(self.activities):
             start, next_end = minute(item.start), minute(item.end, True)
             if start != end or next_end <= start:
-                raise ValueError('日程需要按时间排序，连续覆盖全天，不能重叠或留空')
+                raise ValueError(f'第{index+1}段时间无效：起始应为{end//60:02d}:{end%60:02d}，实际{item.start}，结束{item.end}；不能重叠、留空或倒序')
             end = next_end
         if end != 1440:
             raise ValueError('日程必须覆盖 00:00 到 24:00')
@@ -184,10 +184,57 @@ class ScheduleService:
              '每段 outfit 是当时实际穿着，睡觉、运动、外出可以换装。随机安排 1–4 件平常且符合身份的小事，'
              '每件有明确发生时间，放到 events；不要提前写进活动描述或 summary。不是现实新闻、天气预报或真实课表。'
              '语言简洁，每个活动名称不超过 30 字，地点不超过 20 字，分段穿着不超过 50 字，随机事件不超过 80 字。'
-             '严格返回以下字段（不要添加 date 等字段）：'
-             '{"summary":"当天概述","outfit":"主要穿着","appearance":"发型妆容",'
-             '"activities":[{"start":"00:00","end":"07:15","activity":"睡觉","location":"寝室","outfit":"棉质睡衣"},'
-             '...],"events":[{"time":"12:08","event":"食堂偶遇同学"}]}。'}]
+             '严格遵循以下 JSON Schema，字段不得省略或额外添加，数组必须包含完整活动，不能使用省略号。'
+             'activities 必须有4至32段，events 必须有1至6项；最后一段必须结束于24:00，不能用23:59代替。'
+             + json.dumps(DayPlan.model_json_schema(),ensure_ascii=False)}]
+
+    @staticmethod
+    def parse_generated(result):
+        raw = (result.get('message', {}).get('content') or '').strip()
+        if len(raw) > 60000:
+            raise ValueError('日程正文超过60000字符')
+        if result.get('finish_reason') in ('length','max_tokens','max_output_tokens','MAX_TOKENS') or result.get('done_reason') == 'length':
+            raise ValueError('模型输出达到Token上限，JSON可能被截断；请输出完整且简洁的日程')
+        if not raw:
+            raise ValueError('模型返回空正文，没有可校验的日程JSON')
+        raw = re.sub(r'^```(?:json)?\s*|\s*```$', '', raw, flags=re.IGNORECASE)
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError as error:
+            raise ValueError(f'日程JSON语法错误：第{error.lineno}行第{error.colno}列，{error.msg}') from None
+        plan = DayPlan.model_validate(value).model_dump()
+        if not 4 <= len(plan['activities']) <= 32:
+            raise ValueError('activities必须包含4至32段完整活动')
+        if not 1 <= len(plan['events']) <= 6:
+            raise ValueError('events必须包含1至6个事件')
+        return plan
+
+    async def generate_plan(self, config, day, fingerprint, memory_epoch):
+        from .event_logs import exception_details
+        selection = config.ollama.model_copy(update={'timeout': 600})
+        messages = self.prompt(config, day)
+        async with asyncio.timeout(660):
+            for attempt in range(2):
+                current = self.store.load()
+                if not current.schedule.enabled or self.identity(current) != (day, fingerprint) or (self.scope_id and self.bot.memory.data.epoch(self.scope_id) != memory_epoch):
+                    raise ScheduleChanged('角色配置、记忆或日期已变化，本次日程未保存')
+                result = await self.bot.generate(selection, messages, 6000 if attempt == 0 else 10000, stream=True, json_output=True)
+                self.store.record_usage(result)
+                try:
+                    return self.parse_generated(result)
+                except (ValueError, TypeError) as error:
+                    if isinstance(error,ValidationError):
+                        reason = '; '.join('.'.join(map(str,e['loc']))+': '+e['msg'] for e in error.errors(include_input=False,include_context=False,include_url=False))
+                    else:
+                        reason = str(error)
+                    self.store.log('warn','日程结构校验未通过'+('，正在自动修复' if attempt == 0 else '，自动修复未通过'),category='schedule',event='schedule.validation_failed',
+                        details={**exception_details(error),'reason':reason[:2000],'attempt':attempt+1,'model':selection.model})
+                    if attempt:
+                        raise ScheduleError('日程自动修复后仍未通过校验：'+reason[:400]+'。已有日程保留，请检查运行日志中的具体原因') from None
+                    raw = (result.get('message',{}).get('content') or '')[:60000]
+                    messages = [*self.prompt(config,day), {'role':'assistant','content':raw or '[上一次未返回日程正文]'},
+                        {'role':'user','content':'上一次日程未通过校验，请修复并返回完整JSON对象，不要只返回补丁或解释。具体错误：'+reason[:2000]+
+                         '。保持原生活设定，逐段检查start等于上一段end，从00:00连续到24:00，所有必填字段、活动数量和事件数量都必须合规。'}]
 
     async def ensure(self, force=False):
         config = self.store.load()
@@ -230,21 +277,7 @@ class ScheduleService:
             memory_epoch = self.bot.memory.data.epoch(self.scope_id) if self.scope_id else None
             self.root.generating = True
             try:
-                selection = config.ollama.model_copy(update={'timeout': 600})
-                # Daily structured output has a separate budget from short QQ replies.
-                async with asyncio.timeout(660):
-                    result = await self.bot.generate(selection, self.prompt(config, day), 6000, stream=True)
-                self.store.record_usage(result)
-                raw = (result.get('message', {}).get('content') or '').strip()
-                if len(raw) > 60000:
-                    raise ScheduleError('日程内容过长，请重试或更换模型')
-                raw = re.sub(r'^```(?:json)?\s*|\s*```$', '', raw, flags=re.IGNORECASE)
-                try:
-                    plan = DayPlan.model_validate(json.loads(raw)).model_dump()
-                    if not 4 <= len(plan['activities']) <= 32 or not 1 <= len(plan['events']) <= 6:
-                        raise ValueError('生成日程活动或事件数量无效')
-                except (ValueError, TypeError, ValidationError):
-                    raise ScheduleError('模型返回的日程格式或时间安排无效，请重试或更换模型') from None
+                plan = await self.generate_plan(config, day, fingerprint, memory_epoch)
                 current = self.store.load()
                 if (not current.schedule.enabled or self.identity(current) != (day, fingerprint)
                         or self.scope_id and self.bot.memory.data.epoch(self.scope_id) != memory_epoch):
@@ -266,7 +299,15 @@ class ScheduleService:
             except asyncio.CancelledError:
                 raise
             except Exception as error:
-                detail = str(error) if isinstance(error, ScheduleError) else '日程生成失败或超时，请检查模型供应商后重试'
+                from .event_logs import exception_details
+                if isinstance(error,ScheduleError):
+                    detail = str(error)
+                elif isinstance(error,(TimeoutError,asyncio.TimeoutError)):
+                    detail = '日程模型请求超时，已有日程保留；请检查供应商响应和网络后重试'
+                else:
+                    status = getattr(error,'status',None)
+                    detail = f'日程模型调用失败'+(f'（HTTP {status}）' if status else '')+'，已有日程保留；请检查运行日志中的请求错误'
+                self.store.log('warn',detail,category='schedule',event='schedule.generation_failed',details=exception_details(error))
                 with self.store.db:
                     self.store.db.execute('INSERT OR REPLACE INTO schedule_failures VALUES (?,?,?,?,?,?)',
                         (config.account_id, self.scope_id, day, fingerprint, detail, self.clock() + 300))

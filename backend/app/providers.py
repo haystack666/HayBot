@@ -15,13 +15,14 @@ from pydantic import Field, field_validator, model_validator
 from .config import StrictModel
 from .provider_catalog import CATALOG, ProviderType, protocol
 from .ollama import ContextLimitError, chat_response as ollama_chat
+from .context_manager import drop_oldest_turn
 
 
 class ProviderConfig(StrictModel):
     name: str = Field(default='', max_length=60)
     default_model: str = Field(default='', max_length=200)
     type: ProviderType = 'ollama'
-    purpose: Literal['chat', 'tts', 'stt', 'embedding', 'rerank'] = 'chat'
+    purpose: Literal['chat', 'tts', 'stt', 'image', 'embedding', 'rerank'] = 'chat'
     embedding_dimensions: int | None = Field(default=None, ge=1, le=65536)
     base_url: str = Field(default='', max_length=2048)
     api_key: str = Field(default='', max_length=4096, repr=False)
@@ -295,9 +296,11 @@ def normalized(data, kind):
     if not isinstance(usage, dict):
         usage = {}
     if kind == 'openai_responses':
+        finish = data.get('incomplete_details', {}).get('reason') if isinstance(data.get('incomplete_details'),dict) else None
         text = '\n'.join(text_parts(item.get('content')) for item in data.get('output', []) if isinstance(item, dict) and item.get('type') == 'message' and item.get('role', 'assistant') == 'assistant')
         inputs, outputs = usage.get('input_tokens', 0), usage.get('output_tokens', 0)
     elif kind == 'anthropic':
+        finish = data.get('stop_reason')
         text = text_parts(data.get('content'))
         def token_count(key):
             value = usage.get(key, 0)
@@ -307,29 +310,42 @@ def normalized(data, kind):
     else:
         choices = data.get('choices') or []
         first = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+        finish = first.get('finish_reason')
         message = first.get('message') or {}
         text = text_parts(message.get('content')) if isinstance(message, dict) else ''
         inputs, outputs = usage.get('prompt_tokens', 0), usage.get('completion_tokens', 0)
-    return {'message': {'content': text}, 'prompt_eval_count': inputs, 'eval_count': outputs}
+    return {'message': {'content': text}, 'prompt_eval_count': inputs, 'eval_count': outputs, **({'finish_reason':finish} if finish else {})}
 
 
-async def generate(request, provider, selection, messages, max_tokens, *, thinking=None):
+async def generate(request, provider, selection, messages, max_tokens, *, thinking=None, json_output=False):
     if provider.purpose != 'chat':
         raise ValueError('此供应商不支持对话生成，请选择对话供应商')
     kind=protocol(provider)
     if kind=='gemini':
         from .gemini import generate_content
-        return await generate_content(request,provider,selection,messages,max_tokens)
+        working = list(messages)
+        while True:
+            try:
+                return await generate_content(request,provider,selection,working,max_tokens)
+            except ContextLimitError:
+                reduced = drop_oldest_turn(working)
+                if reduced is None:
+                    raise
+                working = reduced
     if ollama_native(provider):
         # Reuse existing precise context-overflow retry and Ollama tuning.
         config = selection.model_copy(update={'url': provider.base_url.removesuffix('/api')})
         async def authenticated(method, url, **kwargs):
             kwargs['headers'] = headers(provider)
+            if json_output:
+                kwargs['json'] = {**kwargs['json'], 'format':'json'}
             return await request(method, url, **kwargs)
         return await ollama_chat(authenticated, config, messages, max_tokens, thinking=thinking)
     working = list(messages)
     while True:
         body = {'model': selection.model, 'stream': False}
+        if json_output and (kind == 'xiaomi' or provider.type == 'deepseek'):
+            body['response_format'] = {'type':'json_object'}
         if provider.type == 'ollama' and thinking is not None:
             body['reasoning_effort'] = 'medium' if thinking else 'none'
         if provider.send_temperature and not (provider.type == 'anthropic' and provider.anthropic_version == '2026-10-21'):
@@ -377,6 +393,7 @@ async def generate(request, provider, selection, messages, max_tokens, *, thinki
             data = await request('POST',url,headers=headers(provider),timeout=selection.timeout,json=body,**({'params':params} if params else {}))
             return normalized(data, 'openai_responses' if kind=='responses' else 'anthropic' if kind=='anthropic' else provider.type)
         except ContextLimitError:
-            if len(working) <= 2:
+            reduced = drop_oldest_turn(working)
+            if reduced is None:
                 raise
-            working = [working[0], *working[min(3, len(working) - 1):]]
+            working = reduced

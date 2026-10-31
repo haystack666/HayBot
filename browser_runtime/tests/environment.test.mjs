@@ -29,6 +29,61 @@ test('invalid signatures are repair failures, never missing Chrome', async () =>
   assert.equal(result.state, 'needs_repair'); assert.equal(result.executable, null)
 })
 
+function chromeRun({ description = 'Mach-O universal binary with 2 architectures: [x86_64:Mach-O 64-bit executable x86_64] [arm64:Mach-O 64-bit executable arm64]', team = 'EQHXZ8M8AV', fileError = false } = {}) {
+  const calls = []
+  const run = async (file, args) => {
+    calls.push([file, args])
+    assert.notEqual(file, '/usr/bin/lipo', 'Chrome verification must not depend on Xcode license state')
+    if (args.includes('CFBundleIdentifier')) return { stdout: 'com.google.Chrome\n' }
+    if (args.includes('CFBundleShortVersionString')) return { stdout: '156.0.1.2\n' }
+    if (file === '/usr/bin/codesign') return { stdout: '', stderr: args.includes('--display') ? `TeamIdentifier=${team}\n` : '' }
+    if (file === '/usr/bin/file') {
+      if (fileError) throw new Error('private-error-sentinel')
+      return { stdout: description }
+    }
+    throw new Error('unexpected tool')
+  }
+  return { run, calls }
+}
+
+test('Google signed universal Chrome passes arm64 and Intel without any Xcode tool', async () => {
+  for (const arch of ['arm64', 'x64']) {
+    const { run, calls } = chromeRun()
+    const result = await findChrome({ platform: 'darwin', arch, candidates: ['/Chrome.app'], stat: async () => ({}), run })
+    assert.equal(result.state, 'passed')
+    assert.deepEqual(result.architectures, ['x86_64', 'arm64'])
+    assert.equal(result.executable, '/Chrome.app/Contents/MacOS/Google Chrome')
+    assert.ok(calls.some(([file, args]) => file === '/usr/bin/codesign' && args.includes('--verify') && args.some(arg => arg.includes('anchor apple generic'))))
+    assert.ok(calls.some(([file]) => file === '/usr/bin/file'))
+  }
+})
+
+test('thin Mach-O passes only matching architectures; scripts cannot spoof an architecture label', async () => {
+  for (const [description, arch, passed] of [
+    ['Mach-O 64-bit executable arm64', 'arm64', true],
+    ['Mach-O 64-bit executable x86_64', 'x64', true],
+    ['Mach-O 64-bit executable x86_64', 'arm64', false],
+    ['shell script text arm64', 'arm64', false],
+    ['Mach-O 64-bit executable arm64e', 'arm64', false],
+  ]) {
+    const { run } = chromeRun({ description })
+    const result = await findChrome({ platform: 'darwin', arch, candidates: ['/Chrome.app'], stat: async () => ({}), run })
+    assert.equal(result.state === 'passed', passed)
+    if (!passed) assert.equal(result.executable, null)
+  }
+})
+
+test('architecture tool failure is explicit and sanitized; foreign signer still fails closed', async () => {
+  const failed = await findChrome({ platform: 'darwin', candidates: ['/Chrome.app'], stat: async () => ({}), run: chromeRun({ fileError: true }).run })
+  assert.equal(failed.state, 'needs_repair')
+  assert.match(failed.detail, /检测工具执行失败/)
+  assert.doesNotMatch(JSON.stringify(failed), /private-error-sentinel/)
+  const { run, calls } = chromeRun({ team: 'NOTGOOGLE' })
+  const foreign = await findChrome({ platform: 'darwin', candidates: ['/Chrome.app'], stat: async () => ({}), run })
+  assert.equal(foreign.state, 'needs_repair'); assert.equal(foreign.executable, null)
+  assert.equal(calls.some(([file]) => file === '/usr/bin/file'), false)
+})
+
 test('environment checks coalesce and leave launch unverified until a real handshake', async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'haybot-env-')); let discoveries = 0
   const env = new Environment(directory, { discover: async () => { discoveries++; await new Promise(resolve => setTimeout(resolve, 20)); return { state: 'passed', detail: 'Chrome' } } })

@@ -20,6 +20,7 @@ async def schedule_response(client, method, url, **kwargs):
             await response.aread()
             return read_response(response)
         text, size, usage, finished = [], 0, {}, False
+        finish_reason = None
         async for line in response.aiter_lines():
             line = line.strip()
             if not line or line.startswith(':') or line.startswith(('event:', 'id:', 'retry:')):
@@ -40,12 +41,14 @@ async def schedule_response(client, method, url, **kwargs):
                 part = message.get('content', '') if isinstance(message, dict) else ''
                 if frame.get('done'):
                     finished = True
+                    finish_reason = frame.get('done_reason')
                     usage = {name: frame.get(name, 0) for name in ('prompt_eval_count', 'eval_count')}
             else:
                 choices = frame.get('choices') or []
                 choice = choices[0] if choices and isinstance(choices[0], dict) else {}
                 delta = choice.get('delta') or {}
                 part = (delta.get('content') or '') if isinstance(delta, dict) else ''
+                finish_reason = choice.get('finish_reason') or finish_reason
                 finished = finished or choice.get('finish_reason') is not None
                 if isinstance(frame.get('usage'), dict):
                     usage = frame['usage']
@@ -59,5 +62,5 @@ async def schedule_response(client, method, url, **kwargs):
             raise ValueError('日程模型流意外中断，请重试')
         content = ''.join(text)
         if native:
-            return {'message': {'content': content}, **usage}
-        return {'choices': [{'message': {'content': content}}], 'usage': usage}
+            return {'message': {'content': content}, **usage, **({'done_reason':finish_reason} if finish_reason else {})}
+        return {'choices': [{'message': {'content': content}, **({'finish_reason':finish_reason} if finish_reason else {})}], 'usage': usage}

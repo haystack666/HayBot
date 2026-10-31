@@ -9,9 +9,10 @@ from urllib.parse import quote, urlsplit
 import httpx
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed, WebSocketException
-from .speech import SpeechError, SpeechService, audio_attachments, chat_attachments, decide_voice
+from .speech import SpeechError, SpeechService, audio_attachments, chat_attachments, decide_voice, voice_reply_instruction
 from .images import IMAGE_CHAT_INSTRUCTION, ImageMessageError, image_attachments, load_images
-from .ollama import CONTEXT_WINDOW, ContextLimitError, chat_response
+from .image_generation import ImageGenerationService
+from .ollama import ContextLimitError, chat_response
 from .providers import ProviderConfig, ProviderHTTPError, endpoint, headers, list_models, generate, read_response, ollama_native
 from .schedule import ScheduleService, ScheduleError, ScheduleChanged
 from .schedule_stream import schedule_response
@@ -19,9 +20,11 @@ from .event_logs import exception_details
 from .memory_store import StaleMemory
 from .message_quotes import prepare_quote, message_text, conversation_text, scene_value, receipt_metadata
 from .reply_envelope import public_reply
+from .chat_options import user_prompt_suffix, explanation_instruction
 from .conversation_context import instruction as conversation_instruction, participants, sender_id, group_message
 from .group_chat import GroupParticipation, GROUP_EVENTS, is_group, explicitly_addressed
 from . import group_identity
+from .context_manager import ContextManager, ContextBlock, ContextBudgetError
 
 
 class Bot:
@@ -49,6 +52,10 @@ class Bot:
         self.schedule = ScheduleService(store, self)
         from .memory import MemoryService
         self.memory = MemoryService(store, self)
+        self.image_generation = ImageGenerationService(self)
+        self.context = ContextManager(store)
+        from .emotion import EmotionService
+        self.emotion = EmotionService(self)
         from .reset_command import ResetCommands
         self.reset = ResetCommands(self)
         from .inbox import ConversationInbox
@@ -112,7 +119,7 @@ class Bot:
             return self.providers.get(selection.provider_id)
         return ProviderConfig(base_url=selection.url)
 
-    async def generate(self, selection, messages, max_tokens, *, stream=False, thinking=None):
+    async def generate(self, selection, messages, max_tokens, *, stream=False, thinking=None, json_output=False):
         provider = self.provider(selection)
         context = self.store.events.current.get()
         started = time.monotonic()
@@ -122,7 +129,7 @@ class Bot:
                       'stage': context.get('stage', 'chat')}
             self.store.log('info', '开始调用模型', category='model', event='model.started', details=detail)
             try:
-                result = await self._generate(selection, messages, max_tokens, stream=stream, thinking=thinking)
+                result = await self._generate(selection, messages, max_tokens, stream=stream, thinking=thinking, **({'json_output':True} if json_output else {}))
                 inputs = result.get('prompt_eval_count', 0)
                 outputs = result.get('eval_count', 0)
                 inputs = inputs if type(inputs) is int and inputs >= 0 else 0
@@ -140,17 +147,17 @@ class Bot:
                     details={**detail, **exception_details(error), 'duration_ms': round((time.monotonic()-started)*1000)})
                 raise
 
-    async def _generate(self, selection, messages, max_tokens, *, stream=False, thinking=None):
+    async def _generate(self, selection, messages, max_tokens, *, stream=False, thinking=None, json_output=False):
         provider = self.provider(selection)
         if stream and provider.type == 'ollama':
             async def request(method, url, **kwargs):
                 return await schedule_response(self.client, method, url, **kwargs)
             async with self.inference_lock:
-                return await generate(request, provider, selection, messages, max_tokens, thinking=thinking)
+                return await generate(request, provider, selection, messages, max_tokens, thinking=thinking, **({'json_output':True} if json_output else {}))
         if provider.type == 'ollama' and not ollama_native(provider):
             async with self.inference_lock:
-                return await generate(self.request, provider, selection, messages, max_tokens, thinking=thinking)
-        return await generate(self.request, provider, selection, messages, max_tokens, thinking=thinking)
+                return await generate(self.request, provider, selection, messages, max_tokens, thinking=thinking, **({'json_output':True} if json_output else {}))
+        return await generate(self.request, provider, selection, messages, max_tokens, thinking=thinking, **({'json_output':True} if json_output else {}))
 
     async def start(self):
         if self.task and not self.task.done():
@@ -179,7 +186,7 @@ class Bot:
                 self.store.log('info', '正在预热模型，首次启动可能需要数分钟')
                 await self.request('POST', endpoint(provider, 'generate'), headers=headers(provider), timeout=300, json={
                     'model': c.ollama.model, 'prompt': '', 'stream': False, 'keep_alive': -1,
-                    'options': {'num_ctx': CONTEXT_WINDOW},
+                    'options': {'num_ctx': c.ollama.context_window},
                 })
         except BaseException:
             self.state = 'stopped'
@@ -351,7 +358,7 @@ class Bot:
 
     def is_command(self, text):
         from .browser_qq import BrowserQQ
-        return (BrowserQQ.command(text) is not None or self.reset.action(text) is not None or text in ('/查看日程', '/重置日程', '/查看记忆')
+        return (BrowserQQ.command(text) is not None or self.reset.action(text) is not None or text in ('/userid', '/查看日程', '/重置日程', '/查看记忆')
                 or text.startswith('/记住') or text.startswith('/忘记'))
 
     async def receive(self, payload):
@@ -442,6 +449,12 @@ class Bot:
                 return
             if batch is None and incoming and incoming['id'] <= owner['source_floor']:
                 return
+            if group_turn is None and text == '/userid':
+                if self.schedule_reply_expired(d, command='用户标识') or not self.store.claim(f'{target}:{d["id"]}'):
+                    return
+                label = 'QQ 号' if c.transport == 'napcat' else ('群成员 OpenID' if group else 'OpenID')
+                await self.send_schedule_text(f'你的{label}：{user}', c, d, group, target, source='userid')
+                return
             reset_action = self.reset.action(text) if group_turn is None else None
             if reset_action is not None:
                 if self.schedule_reply_expired(d, command='重置') or not self.store.claim(f'{target}:{d["id"]}'):
@@ -460,7 +473,10 @@ class Bot:
                     await day.sync_commitments()
                     await self.send_schedule_text(response, c, d, group, target, source='memory')
                 return
-            if group_turn is None and self.browser and await self.browser.handle(self,text,c,d,group,target,user,sid,incoming['id'] if incoming else 0,batch,key):
+            picture_intent = None
+            if group_turn is None and not audios and not self.store.db.execute('SELECT 1 FROM seen WHERE id=?',(f'{target}:{d["id"]}',)).fetchone():
+                picture_intent = await self.image_generation.resolve_request(text,c,d,group,sid,key)
+            if group_turn is None and picture_intent is None and self.browser and await self.browser.handle(self,text,c,d,group,target,user,sid,incoming['id'] if incoming else 0,batch,key):
                 return True
             if key in self.pending or (batch is None and group_turn is None and time.time() - self.last.get(key, 0) < c.rules.cooldown):
                 return
@@ -491,6 +507,12 @@ class Bot:
                     if c.speech.stt.failure_policy=='ask_for_text' or not text and not attachments:raise
                     context_text+='\n[对方还发送了语音，当前无法读取；只回应可见内容，不猜测音频内容。]'
                     self.store.log('warn','本轮语音未读取，保留文字或图片继续回复',category='message',event='speech.caption_fallback')
+            if group_turn is None and audios:
+                picture_intent=await self.image_generation.resolve_request(text,c,d,group,sid,key)
+            if picture_intent is not None:
+                if picture_intent.action=='clarify':
+                    return await self.image_generation.clarify(picture_intent.clarification,c,d,group,target,sid,key,batch)
+                return await self.image_generation.handle(picture_intent.prompt,c,d,group,target,user,sid,key,batch)
             voice_decision=decide_voice(c.speech.tts,text,has_audio=audio_transcribed,group=group,
                 event_key=f'{c.account_id}:{sid}:{batch["id"] if batch else d["id"]}',
                 last_auto_voice=self.store.last_auto_voice(c.account_id,sid),now=time.time())
@@ -517,11 +539,14 @@ class Bot:
                 if notes:
                     user_message['content'] += '\n[图片处理备注，仅供理解，不向对方复述：' + '；'.join(notes) + ']'
                 user_message['images'] = images
+            emotion_sources = batch['ids'] if batch else [incoming['id']] if incoming else []
+            await self.emotion.observe(sid, emotion_sources)
             schedule_context = '' if group_turn else await day.context()
             schedule_stamp = day.stamp()
             dialogue_instruction = '' if group_turn else day.dialogue.instruction()
             memory_context = '' if group_turn else await self.memory.context(sid, context_text or '图片对话中的相关信息')
             memory_stamp = self.memory.stamp(sid)
+            emotion_stamp = self.emotion.stamp(sid)
             old = [] if group_turn else self.store.history(key, c.rules.rounds)
             meme_query = '\n'.join([*(m.get('content','') for m in old[-4:]), context_text])
             meme_candidates = [] if group_turn else await self.memes.candidates(sid, meme_query)
@@ -547,16 +572,30 @@ class Bot:
                            '不得引入私聊、私人任务或私人日程。不要朗读身份元数据。')
                 # Include the complete public burst, even when the selected speaker spoke first.
                 conversation_context += '\n[本轮群聊公开背景]\n' + json.dumps(self.group_chat.public_messages(c,target,group_turn['through_id'],group_turn['ids']),ensure_ascii=False)
-            messages = [{'role': 'system', 'content': persona + browser_context + browser_experience + memory_context + schedule_context + qzone_context + diary_context + dialogue_instruction + meme_instruction + conversation_context + (IMAGE_CHAT_INSTRUCTION if attachments or re.search(r'\[(?:QQ表情|表情包):[^\]\n]{0,120}\]',context_text) else '') + ('\n本轮将把你的回复正文合成为语音。直接说话，不写动作括号、Markdown或发语音的说明。' if voice_requested else '')}, *old, user_message]
+            user_message['content'] += user_prompt_suffix(c,d,group)
+            if c.image_generation.enabled:
+                persona += ('\n【本轮图片执行状态】本轮没有执行新的图片创作或发送生成图。可以讨论本会话已确认发送的图片，'
+                            '但不要声称本轮已拍照、已发图或已开始生成，也不要空口承诺稍后会自动发图。')
+            persona += explanation_instruction(c.rules)
+            output_tokens = max(2048, c.ollama.max_tokens) if dialogue_instruction or meme_instruction else c.ollama.max_tokens
+            system = persona + dialogue_instruction + meme_instruction + (IMAGE_CHAT_INSTRUCTION if attachments or re.search(r'\[(?:QQ表情|表情包):[^\]\n]{0,120}\]',context_text) else '') + (voice_reply_instruction(c.speech.tts) if voice_requested else '')
+            blocks = [ContextBlock(name, text, priority) for name, text, priority in (
+                ('schedule', schedule_context, 95), ('conversation', conversation_context, 90),
+                ('browser', browser_context, 85), ('browser_experience', browser_experience, 65),
+                ('qzone', qzone_context, 60), ('diary', diary_context, 55))]
+            if memory_context:
+                blocks.extend(getattr(memory_context, 'blocks', [ContextBlock('memory', memory_context, 75)]))
+            blocks.append(self.emotion.block(sid, group=group))
+            messages = self.context.assemble(sid, c.ollama, system, old, user_message, blocks, output_tokens=output_tokens)
             try:
-                answer = await self.generate(c.ollama, messages, max(2048, c.ollama.max_tokens) if dialogue_instruction or meme_instruction else c.ollama.max_tokens, thinking=self.provider(c.ollama).chat_thinking)
+                answer = await self.generate(c.ollama, messages, output_tokens, thinking=self.provider(c.ollama).chat_thinking)
             except (ValueError, httpx.HTTPError):
                 if attachments:
                     raise ImageMessageError('图片识别失败或超时，请稍后重试或发送较小的图片。') from None
                 raise
             # 模型已经消耗的 Token 在 QQ 发送失败或回复超时的情况下也应计入用量。
             self.store.record_usage(answer)
-            if not day.matches(schedule_stamp) or not self.memory.matches(sid, memory_stamp):
+            if not day.matches(schedule_stamp) or not self.memory.matches(sid, memory_stamp) or not self.emotion.matches(sid, emotion_stamp):
                 raise ScheduleChanged('日程已变化，已跳过基于旧安排生成的回复')
             if qzone and not group_turn and qzone.chat_context(sid) != qzone_context:
                 raise ScheduleChanged('空间动态或 Owner 已变化，已跳过基于旧动态生成的回复')
@@ -614,11 +653,17 @@ class Bot:
             delivery.diary_context = diary_context
             delivery.voice_requested=voice_requested
             delivery.voice_reason=voice_decision.reason
+            delivery.emotion_stamp=emotion_stamp
+            delivery.voice_style=self.emotion.voice_style(sid)
+            expression_style = self.emotion.snapshot(sid)['style'] if c.emotion.enabled else None
+            delivery.expression_style=expression_style
             receipt = await delivery.send(content, prepared, update, meme=meme, meme_candidates=meme_candidates if meme_fallback else None)
             schedule_stamp = delivery.schedule_stamp
             if not isinstance(receipt, dict) or not receipt.get('id'):
                 self.store.log('warn', 'QQ 未确认回复送达，未保存回复与记忆')
                 return
+            if delivery.state_current():
+                self.emotion.used(sid, f'reply:{c.account_id}:{target}:{d["id"]}', delivery.source_ids, expression_style)
             if not group_turn and day.matches(schedule_stamp) and self.memory.matches(sid, memory_stamp):
                 self.store.save_history(key, [*old, {'role': 'user', 'content': history_text}, {'role': 'assistant', 'content': content + delivery.meme_context}], c.rules.rounds)
             if not group_turn and self.memory.matches(sid, memory_stamp):
@@ -638,8 +683,8 @@ class Bot:
             return True
         except (ScheduleChanged, StaleMemory) as error:
             self.store.log('warn', str(error))
-        except (ImageMessageError,SpeechError) as e:
-            self.store.record_result('errors', f'回复失败：{e}', category='message', event='message.speech_failed' if isinstance(e,SpeechError) else 'message.image_failed', details=exception_details(e))
+        except (ImageMessageError,SpeechError,ContextBudgetError) as e:
+            self.store.record_result('errors', f'回复失败：{e}', category='message', event='message.context_failed' if isinstance(e,ContextBudgetError) else 'message.speech_failed' if isinstance(e,SpeechError) else 'message.image_failed', details=exception_details(e))
             if claimed and group_turn is None:
                 try:
                     if batch is not None and not self.inbox.mark_sending(batch):
@@ -652,7 +697,7 @@ class Bot:
                         self.store.log('warn', 'QQ 未确认媒体处理提示送达')
                         return
                     self.store.chat.record(c.account_id, 'group' if group else 'user', target, 'assistant', str(e),
-                                           f'reply:{c.account_id}:{target}:{d["id"]}', at=time.time(), source='speech_notice' if isinstance(e,SpeechError) else 'image_notice',
+                                           f'reply:{c.account_id}:{target}:{d["id"]}', at=time.time(), source='context_notice' if isinstance(e,ContextBudgetError) else 'speech_notice' if isinstance(e,SpeechError) else 'image_notice',
                                            **receipt_metadata(notice))
                     self.last[key] = time.time()
                     if len(self.last) > 500:
@@ -708,15 +753,17 @@ class Bot:
                 pass
         return False
 
-    async def send_schedule_text(self, content, config, data, group, target, first_sequence=1, source='schedule'):
+    async def send_schedule_text(self, content, config, data, group, target, first_sequence=1, source='schedule', guard=None):
         path = 'groups' if group else 'users'
         # Bounded plan fields keep the complete display within four QQ replies.
         chunks = [content[index:index + 1600] for index in range(0, len(content), 1600)]
         if len(chunks) > 4:
             raise ValueError('日程显示内容过长，请在网页查看完整日程')
         for sequence, chunk in enumerate(chunks, first_sequence):
-            receipt = await self.api('POST', f'/v2/{path}/{quote(target, safe="")}/messages', json={
+            if guard is not None and not guard(): return
+            receipt = await self.api('POST', f'/v2/{path}/{quote(target, safe="")}/messages', before_send=guard, json={
                 'msg_type': 0, 'content': chunk, 'msg_id': data['id'], 'msg_seq': sequence})
+            if not isinstance(receipt, dict) or not receipt.get('id'): return
             self.store.chat.record(config.account_id, 'group' if group else 'user', target, 'assistant', chunk,
                 f'{source}:{config.account_id}:{target}:{data["id"]}:{sequence}', at=time.time(), source=source,
                 **receipt_metadata(receipt))

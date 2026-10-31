@@ -279,7 +279,7 @@ async def test_old_retry_cannot_overwrite_newer_fact_and_summary(tmp_path):
         mid = store.db.execute('SELECT MAX(id) FROM chat_messages').fetchone()[0]
         bot.memory.enqueue(sid, event, [mid], immediate=True)
         jobs.append(dict(store.db.execute('SELECT * FROM memory_jobs ORDER BY id DESC LIMIT 1').fetchone()))
-    async def generate(selection, messages, budget):
+    async def generate(selection, messages, budget, **kwargs):
         rows = json.loads(messages[-1]['content'])['本次消息']
         old = rows[0]['content'] == '我喜欢咖啡'
         return {'message': {'content': json.dumps({'summary': '喜欢咖啡' if old else '只喝茶', 'memories': [{'category': 'preference', 'key': 'drink', 'content': '喜欢咖啡' if old else '只喝茶', 'evidence': [rows[0]['id']]}]})}}

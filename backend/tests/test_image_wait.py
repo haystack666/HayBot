@@ -1,0 +1,23 @@
+from unittest.mock import AsyncMock
+import pytest
+from test_image_generation import setup_generation,picture
+from test_reply_segments import event
+
+@pytest.mark.asyncio
+async def test_wait_precedes_generation_and_uses_separate_message_sequence(tmp_path,monkeypatch):
+    store,bot,providers=setup_generation(tmp_path);order=[]
+    monkeypatch.setattr('app.image_conversation.acknowledgement',AsyncMock(return_value='等我一下，给你准备张适合屏保的。'))
+    async def generate(*a,**k):order.append('generate');return picture()
+    monkeypatch.setattr('app.image_generation.generate_image',generate)
+    monkeypatch.setattr('app.image_conversation.caption',AsyncMock(side_effect=ValueError()))
+    async def api(method,path,**kwargs):
+        if path.endswith('/files'):return {'file_info':'media'}
+        b=kwargs['json'];order.append((b['msg_type'],b['msg_seq']));return {'id':'ok'}
+    bot.api.side_effect=api
+    request=event();request['d']['content']='/画图 海边自拍'
+    try:
+        await bot.handle(request)
+        assert order==[(0,1),'generate',(7,2),(0,3)]
+        assert store.db.execute("SELECT count(*) FROM chat_messages WHERE source='image_wait'").fetchone()[0]==1
+    finally:
+        await bot.client.aclose();providers.close();store.close()

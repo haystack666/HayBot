@@ -172,6 +172,7 @@ async def test_owner_asks_about_post_and_real_chat_prompt_contains_it(tmp_path):
             if any(r['action']=='send_private_msg' for r in calls):break
             await asyncio.sleep(.01)
         assert b.generate.await_count==1
-        assert '晚风把今天的小烦恼吹散了' in b.generate.await_args.args[1][0]['content']
+        assert any('晚风把今天的小烦恼吹散了' in m['content'] for m in b.generate.await_args.args[1])
+        assert '晚风把今天的小烦恼吹散了' not in b.generate.await_args.args[1][0]['content']
         assert any(r['action']=='send_private_msg' for r in calls)
         await b.stop();await q.close();await b.client.aclose();s.close()

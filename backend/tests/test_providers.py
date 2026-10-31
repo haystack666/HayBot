@@ -309,7 +309,7 @@ async def test_two_bots_use_different_external_providers_concurrently(tmp_path):
         index = 1 if request.url.host == 'first.test' else 2
         assert request.headers['Authorization'] == f'Bearer key-{index}'
         payload = json.loads(request.content)
-        assert payload['model'] == f'model-{index}' and payload['messages'][0]['content'].split('\n\n[平台会话上下文]',1)[0] == f'persona-{index}'
+        assert payload['model'] == f'model-{index}' and payload['messages'][0]['content'].split('\n[参考资料规则]',1)[0] == f'persona-{index}'
         assert f'persona-{3-index}' not in str(payload)
         return httpx.Response(200, json=reply('openai_chat'))
     async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
@@ -355,3 +355,17 @@ def test_referenced_provider_cannot_change_purpose(client):
     result = client.put('/api/providers/' + provider['id'], json={'type': 'openai_embedding', 'base_url': 'https://new.test/v1'})
     assert result.status_code == 409
     assert client.get('/api/providers').json()['providers'][0]['purpose'] == 'chat'
+
+
+@pytest.mark.asyncio
+async def test_xiaomi_schedule_json_output_and_truncation_metadata():
+    from unittest.mock import AsyncMock
+    from app.providers import generate, ProviderConfig
+    from app.config import OllamaConfig
+    request=AsyncMock(return_value={'choices':[{'message':{'content':'{"summary":"test"}'},'finish_reason':'length'}],
+                                   'usage':{'prompt_tokens':1,'completion_tokens':2}})
+    provider=ProviderConfig(type='xiaomi',base_url='https://api.xiaomimimo.com/v1',api_key='test')
+    result=await generate(request,provider,OllamaConfig(model='mimo-v2.6-flash'),[{'role':'user','content':'返回JSON'}],6000,json_output=True)
+    assert request.call_args.kwargs['json']['response_format']=={'type':'json_object'}
+    assert result['finish_reason']=='length'
+    assert result['eval_count']==2

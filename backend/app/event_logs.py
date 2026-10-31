@@ -14,7 +14,7 @@ FIELDS = {'model', 'provider', 'provider_type', 'duration_ms', 'input_tokens', '
           'http_status', 'error_type', 'error_code', 'retry_in', 'attempt', 'message_id', 'stage', 'reason', 'count',
           'indexed', 'dimensions', 'state', 'trigger', 'revision', 'queue_size', 'image_count', 'sent_message_id',
           'request_url', 'request_operation', 'segment_index', 'segment_count', 'batch_count', 'batch_id', 'incoming_ids', 'scope_id', 'trace_id', 'incoming_id', 'outgoing_id', 'push_id',
-          'user_name', 'user_id', 'kind', 'target', 'app_id'}
+          'user_name', 'user_id', 'kind', 'target', 'app_id', 'job_id', 'reference_count'}
 
 
 def category_for(message):

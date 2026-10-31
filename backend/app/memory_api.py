@@ -1,6 +1,7 @@
 """Authenticated bot- and user-scoped memory management routes."""
 import time
 import uuid
+import json
 from typing import Literal
 
 from fastapi import Depends, Query
@@ -97,6 +98,39 @@ def install(app, scoped_runtime):
         for start in range(0, len(sources), 24):
             runtime.bot.memory.enqueue(scope_id, 'manual:' + uuid.uuid4().hex, sources[start:start+24], immediate=True)
         return {'ok': True, 'source_count': len(sources)}
+
+    @app.post('/api/bots/{bot_id}/memory/rebuild-summary')
+    async def rebuild_summary(scope_id: str = '', runtime: BotRuntime = Depends(scoped_runtime)):
+        owner = selected(runtime, scope_id)
+        if not runtime.store.load().memory.enabled:
+            raise ValueError('请先配置并启用记忆功能')
+        # Filter ownership before LIMIT so other group members cannot crowd out this user.
+        rows = runtime.store.db.execute('''SELECT m.id FROM chat_messages m JOIN chat_conversations c ON c.id=m.conversation_id
+            WHERE c.app_id=? AND c.kind=? AND c.target_id=? AND m.id>? AND m.historical=0
+            AND m.source IN ('incoming','reply')
+            AND NOT EXISTS (SELECT 1 FROM memory_superseded_sources x WHERE x.scope_id=? AND x.source_id=m.id)
+            AND ((m.role='user' AND (m.sender_id=? OR (m.sender_id='' AND c.kind='user')))
+                 OR (m.role='assistant' AND m.status='sent')) ORDER BY m.id DESC''',
+            (owner['app_id'], owner['kind'], owner['target'], owner['source_floor'], scope_id, owner['sender_id']))
+        sources = []
+        for row in rows:
+            if runtime.store.scopes.source(scope_id, row['id']):
+                sources.append(row['id'])
+            if len(sources) >= 240:
+                break
+        if not sources:
+            raise ValueError('遗忘屏障之后没有可重建的来源')
+        with runtime.bot.memory.data.transaction():
+            runtime.bot.memory.data.invalidate(scope_id, manual=False)
+            runtime.store.db.execute("UPDATE memory_jobs SET status='canceled' WHERE scope_id=? AND status IN ('pending','running')", (scope_id,))
+            sources.reverse()
+            for start in range(0, len(sources), 24):
+                # enqueue uses a SQLite context manager, so insert directly in this transaction.
+                runtime.store.db.execute('''INSERT INTO memory_jobs(scope_id,source_key,source_ids,epoch,created)
+                    VALUES (?,?,?,?,?)''', (scope_id, 'summary-rebuild:' + uuid.uuid4().hex, json.dumps(sources[start:start+24]),
+                    runtime.bot.memory.data.epoch(scope_id), time.time()-31))
+        runtime.bot.memory.wakeup.set()
+        return {'ok': True, 'source_count': len(sources), 'limit': 240}
 
     @app.post('/api/bots/{bot_id}/memory/retry')
     async def retry_memory(scope_id: str = '', runtime: BotRuntime = Depends(scoped_runtime)):

@@ -101,6 +101,26 @@ class OllamaConfig(StrictModel):
     temperature: float = Field(default=0.7, ge=0, le=2)
     timeout: int = Field(default=120, ge=5, le=600)
     max_tokens: int = Field(default=1024, ge=128, le=32768)
+    context_window: int = Field(default=8192, ge=4096, le=2097152)
+    reasoning_reserve: int = Field(default=0, ge=0, le=32768)
+    safety_reserve: int = Field(default=512, ge=128, le=8192)
+
+    @model_validator(mode='before')
+    @classmethod
+    def migrate_context_window(cls, value):
+        # Old configurations allowed large outputs without declaring a model window.
+        # Preserve their readability; never shrink an explicitly configured window.
+        if isinstance(value, dict) and 'context_window' not in value:
+            output = value.get('max_tokens', 1024)
+            if type(output) is int and output + 512 >= 8192:
+                value = {**value, 'context_window': output + 4096}
+        return value
+
+    @model_validator(mode='after')
+    def valid_context_budget(self):
+        if self.max_tokens + self.reasoning_reserve + self.safety_reserve >= self.context_window:
+            raise ValueError('上下文窗口必须大于输出、额外推理与安全预留之和')
+        return self
 
     @field_validator('url')
     @classmethod
@@ -116,6 +136,10 @@ class RulesConfig(StrictModel):
     rounds: int = Field(default=6, ge=0, le=30)
     max_length: int = Field(default=1500, ge=10, le=2000)
     cooldown: int = Field(default=3, ge=0, le=300)
+    show_thinking: bool = False
+    stream_output: bool = False
+    user_identification: bool = False
+    real_world_time: bool = False
     split_enabled: bool = True
     split_length: int = Field(default=100, ge=20, le=500)
     split_max_parts: int = Field(default=4, ge=1, le=4)
@@ -225,7 +249,8 @@ class MemeConfig(StrictModel):
     enabled: bool = False
     embedding: MemoryModelConfig = Field(default_factory=MemoryModelConfig)
     rerank: MemoryModelConfig = Field(default_factory=MemoryModelConfig)
-    packs: list[str] = Field(default_factory=lambda: ['deepseek-fanart-v1', 'custom'], max_length=30)
+    packs: list[str] = Field(default_factory=list, max_length=30)
+    local_enabled: bool = False
     chance: float = Field(default=.35, ge=0, le=1, allow_inf_nan=False)
     cooldown_seconds: int = Field(default=120, ge=0, le=86400)
     repeat_window: int = Field(default=8, ge=0, le=100)
@@ -262,6 +287,7 @@ class TTSConfig(SpeechModelConfig):
     command_trigger: bool = True
     imperative_trigger: bool = True
     voice_follow_trigger: bool = False
+    separate_actions: bool = False
     auto_probability: int = Field(default=0,ge=0,le=100,strict=True)
     auto_cooldown_seconds: int = Field(default=300,ge=0,le=86400)
     max_reply_chars: int = Field(default=600,ge=50,le=1500)
@@ -307,6 +333,46 @@ class SpeechConfig(StrictModel):
         return value
 
 
+class EmotionConfig(StrictModel):
+    enabled: bool = False
+    intensity: float = Field(default=0.6, ge=0, le=1)
+    half_life_hours: float = Field(default=6, ge=0.25, le=168)
+    relationship_rate: float = Field(default=0.5, ge=0, le=2)
+    baseline_valence: float = Field(default=15, ge=-100, le=100)
+    baseline_energy: float = Field(default=60, ge=0, le=100)
+    baseline_tension: float = Field(default=10, ge=0, le=100)
+    affect_tone: bool = True
+    affect_actions: bool = True
+    affect_voice: bool = True
+    affect_proactive: bool = True
+    use_schedule: bool = True
+    event_cooldown_minutes: int = Field(default=30, ge=1, le=1440)
+    daily_event_limit: int = Field(default=12, ge=1, le=100)
+
+
+class ImageGenerationConfig(MemoryModelConfig):
+    enabled: bool = False
+    base_prompt: str = Field(default='', max_length=6000)
+    character_prompt: str = Field(default='', max_length=3000)
+    require_reference: bool = True
+    imperative_trigger: bool = True
+    scope: Literal['private', 'private_and_group'] = 'private'
+    aspect: Literal['square', 'portrait', 'landscape'] = 'square'
+    cooldown_seconds: int = Field(default=60, ge=0, le=86400)
+    daily_limit: int = Field(default=50, ge=1, le=500)
+    user_daily_limit: int = Field(default=10, ge=1, le=100)
+    timeout: int = Field(default=150, ge=15, le=180)
+
+    @model_validator(mode='after')
+    def complete(self):
+        self.model = self.model.strip()
+        if bool(self.provider_id) != bool(self.model):
+            raise ValueError('生图供应商与模型名称必须同时填写')
+        if self.enabled and (not self.provider_id or not self.base_prompt.strip()):
+            raise ValueError('开启图片创作前，请选择生图模型并填写基础风格提示词')
+        return self
+
+
 class Settings(StrictModel):
     transport: Literal['qq_official','napcat'] = 'qq_official'
     napcat: NapCatConfig = Field(default_factory=NapCatConfig)
@@ -319,6 +385,8 @@ class Settings(StrictModel):
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     memes: MemeConfig = Field(default_factory=MemeConfig)
     speech: SpeechConfig = Field(default_factory=SpeechConfig)
+    emotion: EmotionConfig = Field(default_factory=EmotionConfig)
+    image_generation: ImageGenerationConfig = Field(default_factory=ImageGenerationConfig)
 
     @property
     def account_id(self):

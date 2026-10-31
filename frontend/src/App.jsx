@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ArrowDownLeft, ArrowUpRight, Bot, ChevronRight, CircleHelp, Cpu, FileText, LayoutDashboard, LoaderCircle, LogOut, Menu, PanelLeftClose, PanelLeftOpen, Play, Radio, RefreshCw, Save, ShieldCheck, SlidersHorizontal, Square, X, Bell, MessageSquare, CalendarDays, Brain, Image, Globe2 } from 'lucide-react'
+import { ArrowDownLeft, ArrowUpRight, Bot, Camera, ChevronRight, CircleHelp, Cpu, FileText, LayoutDashboard, LoaderCircle, LogOut, Menu, PanelLeftClose, PanelLeftOpen, Play, Radio, RefreshCw, Save, ShieldCheck, SlidersHorizontal, Square, X, Bell, MessageSquare, CalendarDays, Brain, Heart, Image, Globe2 } from 'lucide-react'
 import { Dialog } from 'radix-ui'
 import { NavLink, useNavigate, useParams, useLocation } from 'react-router-dom'
 import ProactivePage from './ProactivePage'
@@ -10,6 +10,8 @@ import ConfigurationPages from './ConfigurationPages'
 import SchedulePage from './SchedulePage'
 import DiaryPage from './DiaryPage'
 import MemoryPage from './MemoryPage'
+import EmotionPage from './EmotionPage'
+import ImageGenerationPage from './ImageGenerationPage'
 import MemesPage from './MemesPage'
 import QzonePage from './QzonePage'
 import LogsPage from './LogsPage'
@@ -31,9 +33,11 @@ export const pages = [
   { id: 'providers', title: '共享供应商', subtitle: '选择供应商和模型，管理多个本地或外部连接。', icon: Cpu },
   { id: 'rules', title: '角色与群聊', subtitle: '管理角色身份、Owner 关系和不同场景的表达。', icon: SlidersHorizontal },
   { id: 'memory', title: '角色记忆', subtitle: '管理每位用户的长期记忆、共同经历和未来约定。', icon: Brain },
+  { id: 'emotion', title: '情感系统', subtitle: '连续、可解释、可校正的情绪、关系与表达。', icon: Heart },
   { id: 'diary', title: '私人日记', icon: FileText },
   { id: 'schedule', title: '每日日程', subtitle: '安排角色每天的活动、穿着与生活中的小插曲。', icon: CalendarDays },
   { id: 'memes', title: '表情素材', subtitle: '管理逐图语义描述，让机器人在合适的时刻发表情。', icon: Image },
+  { id: 'image-generation', title: '图片创作', subtitle: '配置生图模型、摄影风格与角色三视图，让 QQ 自然语言请求变成图片。', icon: Camera },
   { id: 'qzone', title: 'QQ 空间', subtitle: '编辑、定时发布角色动态，管理配图与可见范围。', icon: Globe2 },
   { id: 'proactive', title: '主动互动', subtitle: '设置定时问候和主动搭话策略。', icon: Bell },
   { id: 'chats', title: '会话记录', subtitle: '查看当前 Bot 的会话记录，支持列表与气泡视图。', icon: MessageSquare },
@@ -42,6 +46,9 @@ export const pages = [
 ]
 const states = { stopped: '已停止', connecting: '连接中', connected: '运行中', reconnecting: '重新连接中' }
 const numericFields = [
+  ...['cooldown_seconds','daily_limit','user_daily_limit','timeout'].map(key=>['image_generation',key,'图片创作策略']),
+  ...['intensity','half_life_hours','relationship_rate','baseline_valence','baseline_energy','baseline_tension','event_cooldown_minutes','daily_event_limit'].map(key => ['emotion', key, '情感策略']),
+  ['ollama', 'context_window', '模型上下文窗口'], ['ollama', 'reasoning_reserve', '额外推理预留'], ['ollama', 'safety_reserve', '上下文安全预留'],
   ['memory', 'extraction_turns', '记忆整理轮数'], ['memory', 'top_k', '选入记忆条数'], ['memory', 'recall_limit', '检索候选条数'], ['memory', 'context_chars', '记忆字符预算'], ['memory', 'timeout', '检索超时'],
   ['ollama', 'max_tokens', '输出 Token 上限'], ['ollama', 'timeout', '请求超时'], ['ollama', 'temperature', '温度'],
   ['rules', 'debounce_seconds', '静默等待时间'], ['rules', 'debounce_max_wait', '最长收集时间'], ['rules', 'debounce_max_messages', '每批消息上限'],
@@ -154,7 +161,7 @@ export default function App({ page }) {
   function switchBot(next) { if (next && next !== botId && guardLeave()) { routerNavigate(`/bots/${next}/${!botId ? 'overview' : page}`); setMobileOpen(false) } }
   const active = !!botId && status.state !== 'stopped', current = page === 'bots' ? { title: '机器人管理', subtitle: '' } : pages.find(p => p.id === page)
   const { search } = useLocation()
-  const readOnlyConfig = ['qq','rules'].includes(page) || ['memory','schedule'].includes(page) && new URLSearchParams(search).get('view') === 'settings' || page === 'proactive' && new URLSearchParams(search).get('view') !== 'qzone'
+  const readOnlyConfig = ['qq','rules','image-generation'].includes(page) || ['memory','schedule','emotion'].includes(page) && new URLSearchParams(search).get('view') === 'settings' || page === 'proactive' && new URLSearchParams(search).get('view') !== 'qzone'
   const currentBot = bots.find(bot => bot.id === botId)
   const connections = usePageTabs([['qq','QQ 连接'],['models','模型分配']])
   const toggleButton = <Button disabled={!!busy || (!active && dirty)} variant={active ? 'outline' : 'default'} onClick={() => action('toggle', () => api(active ? '/bot/stop' : '/bot/start', 'POST'), active ? '机器人已停止' : '机器人正在连接 QQ')}>{busy === 'toggle' ? <LoaderCircle size={14} className="spin" /> : active ? <Square size={13} /> : <Play size={14} />}{active ? '停止机器人' : '启动机器人'}</Button>
@@ -179,6 +186,8 @@ export default function App({ page }) {
     {page === 'proactive' && <ProactivePage config={config.proactive} update={(key, value) => update('proactive', key, value)} active={active} busy={busy} dirty={dirty} api={api} notify={notify} Panel={Panel} Field={Field} space={<QzonePage key={botId} {...{api,notify,dirty}} />} />}
     {page === 'schedule' && <SchedulePage config={config.schedule} update={(key, value) => update('schedule', key, value)} {...{active, busy, dirty, api, notify}} model={config.ollama.model} />}
     {page === 'memory' && <MemoryPage config={config.memory} update={(key, value) => update('memory', key, value)} {...{active, busy, dirty, api, notify}} />}
+    {page === 'emotion' && <EmotionPage config={config.emotion} update={(key, value) => update('emotion', key, value)} {...{active, dirty, api, notify}} />}
+    {page === 'image-generation' && <ImageGenerationPage key={botId} config={config.image_generation} update={(key,value)=>update('image_generation',key,value)} {...{providers,active,busy,dirty,api,notify}}/>}
     {page === 'memes' && <MemesPage {...{api, providers, notify}} memory={config.memory} onSaved={memes => { setConfig(c => ({ ...c, memes })); setSavedConfig(c => ({ ...c, memes })) }} />}
     {page === 'browser' && <BrowserPage key={botId} {...{api, notify, botId}} />}
     {page === 'diary' && <DiaryPage key={botId} {...{api, notify}} />}

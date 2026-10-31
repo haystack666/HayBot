@@ -10,7 +10,7 @@ import pytest
 from app.config import Settings,OllamaConfig,SpeechConfig
 from app.providers import ProviderConfig,ProviderStore,generate,headers
 from app.provider_catalog import CATALOG
-from app.speech import (SpeechError,pcm_wav,to_wav,to_silk,synthesize,transcribe,fetch_audio,wants_voice,decide_voice)
+from app.speech import (SpeechError,pcm_wav,to_wav,to_silk,synthesize,transcribe,fetch_audio,wants_voice,decide_voice,split_voice_actions)
 from test_providers import client
 from test_reply_segments import make_bot,event
 
@@ -19,7 +19,7 @@ AUDIO=base64.b64encode(WAV).decode()
 
 
 def test_catalog_and_defaults():
-    assert len(CATALOG)==35
+    assert len(CATALOG)==37
     assert {p:sum(v['purpose']==p for v in CATALOG.values()) for p in ('chat','tts','stt')}=={'chat':18,'tts':7,'stt':4}
     for kind,info in CATALOG.items():
         p=ProviderConfig(type=kind)
@@ -28,6 +28,7 @@ def test_catalog_and_defaults():
     assert not speech.stt.enabled and not speech.tts.enabled
     assert speech.tts.scope=='private' and speech.tts.command_trigger and speech.tts.imperative_trigger
     assert not speech.tts.voice_follow_trigger and speech.tts.auto_probability==0 and speech.tts.max_reply_chars==600
+    assert not speech.tts.separate_actions
     assert speech.stt.scope=='private_and_group' and speech.stt.auto_transcribe and speech.stt.max_audio_seconds==120
     with pytest.raises(ValueError):ProviderConfig(type='openai_tts',purpose='stt')
     with pytest.raises(ValueError):ProviderConfig(type='xfyun_stt',base_url='https://wrong.test')
@@ -82,6 +83,142 @@ def test_tts_trigger_precedence_probability_scope_and_cooldown():
     decision=decide_voice(c,'晚安',event_key='same-message',last_auto_voice=0,now=1000)
     assert decision.enabled and decision.reason=='automatic'
     assert decide_voice(c,'晚安',event_key='same-message',last_auto_voice=0,now=1000)==decision
+
+
+@pytest.mark.parametrize('text,actions,spoken',[
+    ('（拽住衣袖）怎么才回来？（抬头）等你好久了。','（拽住衣袖）\n（抬头）','怎么才回来？\n等你好久了。'),
+    ('你好(smiles)呀（挥手）','(smiles)\n（挥手）','你好\n呀'),
+    ('（笑着(轻轻挥手)）你好','（笑着(轻轻挥手)）','你好'),
+    ('（笑）（挥手）','（笑）\n（挥手）',''),
+    ('你好呀！','','你好呀！'),
+    ('（笑）\n Hello there! (waves)\nGood night.','（笑）\n(waves)','Hello there!\nGood night.'),
+])
+def test_split_voice_actions(text,actions,spoken):
+    assert split_voice_actions(text)==(actions,spoken)
+
+
+@pytest.mark.parametrize('text',['（笑','笑）','(笑）你好','（笑)你好','（笑）你好（挥手','（(笑）)'])
+def test_split_voice_actions_rejects_unbalanced_brackets(text):
+    with pytest.raises(SpeechError):split_voice_actions(text)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('scenario',[
+    'success','no_actions','actions_only','unbalanced','synthesis_failure','upload_failure',
+    'action_unknown','action_timeout','voice_unknown','voice_timeout','disabled','text_only','changed',
+])
+async def test_separate_actions_delivery_and_safe_fallback(tmp_path,scenario):
+    store,bot,_=make_bot(tmp_path);c=store.load()
+    c.rules.split_enabled=False
+    c.speech.tts.provider_id='a'*32;c.speech.tts.model='tts';c.speech.tts.enabled=True
+    c.speech.tts.separate_actions=scenario!='disabled';store.save(c)
+    content={'no_actions':'你好呀！','actions_only':'（挥手）','unbalanced':'（挥手你好'}.get(scenario,'（挥手）你好呀！(笑)等你好久了。')
+    bot.generate.return_value={'message':{'content':content}}
+    spoken='你好呀！\n等你好久了。'
+    async def speak(text,config):
+        assert not bot.api.await_count
+        if scenario=='synthesis_failure':raise SpeechError('测试合成失败')
+        if scenario=='changed':
+            latest=store.load();latest.speech.tts.separate_actions=False;store.save(latest)
+        return b'fake-silk'
+    bot.speech.speak=AsyncMock(side_effect=speak)
+    async def api(method,path,**kwargs):
+        if path.endswith('/files'):
+            assert not any(call.kwargs['json'].get('msg_type')==0 for call in bot.api.await_args_list)
+            if scenario=='upload_failure':raise httpx.ConnectError('test upload failure')
+            return {'file_info':'media'}
+        voice=kwargs['json']['msg_type']==7
+        if scenario==('voice_timeout' if voice else 'action_timeout'):raise httpx.ReadTimeout('test uncertain receipt')
+        if scenario==('voice_unknown' if voice else 'action_unknown'):return {}
+        return {'id':'voice' if voice else 'text'}
+    bot.api.side_effect=api
+    incoming=event();incoming['d']['content']='你好' if scenario=='text_only' else '用语音回复我'
+    await bot.handle(incoming)
+    calls=[call.kwargs['json'] for call in bot.api.await_args_list if not call.args[1].endswith('/files')]
+    rows=store.db.execute("SELECT content,source FROM chat_messages WHERE role='assistant' ORDER BY id").fetchall()
+    history=store.history('user:alice:alice',6)
+    if scenario=='success':
+        assert [call['msg_type'] for call in calls]==[0,7]
+        assert [call['msg_seq'] for call in calls]==[1,2]
+        assert calls[0]['content']=='（挥手）\n(笑)'
+        assert [tuple(row) for row in rows]==[('（挥手）\n(笑)','reply'),(spoken,'voice')]
+        assert history[-1]['content']==content
+        assert '本轮采用动作文字与语音台词分离' in bot.generate.await_args.args[1][0]['content']
+    elif scenario in ('voice_timeout','voice_unknown'):
+        assert [call['msg_type'] for call in calls]==[0,7]
+        assert len(rows)==1 and history[-1]['content']=='（挥手）\n(笑)'
+    elif scenario in ('action_timeout','action_unknown'):
+        assert len(calls)==1 and not rows and not history
+    elif scenario=='changed':
+        assert not calls and not rows and not history
+    elif scenario in ('no_actions','disabled'):
+        assert len(calls)==1 and calls[0]['msg_type']==7 and calls[0]['msg_seq']==1
+        assert rows[0]['content']==content and history[-1]['content']==content
+    else:
+        assert len(calls)==1 and calls[0]['msg_type']==0 and calls[0]['content']==content
+        assert history[-1]['content']==content
+    if scenario not in ('actions_only','unbalanced','text_only'):
+        expected=content if scenario in ('disabled','no_actions') else spoken
+        assert bot.speech.speak.await_args.args[0]==expected
+    else:bot.speech.speak.assert_not_awaited()
+    await bot.client.aclose();store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('fail_voice',[False,True])
+async def test_separate_actions_schedule_commits_only_after_voice_receipt(tmp_path,fail_voice):
+    from app.bot import Bot
+    from app.store import Store
+    from test_schedule import configured,DAY,NOW
+    from test_schedule_dialogue import UPDATE
+    store=Store(tmp_path);c=configured(store)
+    c.speech.tts.provider_id='a'*32;c.speech.tts.model='tts';c.speech.tts.enabled=True;c.speech.tts.separate_actions=True;store.save(c)
+    bot=Bot(store);bot.schedule.clock=lambda:NOW
+    sid=store.scopes.ensure(c.account_id,'user','alice','alice')['id'];day=bot.schedule.for_scope(sid)
+    bot.generate=AsyncMock(return_value={'message':{'content':json.dumps(DAY,ensure_ascii=False)}})
+    plan=await day.ensure()
+    text='（拿起书包）好，我现在出发去你家复习。'
+    bot.generate=AsyncMock(return_value={'message':{'content':json.dumps({'reply':text,'schedule_update':UPDATE},ensure_ascii=False)}})
+    bot.speech.speak=AsyncMock(return_value=b'fake-silk')
+    async def api(method,path,**kwargs):
+        assert day.saved(c)['revision']==plan['revision']
+        if path.endswith('/files'):return {'file_info':'media'}
+        if kwargs['json']['msg_type']==7 and fail_voice:raise httpx.ReadTimeout('uncertain')
+        return {'id':str(kwargs['json']['msg_seq'])}
+    bot.api=AsyncMock(side_effect=api)
+    incoming=event();incoming['d']['content']='用语音回复我';await bot.handle(incoming)
+    assert (day.saved(c)['revision']!=plan['revision']) is (not fail_voice)
+    assert len(day.dialogue.records()['items'])==int(not fail_voice)
+    assert store.history('user:alice:alice',6)[-1]['content']==('（拿起书包）' if fail_voice else text)
+    await bot.client.aclose();store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('group',[False,True])
+async def test_separate_actions_over_napcat_socket(tmp_path,group):
+    from app.bot import Bot
+    from app.store import Store
+    from test_napcat import configure,napcat_server
+    async with napcat_server() as (url,calls,_):
+        store=Store(tmp_path);c=configure(store,url);c.qq.group_reply=group
+        c.speech.tts.provider_id='a'*32;c.speech.tts.model='tts';c.speech.tts.enabled=True
+        c.speech.tts.separate_actions=True;c.speech.tts.scope='private_and_group';store.save(c)
+        bot=Bot(store);await bot.napcat.start()
+        text='（挥手）晚上好！(笑)'
+        bot.generate=AsyncMock(return_value={'message':{'content':text}})
+        bot.speech.speak=AsyncMock(return_value=b'fake-silk')
+        incoming=event(user='20002',group=group);incoming['d']['content']='用语音回复我'
+        if group:incoming['d']['group_openid']='30003'
+        await bot.handle(incoming)
+        sent=[call for call in calls if call['action'].startswith('send_')]
+        assert len(sent)==2
+        assert all(call['action']==('send_group_msg' if group else 'send_private_msg') for call in sent)
+        assert sent[0]['params']['message']==[{'type':'text','data':{'text':'（挥手）\n(笑)'}}]
+        assert sent[1]['params']['message'][0]['type']=='record'
+        bot.speech.speak.assert_awaited_once()
+        assert bot.speech.speak.await_args.args[0]=='晚上好！'
+        assert store.db.execute("SELECT count(*) FROM chat_messages WHERE role='assistant'").fetchone()[0]==2
+        await bot.napcat.close();await bot.client.aclose();store.close()
 
 
 @pytest.mark.asyncio
@@ -186,14 +323,16 @@ async def test_new_chat_transports(kind):
 
 
 def test_assignment_api_preserves_other_settings_and_guard(client):
-    types=client.get('/api/provider-types');assert types.status_code==200 and len(types.json()['types'])==35
+    types=client.get('/api/provider-types');assert types.status_code==200 and len(types.json()['types'])==37
     p=client.post('/api/providers',json={'type':'openai_tts','default_model':'tts','api_key':'private-key'}).json()
     before=client.get('/api/bots/default/settings').json()
     assignments=client.get('/api/bots/default/model-assignments').json();assignments.pop('state')
-    assignments['speech']['tts'].update(provider_id=p['id'],model='tts',enabled=True)
+    assignments['speech']['tts'].update(provider_id=p['id'],model='tts',enabled=True,separate_actions=True)
     r=client.put('/api/bots/default/model-assignments',json=assignments)
     assert r.status_code==200,r.text
     after=client.get('/api/bots/default/settings').json()
+    assert after['speech']['tts']['separate_actions'] is True
+    assert client.get('/api/bots/default/model-assignments').json()['speech']['tts']['separate_actions'] is True
     assert {k:v for k,v in before.items() if k!='speech'}=={k:v for k,v in after.items() if k!='speech'}
     assert client.delete('/api/providers/'+p['id']).status_code==409
     runtime=client.portal.call(client.app.state.manager.get,'default');runtime.bot.state='connected'

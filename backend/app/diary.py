@@ -52,7 +52,9 @@ class DiaryService:
     def stamp(self, config, policy, revision):
         scopes = [tuple(r) for r in self.store.db.execute('SELECT id,epoch,source_floor FROM user_scopes WHERE app_id=? AND (epoch>0 OR source_floor>0) ORDER BY id', (config.account_id,))]
         floor = self.store.db.execute("SELECT value FROM chat_meta WHERE key='history_floor'").fetchone()
+        emotion_revisions = [tuple(r) for r in self.store.db.execute('SELECT scope_id,revision FROM emotion_controls ORDER BY scope_id')]
         value = [config.account_id,config.rules.prompt,config.group_chat.character_name,config.group_chat.owner_relationship,
+                 config.emotion.model_dump(), emotion_revisions,
                  [x.model_dump() for x in config.group_chat.owners],
                  policy.model_dump(),revision,scopes,floor[0] if floor else 0,config.ollama.model_dump()]
         return hashlib.sha256(json.dumps(value,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
@@ -118,7 +120,8 @@ class DiaryService:
                     if day < self.local(policy).date():
                         minute='24:00'
                     planned=[{'start':a['start'],'activity':a['activity']} for a in plan.get('activities',[]) if a['start']<=minute][:16]
-        return {'messages':messages,'planned_activities':planned}, {'message_ids':references,
+        emotion = self.bot.emotion.diary_context(owner['id'], day) if owner else None
+        return {'messages':messages,'planned_activities':planned, 'expression_state': emotion}, {'message_ids':references,
             'message_count':len(messages),'planned_count':len(planned),'source_guard':self.source_guard(config,policy)}
 
     async def write(self, day=None, automatic=False):

@@ -190,7 +190,7 @@ async def test_native_meme_preserves_gif_bytes_and_archive_preview(tmp_path):
         library=MemeCatalog(tmp_path/'library');raw=io.BytesIO()
         Image.new('RGB',(16,16),'red').save(raw,'GIF',save_all=True,append_images=[Image.new('RGB',(16,16),'blue')])
         item=library.add(raw.getvalue(),'庆祝',MemeDescription(visual='测试用红蓝交替的动图',scenarios=['庆祝好消息']))
-        s=Store(tmp_path/'bot');c=configure(s,url);c.memes.enabled=True;s.save(c);b=Bot(s,memes=library)
+        s=Store(tmp_path/'bot');c=configure(s,url);c.memes.enabled=True;c.memes.local_enabled=True;s.save(c);b=Bot(s,memes=library)
         b.models=AsyncMock(return_value=['test']);b.provider=lambda selection:__import__('app.providers',fromlist=['ProviderConfig']).ProviderConfig(type='deepseek')
         picked={**item,'selection_stamp':b.memes.config_stamp()};b.memes.candidates=AsyncMock(return_value=[picked])
         b.generate=AsyncMock(return_value={'message':{'content':json.dumps({'reply':'好开心！','meme_id':item['id']})}})

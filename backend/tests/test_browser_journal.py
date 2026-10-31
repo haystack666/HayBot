@@ -17,7 +17,7 @@ async def client(tmp_path,monkeypatch):
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://test') as c:
             c.app=app
             await c.post('/api/login',json={'password':'journal-test-password-long'})
-            runtime=app.state.manager.get('default');cfg=runtime.store.load();cfg.qq.app_id='20002';runtime.store.save(cfg)
+            runtime=app.state.manager.get('default');cfg=runtime.store.load();cfg.qq.app_id='20002';runtime.store.save(cfg);runtime.store.set_enabled(True);runtime.bot.state='connected'
             app.state.browser_tasks.save_config('default',BrowsingConfig(enabled=True,qq_enabled=True,qq_owner_id='10001'))
             yield c
 
@@ -100,7 +100,8 @@ async def test_proactive_uses_live_topic_and_never_sends_json(client):
     text=await service.generate(bot.store.load(),'10001','随意聊一句')
     assert text=='刚看到秋天四件套，烤红薯的细节好甜。'
     messages=bot.generate.call_args.args[1]
-    assert '正在进行的真实浏览任务' in messages[0]['content'] and '糖葫芦' in messages[0]['content']
+    assert any('正在进行的真实浏览任务' in m['content'] and '糖葫芦' in m['content'] for m in messages)
+    assert '糖葫芦' not in messages[0]['content']
     assert service._browser_selection['video']['id']==VID
     assert client.app.state.manager.browser_qq.proactive_topic(bot,'10001') is not None
 

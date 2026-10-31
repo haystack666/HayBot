@@ -176,7 +176,7 @@ async def test_two_bots_handle_same_message_independently_and_share_model_capaci
     await asyncio.gather(*(runtime.bot.handle(event) for runtime in runtimes))
     assert peak == 1 and len(sends) == 2
     assert {token for token, _ in sends} == {'QQBot token-1', 'QQBot token-2'}
-    assert {message['messages'][0]['content'].split('\n\n[平台会话上下文]',1)[0] for message in generations} == {'persona-0', 'persona-1'}
+    assert {message['messages'][0]['content'].split('\n[参考资料规则]',1)[0] for message in generations} == {'persona-0', 'persona-1'}
     for index, runtime in enumerate(runtimes):
         assert runtime.store.stats()['received'] == 1 and runtime.store.stats()['sent'] == 1
         assert runtime.store.stats()['total_tokens'] == 13
@@ -305,3 +305,29 @@ async def test_proactive_schedules_send_independently_with_same_recipient(tmp_pa
         assert runtime.store.stats()['sent'] == 1
         assert len(runtime.proactive.snapshot()['records']) == 1
     await manager.close()
+
+
+def test_create_napcat_bot_preserves_transport_without_official_credentials(client):
+    response = client.post('/api/bots', json={'name': 'NapCat 助手', 'transport': 'napcat'})
+    assert response.status_code == 201
+    bot_id = response.json()['id']
+    config = client.get(f'/api/bots/{bot_id}/settings').json()
+    assert config['transport'] == 'napcat'
+    assert config['qq']['app_id'] == ''
+    assert not config['qq']['secret_set']
+    assert config['napcat']['self_id'] == ''
+    assert client.get(f'/api/bots/{bot_id}/status').json()['state'] == 'stopped'
+    bot = next(bot for bot in client.get('/api/bots').json()['bots'] if bot['id'] == bot_id)
+    assert bot['transport'] == 'napcat'
+    assert not bot['configured']
+    assert client.patch(f'/api/bots/{bot_id}', json={'name': '改名后'}).status_code == 200
+    assert client.get(f'/api/bots/{bot_id}/settings').json()['transport'] == 'napcat'
+
+
+def test_create_bot_transport_defaults_and_validation(client):
+    response = client.post('/api/bots', json={'name': '官方机器人'})
+    assert response.status_code == 201
+    assert client.get(f"/api/bots/{response.json()['id']}/settings").json()['transport'] == 'qq_official'
+    count = len(client.get('/api/bots').json()['bots'])
+    assert client.post('/api/bots', json={'name': '无效类型', 'transport': 'other'}).status_code == 422
+    assert len(client.get('/api/bots').json()['bots']) == count

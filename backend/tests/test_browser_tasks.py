@@ -17,6 +17,11 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv('BROWSER_RUNTIME_TOKEN', 'test-token-' * 5)
     with TestClient(create_app(tmp_path)) as c:
         c.post('/api/login', json={'password': 'douyin-test-password-long'})
+        def enable_bot():
+            runtime = c.app.state.manager.get('default')
+            runtime.store.set_enabled(True)
+            runtime.bot.state = 'connected'
+        c.portal.call(enable_bot)
         yield c
 
 
@@ -571,3 +576,54 @@ def test_retired_device_services_and_endpoints_are_absent(client):
         assert client.get('/api/bots/default'+path).status_code==404
     assert not bot.is_command('/手机 打开浏览器')
     assert bot.is_command('/浏览器 打开抖音')
+
+
+@pytest.mark.parametrize('enabled,state', [(False, 'stopped'), (False, 'connected'), (True, 'stopped')])
+def test_disabled_bot_rejects_browser_tasks_and_monitoring(client, monkeypatch, enabled, state):
+    tasks, host, _ = setup(client, monkeypatch, iter([]))
+    def configure():
+        runtime = tasks.manager.get('default')
+        runtime.store.set_enabled(enabled)
+        runtime.bot.state = state
+        cfg = tasks.config('default')
+        cfg.auto_browse.enabled = True
+        cfg.interactions.messages_enabled = True
+        cfg.interactions.dm_monitor_mode = 'always'
+        tasks.save_config('default', cfg)
+    client.portal.call(configure)
+    response = client.post('/api/bots/default/browser/douyin/tasks', json={'goal': '浏览视频'})
+    assert response.status_code == 409 and '启动机器人' in response.json()['detail']
+    assert not client.portal.call(tasks.dm_enabled, 'default')
+    assert not client.portal.call(tasks.valid, {'bot_id': 'default', 'origin': {'source': 'web'}})
+    assert client.portal.call(tasks.list, 'default') == []
+    client.portal.call(tasks.scheduler.tick)
+    assert host.calls == []
+    status = client.portal.call(tasks.scheduler.status, 'default')
+    assert not status['bot_enabled'] and not status['allowed_now'] and status['next_run_at'] is None
+
+
+def test_queued_task_does_not_start_browser_after_bot_is_disabled(client, monkeypatch):
+    tasks, host, _ = setup(client, monkeypatch, iter([]))
+    async def scenario():
+        task = tasks.submit('default', '浏览视频', deferred=True)
+        tasks.manager.get('default').store.set_enabled(False)
+        await tasks.run('default', task['id'])
+        return tasks.get('default', task['id'])
+    result = client.portal.call(scenario)
+    assert result['state'] not in ('queued', 'running', 'completed')
+    assert not any(path.endswith('/start') or path.endswith('/douyin/begin') for _, path, _ in host.calls)
+
+
+def test_stopping_bot_cancels_task_and_revokes_host_capability(client, monkeypatch):
+    tasks, host, _ = setup(client, monkeypatch, iter([]))
+    async def queued():
+        task = tasks.submit('default', '浏览视频', deferred=True)
+        tasks.tokens[task['id']] = 'test-capability'
+        return task
+    task = client.portal.call(queued)
+    assert client.post('/api/bots/default/stop').status_code == 200
+    assert not client.portal.call(lambda: tasks.manager.get('default').store.enabled())
+    assert client.portal.call(tasks.get, 'default', task['id'])['state'] == 'cancelled'
+    assert task['id'] not in tasks.tokens
+    assert any(path.endswith('/douyin/end') for _, path, _ in host.calls)
+    assert not client.portal.call(tasks.dm_enabled, 'default')

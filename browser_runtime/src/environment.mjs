@@ -18,30 +18,42 @@ export function chromeCandidates(platform = process.platform, env = process.env,
   return []
 }
 
-export async function findChrome({ platform = process.platform, candidates = chromeCandidates(platform), stat = fs.stat, run = execFile } = {}) {
+export async function findChrome({ platform = process.platform, arch = process.arch, candidates = chromeCandidates(platform), stat = fs.stat, run = execFile } = {}) {
   let found = false
+  let detail = 'Chrome 身份、签名或安装状态验证失败'
   for (const candidate of candidates) {
     try { await stat(candidate) } catch { continue }
     found = true
     if (platform !== 'darwin') return { state: 'needs_repair', detail: '当前原型尚未验证此系统的 Chrome 身份与启动流程', executable: null }
+    let stage = 'identity'
     try {
       const plist = path.join(candidate, 'Contents/Info.plist')
       const read = async key => (await run('/usr/bin/plutil', ['-extract', key, 'raw', '-o', '-', plist], { timeout: 10000 })).stdout.trim()
       const identifier = await read('CFBundleIdentifier'), version = await read('CFBundleShortVersionString')
-      if (identifier !== 'com.google.Chrome' || !/^\d+\.\d+\.\d+\.\d+$/.test(version)) continue
+      if (identifier !== 'com.google.Chrome' || !/^\d+\.\d+\.\d+\.\d+$/.test(version)) { detail = 'Chrome 产品身份或版本信息无效'; continue }
       // Verify the signed bundle and Google identity. --strict also rejects harmless
       // Finder resource metadata on otherwise valid installed applications.
+      stage = 'signature'
       await run('/usr/bin/codesign', ['--verify', '-R=anchor apple generic and identifier "com.google.Chrome" and certificate leaf[subject.OU] = "EQHXZ8M8AV"', candidate], { timeout: 30000 })
       const signature = await run('/usr/bin/codesign', ['--display', '--verbose=4', candidate], { timeout: 10000 })
-      if (!/^TeamIdentifier=EQHXZ8M8AV$/m.test(signature.stderr)) continue
+      if (!/^TeamIdentifier=EQHXZ8M8AV$/m.test(signature.stderr)) { detail = 'Chrome 签名不是受信任的 Google 发布身份'; continue }
       const executable = path.join(candidate, 'Contents/MacOS/Google Chrome')
-      const architectures = (await run('/usr/bin/lipo', ['-archs', executable], { timeout: 10000 })).stdout.trim().split(/\s+/)
-      const required = process.arch === 'arm64' ? 'arm64' : 'x86_64'
-      if (!architectures.includes(required)) continue
+      // /usr/bin/lipo is an Xcode shim and can require an unrelated SDK license.
+      // Read the signed executable's Mach-O architecture with the system file tool.
+      stage = 'architecture'
+      const description = (await run('/usr/bin/file', ['-b', executable], { timeout: 10000, env: { ...process.env, LC_ALL: 'C', LANG: 'C' } })).stdout
+      const architectures = [...new Set([...description.matchAll(/Mach-O 64-bit executable (arm64|x86_64)\b/g)].map(match => match[1]))]
+      const required = arch === 'arm64' ? 'arm64' : arch === 'x64' ? 'x86_64' : null
+      if (!required || !architectures.includes(required)) { detail = 'Chrome 可执行文件架构与宿主不兼容或无法识别'; continue }
       return { state: 'passed', detail: `Google Chrome ${version}`, version, executable, architectures }
-    } catch { /* A damaged install must never be treated as ready. */ }
+    } catch {
+      // Do not expose raw subprocess errors; keep tool failures distinct from invalid Chrome.
+      detail = stage === 'architecture' ? 'Chrome 架构检测工具执行失败，未判定 Chrome 损坏，请重新检测'
+        : stage === 'signature' ? 'Chrome Google 签名校验未通过或签名工具执行失败'
+          : 'Chrome 产品身份读取失败，请检查安装状态'
+    }
   }
-  return { state: found ? 'needs_repair' : 'needs_install', detail: found ? 'Chrome 身份、签名、架构或安装状态验证失败' : '未检测到 Google Chrome', executable: null }
+  return { state: found ? 'needs_repair' : 'needs_install', detail: found ? detail : '未检测到 Google Chrome', executable: null }
 }
 
 export class Environment {

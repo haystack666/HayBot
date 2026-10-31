@@ -5,6 +5,7 @@ import re
 import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+from contextlib import contextmanager
 
 
 class StaleMemory(ValueError):
@@ -31,6 +32,7 @@ def absolute(value):
 class MemoryStore:
     def __init__(self, store):
         self.store, self.db = store, store.db
+        self._transaction_depth = 0
         self.db.executescript('''
             CREATE TABLE IF NOT EXISTS memories (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, scope_id TEXT NOT NULL, category TEXT NOT NULL,
@@ -42,8 +44,15 @@ class MemoryStore:
             CREATE INDEX IF NOT EXISTS memory_scope ON memories(scope_id,status,id);
             CREATE TABLE IF NOT EXISTS memory_tombstones (scope_id TEXT NOT NULL, category TEXT NOT NULL,
                 key TEXT NOT NULL, content_hash TEXT NOT NULL, at REAL NOT NULL, PRIMARY KEY(scope_id,category,key));
+            CREATE TABLE IF NOT EXISTS memory_superseded_sources (scope_id TEXT NOT NULL, source_id INTEGER NOT NULL,
+                reason TEXT NOT NULL, PRIMARY KEY(scope_id,source_id));
             CREATE TABLE IF NOT EXISTS memory_summaries (scope_id TEXT PRIMARY KEY, content TEXT NOT NULL,
                 source_ids TEXT NOT NULL, updated REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS memory_summary_versions (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scope_id TEXT NOT NULL, content TEXT NOT NULL, source_ids TEXT NOT NULL, updated REAL NOT NULL,
+                epoch INTEGER NOT NULL, valid INTEGER NOT NULL DEFAULT 1, reason TEXT NOT NULL DEFAULT '',
+                working_state TEXT NOT NULL DEFAULT '[]');
+            CREATE INDEX IF NOT EXISTS summary_owner ON memory_summary_versions(scope_id,id);
             CREATE TABLE IF NOT EXISTS memory_audit (id INTEGER PRIMARY KEY AUTOINCREMENT,scope_id TEXT NOT NULL,
                 memory_id INTEGER,action TEXT NOT NULL,before_value TEXT,after_value TEXT,at REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS memory_vectors (memory_id INTEGER NOT NULL,index_key TEXT NOT NULL,
@@ -58,6 +67,26 @@ class MemoryStore:
         ''')
         with self.db:
             self.db.execute("UPDATE memory_jobs SET status='pending' WHERE status='running'")
+            self.db.execute('''INSERT INTO memory_summary_versions(scope_id,content,source_ids,updated,epoch,reason)
+                SELECT s.scope_id,s.content,s.source_ids,s.updated,u.epoch,'legacy_migration'
+                FROM memory_summaries s JOIN user_scopes u ON u.id=s.scope_id
+                WHERE NOT EXISTS (SELECT 1 FROM memory_summary_versions v WHERE v.scope_id=s.scope_id)''')
+
+    @contextmanager
+    def transaction(self):
+        """Nested memory writes share one SQLite commit; never await inside this block."""
+        if self._transaction_depth:
+            yield
+            return
+        self._transaction_depth += 1
+        try:
+            with self.db:
+                # Start before validation reads too, so all derived state shares a snapshot.
+                if not self.db.in_transaction:
+                    self.db.execute('BEGIN IMMEDIATE')
+                yield
+        finally:
+            self._transaction_depth -= 1
 
     def epoch(self, sid):
         return self.store.scopes.get(sid)['epoch']
@@ -73,9 +102,14 @@ class MemoryStore:
         rows = self.db.execute("SELECT id FROM memories WHERE scope_id=? AND status='active' AND expires_at IS NOT NULL AND expires_at<=?", (sid, time.time())).fetchall()
         if not rows:
             return
-        with self.db:
+        with self.transaction():
             for row in rows:
                 mid = row['id']
+                old = self.get(sid, mid)
+                from .emotion import retract_sources
+                retract_sources(self.db, sid, old['source_ids'], 'source_expired')
+                self.db.executemany('INSERT OR IGNORE INTO memory_superseded_sources VALUES (?,?,?)',
+                                    [(sid, source, 'expired') for source in old['source_ids']])
                 self.db.execute("UPDATE memories SET status='expired',revision=revision+1 WHERE scope_id=? AND id=?", (sid, mid))
                 self.db.execute('DELETE FROM memory_vectors WHERE memory_id=?', (mid,))
                 self.db.execute('DELETE FROM memory_fts WHERE rowid=?', (mid,))
@@ -140,12 +174,17 @@ class MemoryStore:
             ('confidence', confidence), ('expires_at', expires_at))):
             if sources:
                 merged = sorted(set(old['source_ids'] + sources))[-16:]
-                with self.db:
+                with self.transaction():
                     self.db.execute('UPDATE memories SET source_ids=? WHERE scope_id=? AND id=?', (json.dumps(merged), sid, old['id']))
                 old['source_ids'] = merged
             return old
         now = time.time()
-        with self.db:
+        with self.transaction():
+            if old and old['content'] != content:
+                from .emotion import retract_sources
+                retract_sources(self.db, sid, old['source_ids'], 'source_corrected')
+                self.db.executemany('INSERT OR IGNORE INTO memory_superseded_sources VALUES (?,?,?)',
+                                    [(sid, source, 'corrected') for source in old['source_ids'] if source not in sources])
             self.db.execute('''INSERT INTO memories(scope_id,category,key,content,pinned,confidence,importance,created,updated,
                 expires_at,source_ids,due_at,end_at,commitment_state) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(scope_id,category,key) DO UPDATE SET content=excluded.content,status='active',
@@ -170,6 +209,11 @@ class MemoryStore:
         floor = self.db.execute('SELECT COALESCE(MAX(id),0) FROM chat_messages').fetchone()[0] if manual else 0
         self.db.execute('UPDATE user_scopes SET epoch=epoch+1,source_floor=MAX(source_floor,?) WHERE id=?', (floor, sid))
         self.db.execute('DELETE FROM memory_summaries WHERE scope_id=?', (sid,))
+        # Invalid versions retain only coverage metadata, never stale/forgotten prose.
+        self.db.execute("UPDATE memory_summary_versions SET valid=0,content='',working_state='[]',reason=? WHERE scope_id=? AND valid=1",
+                        ('manual_change' if manual else 'fact_change_or_expiry', sid))
+        if self.db.execute("SELECT 1 FROM sqlite_master WHERE name='context_diagnostics'").fetchone():
+            self.db.execute('DELETE FROM context_diagnostics WHERE scope_id=?', (sid,))
         self.db.execute('DELETE FROM history WHERE key=?', (self.store.scopes.history_key(sid),))
         if manual:
             self.db.execute("UPDATE memory_jobs SET status='canceled' WHERE scope_id=? AND status IN ('pending','running')", (sid,))
@@ -179,21 +223,25 @@ class MemoryStore:
     def reset_scope(self, sid):
         """Forget this owner's state atomically; old archives remain behind a source barrier."""
         self.check(sid)
-        with self.db:
+        with self.transaction():
             count = self.db.execute('SELECT COUNT(*) FROM memories WHERE scope_id=?', (sid,)).fetchone()[0]
             self.invalidate(sid)
+            from .emotion import retract_sources
+            retract_sources(self.db, sid, reason='scope_forgotten')
             if self.db.execute("SELECT 1 FROM sqlite_master WHERE name='message_inbox'").fetchone():
                 self.db.execute("UPDATE message_inbox SET status='canceled',payload='',updated=? WHERE scope_id=? AND status IN ('queued','generating','sending')", (time.time(), sid))
             self.db.execute('DELETE FROM memory_vectors WHERE memory_id IN (SELECT id FROM memories WHERE scope_id=?)', (sid,))
             self.db.execute('DELETE FROM memory_fts WHERE rowid IN (SELECT id FROM memories WHERE scope_id=?)', (sid,))
-            for table in ('memories', 'memory_tombstones', 'memory_summaries', 'memory_index', 'memory_jobs', 'memory_audit'):
+            for table in ('memories', 'memory_tombstones', 'memory_superseded_sources', 'memory_summaries', 'memory_summary_versions', 'memory_index', 'memory_jobs', 'memory_audit'):
                 self.db.execute(f'DELETE FROM {table} WHERE scope_id=?', (sid,))
             self._audit(sid, None, 'reset', None, {'count': count})
         return count
 
     def forget(self, sid, mid):
         old = self.get(sid, mid)
-        with self.db:
+        with self.transaction():
+            from .emotion import retract_sources
+            retract_sources(self.db, sid, old['source_ids'], 'source_forgotten')
             self.db.execute("UPDATE memories SET status='forgotten',content='',source_ids='[]',revision=revision+1,updated=? WHERE scope_id=? AND id=?", (time.time(), sid, mid))
             self.db.execute('INSERT OR REPLACE INTO memory_tombstones VALUES (?,?,?,?,?)',
                 (sid, old['category'], old['key'], hashlib.sha256(old['content'].encode()).hexdigest(), time.time()))
@@ -209,12 +257,28 @@ class MemoryStore:
         row = self.db.execute('SELECT content FROM memory_summaries WHERE scope_id=?', (sid,)).fetchone()
         return row['content'] if row else ''
 
-    def set_summary(self, sid, content, source_ids, epoch):
-        self.check(sid, epoch)
+    def summary_versions(self, sid, limit=12):
+        self.check(sid)
+        return [{**dict(row), 'source_ids': json.loads(row['source_ids']),
+                 'working_state': json.loads(row['working_state'])} for row in self.db.execute(
+                     'SELECT * FROM memory_summary_versions WHERE scope_id=? ORDER BY id DESC LIMIT ?', (sid, limit))]
+
+    def set_summary(self, sid, content, source_ids, epoch, working_state=None):
+        owner = self.check(sid, epoch)
         if not isinstance(content, str) or len(content) > 2400:
             raise ValueError('摘要长度无效')
-        with self.db:
-            self.db.execute('INSERT OR REPLACE INTO memory_summaries VALUES (?,?,?,?)', (sid, content, json.dumps(source_ids), time.time()))
+        if any(type(mid) is not int or mid <= owner['source_floor'] or not self.store.scopes.source(sid, mid) for mid in source_ids):
+            raise StaleMemory('摘要来源无效或位于遗忘屏障之前')
+        previous = self.summary_versions(sid, 1)
+        coverage = sorted(set(source_ids + (previous[0]['source_ids'] if previous and previous[0]['valid'] else [])))
+        excluded = {row['source_id'] for row in self.db.execute('SELECT source_id FROM memory_superseded_sources WHERE scope_id=?', (sid,))}
+        coverage = [mid for mid in coverage if mid not in excluded]
+        with self.transaction():
+            self.db.execute('INSERT OR REPLACE INTO memory_summaries VALUES (?,?,?,?)', (sid, content, json.dumps(coverage), time.time()))
+            self.db.execute('''INSERT INTO memory_summary_versions(scope_id,content,source_ids,updated,epoch,working_state)
+                VALUES (?,?,?,?,?,?)''', (sid, content, json.dumps(coverage), time.time(), epoch, json.dumps(working_state or [], ensure_ascii=False)))
+            self.db.execute('''DELETE FROM memory_summary_versions WHERE scope_id=? AND id NOT IN (
+                SELECT id FROM memory_summary_versions WHERE scope_id=? ORDER BY id DESC LIMIT 12)''', (sid, sid))
 
     def audit(self, sid, limit=50, before=None):
         self.check(sid)

@@ -200,8 +200,9 @@ async def test_diary_context_is_supplied_to_owner_chat_but_not_group_or_other_us
         for user,group in [('owner',None),('stranger',None),('owner','g')]:
             p=event('new-'+user+str(group),'今天有什么想说的？',user,group)
             await b.handle(p)
-            prompt=b.generate.await_args.args[1][0]['content']
+            prompt='\n'.join(m['content'] for m in b.generate.await_args.args[1])
             assert (item['content'] in prompt)==(user=='owner' and group is None)
+            assert item['content'] not in b.generate.await_args.args[1][0]['content']
     finally:await close(s,b)
 
 

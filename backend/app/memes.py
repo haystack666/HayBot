@@ -78,13 +78,15 @@ class MemeCatalog:
     def get(self, mid, include_deleted=False):
         return self.unpack(self.db.execute('SELECT * FROM memes WHERE id=?' + ('' if include_deleted else ' AND deleted=0'), (mid,)).fetchone())
 
-    def list(self, search='', offset=0, limit=50, enabled_only=False, packs=None):
+    def list(self, search='', offset=0, limit=50, enabled_only=False, packs=None, *, exclude_packs=None):
         where, params = ['deleted=0'], []
         if enabled_only: where.append('enabled=1')
         if search:
             where.append('(name LIKE ? OR description LIKE ? OR category LIKE ?)'); params += ['%' + search + '%'] * 3
-        if packs:
-            where.append('pack IN (' + ','.join('?' for _ in packs) + ')'); params += list(packs)
+        if packs is not None:
+            where.append('pack IN (' + ','.join('?' for _ in packs) + ')' if packs else '0'); params += list(packs)
+        if exclude_packs:
+            where.append('pack NOT IN (' + ','.join('?' for _ in exclude_packs) + ')'); params += list(exclude_packs)
         sql = ' FROM memes WHERE ' + ' AND '.join(where)
         total = self.db.execute('SELECT COUNT(*)' + sql, params).fetchone()[0]
         items = [self.unpack(r) for r in self.db.execute('SELECT *' + sql + ' ORDER BY pack,category,name,id LIMIT ? OFFSET ?', [*params, limit, offset])]
@@ -121,6 +123,84 @@ class MemeCatalog:
             self.db.execute('UPDATE memes SET deleted=1,enabled=0,updated=? WHERE id=?', (time.time(), mid))
             self.db.execute('DELETE FROM meme_vectors WHERE meme_id=?', (mid,))
 
+    def sync_gallery(self, entries):
+        """Stable URL IDs and semantic revisions preserve unchanged vectors."""
+        seen = set()
+        counts = {'added': 0, 'changed': 0, 'removed': 0}
+        with self.db:
+            for entry in entries:
+                mid = hashlib.sha256(('aigengtu:' + entry['original']).encode()).hexdigest()
+                if mid in seen:
+                    continue
+                seen.add(mid)
+                description = MemeDescription(visual=entry['alt'][:1500] or entry['name'][:1500],
+                    scenarios=[entry['description'][i:i+400] for i in range(0, min(len(entry['description']),4800),400)],
+                    needs_review=False)
+                revision = hashlib.sha256(json.dumps(description.model_dump(), sort_keys=True).encode()).hexdigest()
+                old = self.db.execute('SELECT * FROM memes WHERE id=?', (mid,)).fetchone()
+                provenance = {'source': 'https://aigengtu.com', 'original': entry['original'],
+                    'preview': entry['preview'], 'source_revision': revision}
+                if old:
+                    previous = json.loads(old['provenance'])
+                    # Local edits/deletions survive an unchanged upstream description.
+                    changed = previous.get('source_revision') != revision
+                    if changed:
+                        counts['changed'] += 1
+                        self.db.execute('UPDATE memes SET description=?,revision=? WHERE id=?',
+                            (description.model_dump_json(), revision, mid))
+                    self.db.execute('UPDATE memes SET name=?,category=?,provenance=?,deleted=?,enabled=? WHERE id=?',
+                        (entry['name'][:120], entry['category'], json.dumps(provenance),
+                         0 if previous.get('remote_removed') else old['deleted'],
+                         1 if previous.get('remote_removed') else old['enabled'], mid))
+                else:
+                    counts['added'] += 1
+                    self.db.execute('INSERT INTO memes VALUES (?,?,?,?,?,?,?,?,?,?,?,0,?,?)',
+                        (mid,entry['name'][:120],'aigengtu',entry['category'],description.model_dump_json(),revision,
+                         'WEBP',0,0,1,1,json.dumps(provenance),time.time()))
+            for row in self.db.execute("SELECT * FROM memes WHERE pack='aigengtu' AND deleted=0").fetchall():
+                if row['id'] not in seen:
+                    counts['removed'] += 1
+                    provenance = json.loads(row['provenance']); provenance['remote_removed'] = True
+                    self.db.execute('UPDATE memes SET deleted=1,enabled=0,provenance=? WHERE id=?',
+                        (json.dumps(provenance), row['id']))
+        return counts
+
+    async def ensure_image(self, mid):
+        item = self.get(mid, include_deleted=True)
+        path = self.assets / mid
+        if path.is_file():
+            return path
+        url = item['provenance'].get('original', '')
+        from .meme_gallery import MemeGallery
+        if item['pack'] != 'aigengtu' or not MemeGallery.image_url(url):
+            raise HTTPException(404, '表情包文件缺失')
+        import httpx
+        import asyncio
+        try:
+            async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
+                async with client.stream('GET', url) as response:
+                    response.raise_for_status()
+                    raw = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        raw.extend(chunk)
+                        if len(raw) > 10 * 1024 * 1024:
+                            raise ValueError('图片过大')
+            fmt, size, frames = await asyncio.to_thread(checked_image, bytes(raw))
+            # Publish a complete file atomically; concurrent sends may fetch the same asset.
+            import uuid
+            temporary = self.assets / (mid + '.' + uuid.uuid4().hex + '.tmp')
+            try:
+                temporary.write_bytes(raw)
+                temporary.replace(path)
+            finally:
+                temporary.unlink(missing_ok=True)
+            with self.db:
+                self.db.execute('UPDATE memes SET format=?,width=?,height=?,frames=? WHERE id=?',
+                    (fmt,*size,frames,mid))
+            return path
+        except (httpx.HTTPError, ValueError):
+            raise HTTPException(502, '表情包原图暂时无法下载，请稍后重试') from None
+
     def image(self, mid):
         self.get(mid, include_deleted=True)
         path = self.assets / mid
@@ -151,7 +231,7 @@ class MemeCatalog:
                     (fingerprint, item['id'], item['revision'], json.dumps(vector)))
 
     def vectors(self, fingerprint, packs=None):
-        items = self.list(limit=5000, enabled_only=True, packs=packs)['items']
+        items = self.list(limit=50000, enabled_only=True, packs=packs)['items']
         indexed = {r['meme_id']: r for r in self.db.execute('SELECT * FROM meme_vectors WHERE fingerprint=?', (fingerprint,))}
         return [(item, json.loads(indexed[item['id']]['vector'])) for item in items
                 if item['id'] in indexed and indexed[item['id']]['revision'] == item['revision']]

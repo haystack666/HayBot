@@ -45,7 +45,7 @@ async def test_embedding_ranking_cooldown_and_description_revision_fencing(tmp_p
     providers = ProviderStore(tmp_path)
     pid = providers.save(ProviderConfig(type='openai_embedding', base_url='https://embed.test', default_model='embed-test'))
     store = Store(tmp_path / 'bot'); c = store.load(); c.qq.app_id='111'
-    c.memes.enabled=True; c.memes.chance=1; c.memes.embedding.provider_id=pid; c.memes.embedding.model='embed-test';store.save(c)
+    c.memes.enabled=True;c.memes.local_enabled=True; c.memes.chance=1; c.memes.embedding.provider_id=pid; c.memes.embedding.model='embed-test';store.save(c)
     bot=Bot(store, providers=providers, memes=library)
     bot.request=AsyncMock(return_value={'data':[{'index':0,'embedding':[1,0]}], 'usage':{'prompt_tokens':3}})
     await bot.memes.rebuild()
@@ -93,7 +93,7 @@ def test_chat_preview_matches_static_image_sent_for_gif(client):
 
 async def delivery_bot(tmp_path):
     library,item=catalog(tmp_path);store=Store(tmp_path/'bot');c=store.load();c.qq.app_id='111';c.rules.cooldown=0
-    c.rules.split_length=20;c.rules.split_delay=0;c.memes.enabled=True;c.memes.chance=1;store.save(c)
+    c.rules.split_length=20;c.rules.split_delay=0;c.memes.enabled=True;c.memes.local_enabled=True;c.memes.chance=1;store.save(c)
     bot=Bot(store,memes=library);picked={**item,'selection_stamp':bot.memes.config_stamp()}
     bot.memes.candidates=AsyncMock(return_value=[picked])
     text='今天真开心，我们一起去吃点好吃的吧。吃完可以去公园逛一逛，看看小花和小鸟。晚上回家再看会儿电影，放松一下。'
@@ -215,7 +215,7 @@ async def test_group_meme_archive_belongs_only_to_triggering_member(tmp_path):
 async def test_explicit_meme_request_bypasses_chance_but_not_cooldown(tmp_path):
     library,item=catalog(tmp_path);providers=ProviderStore(tmp_path)
     pid=providers.save(ProviderConfig(type='openai_embedding',base_url='https://embed.test'))
-    store=Store(tmp_path/'bot');c=store.load();c.qq.app_id='111';c.memes.enabled=True;c.memes.chance=0
+    store=Store(tmp_path/'bot');c=store.load();c.qq.app_id='111';c.memes.enabled=True;c.memes.local_enabled=True;c.memes.chance=0
     c.memes.embedding.provider_id=pid;c.memes.embedding.model='embed-test';store.save(c)
     bot=Bot(store,providers=providers,memes=library)
     bot.request=AsyncMock(return_value={'data':[{'index':0,'embedding':[1,0]}]})

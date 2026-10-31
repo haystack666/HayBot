@@ -16,13 +16,9 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - app-data:/data
-    depends_on:
-      ollama:
-        condition: service_healthy
-      model-init:
-        condition: service_completed_successfully
     init: true
   ollama:
+    profiles: [ollama]
     image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
     restart: unless-stopped
     environment:
@@ -39,6 +35,7 @@ services:
       retries: 20
       start_period: 15s
   model-init:
+    profiles: [ollama]
     image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
     environment:
       OLLAMA_HOST: http://ollama:11434

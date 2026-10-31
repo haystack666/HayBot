@@ -53,9 +53,17 @@ class MemeService:
         p = self.bot.providers.get(selection.provider_id)
         return hashlib.sha256(json.dumps([p.model_dump(exclude={'name','default_model'}),selection.model],sort_keys=True).encode()).hexdigest()
 
+    def selected_packs(self):
+        c = self.store.load().memes
+        packs = ['aigengtu'] if 'aigengtu' in c.packs else []
+        if c.local_enabled and self.catalog:
+            packs.extend(row[0] for row in self.catalog.db.execute(
+                "SELECT DISTINCT pack FROM memes WHERE pack!='aigengtu' AND deleted=0"))
+        return packs
+
     def status(self):
         fingerprint = self.fingerprint()
-        return {**(self.catalog.index_status(fingerprint, self.store.load().memes.packs) if self.catalog else {'total':0,'indexed':0}),
+        return {**(self.catalog.index_status(fingerprint, self.selected_packs()) if self.catalog else {'total':0,'indexed':0}),
             'configured': bool(fingerprint), 'busy': self.lock.locked(), 'error': self.error}
 
     def usage(self, tokens): self.store.record_usage({'prompt_eval_count':tokens})
@@ -66,8 +74,8 @@ class MemeService:
             self.error = ''; c = self.store.load().memes; fingerprint = self.fingerprint()
             if not fingerprint: raise ValueError('请配置表情包 Embedding 模型')
             p = self.bot.providers.get(c.embedding.provider_id)
-            indexed = {i['id'] for i, _ in self.catalog.vectors(fingerprint,c.packs)}
-            pending = [i for i in self.catalog.list(limit=5000, enabled_only=True, packs=c.packs)['items'] if i['id'] not in indexed]
+            indexed = {i['id'] for i, _ in self.catalog.vectors(fingerprint,self.selected_packs())}
+            pending = [i for i in self.catalog.list(limit=50000, enabled_only=True, packs=self.selected_packs())['items'] if i['id'] not in indexed]
             self.store.log('info', f'开始构建表情包语义索引，共 {len(pending)} 张', category='model', event='meme.index_started')
             try:
                 for start in range(0,len(pending),10):
@@ -95,7 +103,7 @@ class MemeService:
         def skip(reason, message):
             self.store.log('debug',message,category='model',event='meme.recall_skipped',details={'reason':reason})
             return []
-        if not self.catalog or not m.enabled or not m.packs:return skip('disabled','本轮未启用表情包或未选择素材集合')
+        if not self.catalog or not m.enabled or not self.selected_packs():return skip('disabled','本轮未启用表情包或未选择素材集合')
         if not requested(query) and random.random() >= m.chance:return skip('probability','本轮表情包未通过随机触发门槛')
         recent=self.store.db.execute('SELECT * FROM meme_sends WHERE app_id=? AND scope_id=? ORDER BY id DESC LIMIT ?',
             (c.account_id,sid,max(1,m.repeat_window))).fetchall()
@@ -105,7 +113,7 @@ class MemeService:
         try:
             fingerprint=self.fingerprint()
             if not fingerprint:return skip('unconfigured','表情包未配置有效的 Embedding 模型')
-            pool=[(i,v) for i,v in self.catalog.vectors(fingerprint,m.packs) if i['id'] not in excluded]
+            pool=[(i,v) for i,v in self.catalog.vectors(fingerprint,self.selected_packs()) if i['id'] not in excluded]
             if not pool:return skip('no_index','没有可用表情包向量，请检查索引或防重复设置')
             p=self.bot.providers.get(m.embedding.provider_id)
             result=await embed(self.bot.request,p,m.embedding.model,[query[-6000:]],purpose='query',timeout=m.timeout)
@@ -189,7 +197,7 @@ class MemeService:
         if not self.catalog or item.get('selection_stamp') != self.config_stamp() or not self.store.load().memes.enabled: return False
         try:
             now=self.catalog.get(item['id'])
-            return now['enabled'] and now['revision']==item['revision'] and now['pack'] in self.store.load().memes.packs
+            return now['enabled'] and now['revision']==item['revision'] and now['pack'] in self.selected_packs()
         except HTTPException: return False
 
     def sent(self, sid, item):
@@ -200,7 +208,7 @@ class MemeService:
 
     async def upload(self, item, group, target, guard):
         from urllib.parse import quote
-        path=self.catalog.image(item['id'])
+        path=await self.catalog.ensure_image(item['id'])
         data=await asyncio.to_thread(self.catalog.convert_upload,path)
         if not guard() or not self.current(item): return None
         # QQ's live API supports file_data; verified with srv_send_msg=false.

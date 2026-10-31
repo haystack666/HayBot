@@ -209,12 +209,12 @@ class BotManager:
                            'proactive_enabled': config.proactive.enabled, 'state': state, 'enabled': enabled, 'stats': stats})
         return result
 
-    async def create(self, name):
+    async def create(self, name, transport='qq_official'):
         async with self.catalog_lock:
             profile = self.registry.create(name)
             store = Store(self.registry.directory(profile['id']))
             try:
-                config = Settings()
+                config = Settings(transport=transport)
                 config.ollama.provider_id = self.providers.legacy(config.ollama.url, config.ollama.model)
                 store.save(config)
                 store.set_enabled(False)
@@ -286,7 +286,8 @@ class BotManager:
             try:
                 config = store.load()
                 if provider_id in (config.ollama.provider_id, config.memory.embedding.provider_id, config.memory.rerank.provider_id,
-                                   config.memes.embedding.provider_id,config.memes.rerank.provider_id,config.speech.tts.provider_id,config.speech.stt.provider_id):
+                                   config.memes.embedding.provider_id,config.memes.rerank.provider_id,config.speech.tts.provider_id,config.speech.stt.provider_id,
+                                   config.image_generation.provider_id):
                     references.append({**profile, 'state': runtime.bot.state if runtime else 'stopped',
                                        'busy': bool(runtime and (runtime.proactive.busy or runtime.bot.jobs or runtime.bot.schedule.lock.locked() or runtime.bot.diary.lock.locked()
                                                                 or getattr(runtime.bot, 'memory', None) and runtime.bot.memory.busy

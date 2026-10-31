@@ -205,12 +205,12 @@ async def test_failed_generation_throttled_and_errors_redacted(tmp_path):
     for _ in range(2):
         with pytest.raises(ValueError):
             await bot.schedule.ensure()
-    assert len(calls) == 1
+    assert len(calls) == 2
     assert 'private-key-sentinel' not in json.dumps(bot.schedule.snapshot())
     clock[0] += 301
     with pytest.raises(ValueError):
         await bot.schedule.ensure()
-    assert len(calls) == 2
+    assert len(calls) == 4
     await bot.client.aclose()
     store.close()
 
@@ -308,7 +308,7 @@ async def test_normal_and_proactive_replies_receive_only_elapsed_schedule(tmp_pa
     await proactive.generate(store.load(), 'owner', '聊聊今天的生活')
     assert len(messages) == 2
     for request_messages in messages:
-        system = request_messages[0]['content']
+        system = '\n'.join(m['content'] for m in request_messages)
         assert '12:08' in system and '小林' in system and '图书馆' in system
         assert '便利店' not in system and '18:27' not in system
     await bot.client.aclose()
@@ -479,3 +479,57 @@ async def test_ollama_schedule_streaming_avoids_long_response_timeout(tmp_path, 
         store.close()
         providers.close()
 
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('invalid', ['json_syntax','empty','overlap','truncated'])
+async def test_schedule_automatically_repairs_invalid_output_with_precise_feedback(tmp_path,invalid):
+    from unittest.mock import AsyncMock
+    store=Store(tmp_path);configured(store);bot,_=schedule_bot(store,[NOW])
+    first={'message':{'content':'{"summary": invalid}'},'prompt_eval_count':1,'eval_count':2}
+    if invalid=='empty':first['message']['content']=''
+    if invalid=='overlap':
+        day=copy.deepcopy(DAY);day['activities'][1]['start']='07:00';first['message']['content']=json.dumps(day)
+    if invalid=='truncated':
+        first['message']['content']=json.dumps(DAY);first['finish_reason']='length'
+    second={'message':{'content':json.dumps(DAY)},'prompt_eval_count':3,'eval_count':4}
+    bot.generate=AsyncMock(side_effect=[first,second])
+    try:
+        result=await bot.schedule.ensure()
+        assert result['summary']==DAY['summary'] and bot.generate.await_count==2
+        repair=bot.generate.call_args_list[1]
+        assert repair.kwargs['json_output'] is True
+        assert '具体错误' in repair.args[1][-1]['content']
+        assert store.stats()['total_tokens']==10
+        assert not bot.schedule.snapshot()['error']
+    finally:
+        await bot.client.aclose();store.close()
+
+
+@pytest.mark.asyncio
+async def test_schedule_timeout_is_not_misreported_as_format_failure(tmp_path):
+    from unittest.mock import AsyncMock
+    store=Store(tmp_path);configured(store);bot,_=schedule_bot(store,[NOW])
+    bot.generate=AsyncMock(side_effect=TimeoutError('timeout'))
+    try:
+        with pytest.raises(ValueError,match='超时'):
+            await bot.schedule.ensure()
+        assert bot.generate.await_count==1
+        assert '格式' not in bot.schedule.snapshot()['error']
+    finally:
+        await bot.client.aclose();store.close()
+
+
+@pytest.mark.asyncio
+async def test_stream_preserves_token_limit_reason_for_schedule_validation():
+    from app.schedule_stream import schedule_response
+    from app.schedule import ScheduleService
+    def transport(request):
+        frames=[{'message':{'content':json.dumps(DAY)},'done':False},
+                {'message':{'content':''},'done':True,'done_reason':'length','prompt_eval_count':1,'eval_count':2}]
+        return httpx.Response(200,headers={'content-type':'application/x-ndjson'},content='\n'.join(json.dumps(f) for f in frames))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+        result=await schedule_response(client,'POST','http://ollama.test/api/chat',json={'model':'test','messages':[]})
+    assert result['done_reason']=='length'
+    with pytest.raises(ValueError,match='截断'):
+        ScheduleService.parse_generated(result)

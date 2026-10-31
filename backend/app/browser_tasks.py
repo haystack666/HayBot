@@ -172,10 +172,18 @@ class BrowserTasks:
         for bot_id in self.manager.runtimes:
             self.refresh_dm(bot_id)
 
+    def bot_enabled(self, bot_id):
+        try:
+            runtime = self.manager.get(bot_id)
+            return (not self.closed and not runtime.closing and runtime.store.enabled()
+                    and runtime.bot.state != 'stopped')
+        except (HTTPException, ValueError):
+            return False
+
     def dm_enabled(self,bot_id):
         try:
             runtime=self.manager.get(bot_id);cfg=self.config(bot_id)
-            return not self.closed and not runtime.closing and cfg.interactions.messages_enabled and cfg.interactions.dm_monitor_mode=='always'
+            return self.bot_enabled(bot_id) and cfg.interactions.messages_enabled and cfg.interactions.dm_monitor_mode=='always'
         except (HTTPException,ValueError):
             return False
 
@@ -195,7 +203,7 @@ class BrowserTasks:
         if not self.dm_enabled(bot_id):
             if job:job.cancel()
             cfg=self.config(bot_id).interactions
-            self.set_dm_state(bot_id,'stopped' if not cfg.messages_enabled else 'task_only')
+            self.set_dm_state(bot_id,'stopped' if not self.bot_enabled(bot_id) or not cfg.messages_enabled else 'task_only')
             return
         if not job:
             try:self.dm_jobs[bot_id]=asyncio.create_task(self.run_dm_monitor(bot_id))
@@ -379,6 +387,8 @@ class BrowserTasks:
     def submit(self, bot_id, goal, origin=None, *, deferred=False):
         runtime = self.manager.get(bot_id)
         cfg = self.config(bot_id)
+        if not self.bot_enabled(bot_id):
+            raise HTTPException(409, '请先启动机器人，再发起浏览器任务')
         if self.closed or not cfg.enabled:
             raise HTTPException(409, '请先在浏览器页面开启抖音自主浏览')
         if origin and origin.get('source')=='auto' and not cfg.auto_browse.enabled:
@@ -410,7 +420,7 @@ class BrowserTasks:
     def valid(self, task):
         try:
             runtime = self.manager.get(task['bot_id'])
-            if runtime.closing or self.closed or not self.config(runtime.id).enabled:
+            if not self.bot_enabled(runtime.id) or not self.config(runtime.id).enabled:
                 return False
             origin = task['origin']
             if origin.get('source') != 'qq':
@@ -541,6 +551,8 @@ class BrowserTasks:
         repeated_error, repeated_count = None, 0
         path = self.browser.path(bot_id)
         try:
+            if not self.valid(task):
+                raise HTTPException(409, '机器人未启用或本次任务授权已失效')
             await self.stop_dm_monitor(bot_id,'task_running','浏览任务正在运行，由任务内私信通道接管')
             self.update(task_id, state='running')
             await self.browser.gateway.request('POST', path + '/start', {})

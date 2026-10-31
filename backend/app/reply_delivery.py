@@ -9,6 +9,9 @@ from .schedule import ScheduleChanged
 from .event_logs import exception_details
 from .message_quotes import receipt_metadata
 from .reply_envelope import public_reply
+from .chat_stream import supports_stream, send_typewriter
+from .providers import ProviderHTTPError
+from .expression import ReplyExpression
 
 
 class ReplyDelivery:
@@ -23,9 +26,13 @@ class ReplyDelivery:
         self.diary_context = None
         self.voice_requested=False
         self.voice_reason=''
+        self.emotion_stamp=None
+        self.voice_style=None
+        self.expression_style=None
 
     def state_current(self):
         return (self.day.matches(self.schedule_stamp) and self.bot.memory.matches(self.sid, self.memory_stamp)
+                and (self.emotion_stamp is None or self.bot.emotion.matches(self.sid, self.emotion_stamp))
                 and (self.diary_context is None or self.bot.diary.chat_context(self.user,self.group)==self.diary_context)
                 and (self.batch is None or self.bot.inbox.live(self.batch))
                 and (self.group_turn is None or self.bot.group_chat.live(self.group_turn)))
@@ -42,13 +49,13 @@ class ReplyDelivery:
             if len(self.bot.last) > 500:
                 self.bot.last.pop(next(iter(self.bot.last)))
 
-    async def post(self, part, sequence, total):
+    async def post(self, part, sequence, total, before_send=None):
         path = 'groups' if self.group else 'users'
         if self.batch is not None and not self.bot.inbox.mark_sending(self.batch):
             raise ScheduleChanged('消息批次已取消，停止发送')
         if self.group_turn is not None and not self.bot.group_chat.mark_sending(self.group_turn):
             raise ScheduleChanged('群聊话题或授权已变化，停止发送')
-        receipt = await self.bot.api('POST', f'/v2/{path}/{quote(self.target, safe="")}/messages', before_send=self.current,
+        receipt = await self.bot.api('POST', f'/v2/{path}/{quote(self.target, safe="")}/messages', before_send=before_send or self.current,
             json={'msg_type': 0, 'content': part, 'msg_id': self.data['id'], 'msg_seq': sequence})
         if not isinstance(receipt, dict) or not receipt.get('id'):
             self.store.log('warn', 'QQ 未确认本段送达，已停止后续分段', category='message', event='message.segment_unconfirmed',
@@ -71,7 +78,7 @@ class ReplyDelivery:
         try:
             guard=lambda: self.current() and self.bot.memes.current(meme)
             if self.config.transport=='napcat':
-                path=self.bot.memes.catalog.image(meme['id'])
+                path=await self.bot.memes.catalog.ensure_image(meme['id'])
                 data=await asyncio.to_thread(path.read_bytes)
                 if not guard():return
                 if self.batch is not None and not self.bot.inbox.mark_sending(self.batch):return
@@ -105,8 +112,14 @@ class ReplyDelivery:
         # Only pre-submission failures may fall back to text. An uncertain QQ
         # receipt must never cause a second automatic submission.
         guard=lambda:self.current() and self.bot.store.load().speech==self.config.speech and self.bot.store.load().account_id==self.config.account_id
+        actions='';spoken=content
         try:
-            audio=await self.bot.speech.speak(content,self.config)
+            if self.config.speech.tts.separate_actions:
+                expression=ReplyExpression.parse(content,self.voice_style)
+                if not expression.balanced:raise ValueError('动作括号不完整，本轮保留文字')
+                actions,spoken=expression.actions,expression.dialogue
+                if not spoken or not any(char.isalnum() for char in spoken):return 'fallback',None
+            audio=await self.bot.speech.speak(spoken,self.config,**({'style':self.voice_style} if self.voice_style else {}))
             if not guard():raise ScheduleChanged('语音生成期间会话或配置已变化')
             file_info=None
             if self.config.transport!='napcat':
@@ -121,10 +134,16 @@ class ReplyDelivery:
         async def post():
             if not guard():raise ScheduleChanged('发送前会话或语音配置已变化')
             if self.batch is not None and not self.bot.inbox.mark_sending(self.batch):raise ScheduleChanged('批次已取消')
+            if self.group_turn is not None and not self.bot.group_chat.mark_sending(self.group_turn):raise ScheduleChanged('群聊话题或授权已变化')
             if self.config.transport=='napcat':return await self.bot.napcat.send_voice(self.group,self.target,audio,before_send=guard)
             return await self.bot.api('POST',f'/v2/{"groups" if self.group else "users"}/{quote(self.target,safe="")}/messages',
-                before_send=guard,json={'msg_type':7,'content':' ','media':{'file_info':file_info},'msg_id':self.data['id'],'msg_seq':1})
+                before_send=guard,json={'msg_type':7,'content':' ','media':{'file_info':file_info},'msg_id':self.data['id'],'msg_seq':2 if actions else 1})
         try:
+            # Prepare audio/upload before any visible bubble. Once action text
+            # is submitted, never fall back to resending the complete reply.
+            if actions:
+                if not guard():raise ScheduleChanged('发送动作前会话或语音配置已变化')
+                if not await self.post(actions,1,2,before_send=guard):return 'unknown',None
             if prepared:
                 async with self.day.lock:
                     if not guard():raise ScheduleChanged('会话已变化')
@@ -141,9 +160,10 @@ class ReplyDelivery:
         if not isinstance(receipt,dict) or not receipt.get('id'):
             self.store.log('warn','QQ 未确认语音送达，未自动补发',category='message',event='speech.receipt_unknown')
             return 'unknown',None
-        self.confirmed.append(content)
-        key=f'reply:{self.config.account_id}:{self.target}:{self.data["id"]}'
-        self.store.chat.record(self.config.account_id,'group' if self.group else 'user',self.target,'assistant',content,key,
+        self.confirmed.append(spoken)
+        key=(f'reply-part:{self.config.account_id}:{self.target}:{self.data["id"]}:2' if actions else
+             f'reply:{self.config.account_id}:{self.target}:{self.data["id"]}')
+        self.store.chat.record(self.config.account_id,'group' if self.group else 'user',self.target,'assistant',spoken,key,
             attachment_count=1,at=time.time(),source='voice',status='sent' if self.state_current() else 'sent_stale',
             reply_to=f'in:{self.config.account_id}:{self.target}:{self.data["id"]}',**receipt_metadata(receipt))
         self.source_ids.append(self.store.db.execute('SELECT id FROM chat_messages WHERE event_key=?',(key,)).fetchone()[0])
@@ -154,6 +174,10 @@ class ReplyDelivery:
 
     async def send(self, content, prepared=None, update=None, meme=None, meme_candidates=None):
         content = public_reply(content)
+        self.expression = ReplyExpression.parse(content, self.expression_style)
+        if self.config.emotion.enabled:
+            self.store.log('info', '已统一整理本轮台词、动作与表达风格', category='model', event='emotion.expression_prepared',
+                           details=self.expression.public_metadata())
         rules = self.config.rules
         if meme and not self.bot.memes.current(meme): meme = None
         # Reserve a media bubble; existing maximum is conservative (four total).
@@ -165,6 +189,15 @@ class ReplyDelivery:
                 outcome,receipt=await self.send_voice(content,prepared,update)
                 if outcome!='fallback':
                     complete=outcome=='sent'
+                    return receipt
+            if self.config.rules.stream_output and supports_stream(self.config,self.group):
+                receipt=await self.send_stream(content,prepared,update)
+                if receipt!='fallback':
+                    if receipt is None:return None
+                    if not meme and meme_candidates and self.current():
+                        meme=await self.bot.memes.choose(self.question,'\n\n'.join(self.confirmed),meme_candidates)
+                    if meme:await self.send_meme(meme,2)
+                    complete=True
                     return receipt
             for index, part in enumerate(parts, 1):
                 if index > 1 and rules.split_delay:
@@ -197,3 +230,49 @@ class ReplyDelivery:
         finally:
             if not complete:
                 self.save_prefix()
+
+    async def send_stream(self,content,prepared=None,update=None):
+        key=f'reply:{self.config.account_id}:{self.target}:{self.data["id"]}'
+        def guard():
+            latest=self.store.load()
+            return self.current() and latest.rules==self.config.rules and latest.account_id==self.config.account_id
+        def confirmed(text,receipt):
+            self.confirmed[:]=[text]
+            if not self.source_ids:
+                self.store.chat.record(self.config.account_id,'user',self.target,'assistant',text,key,
+                    at=time.time(),status='sent' if self.state_current() else 'sent_stale',
+                    reply_to=f'in:{self.config.account_id}:{self.target}:{self.data["id"]}',**receipt_metadata(receipt))
+                self.source_ids.append(self.store.db.execute('SELECT id FROM chat_messages WHERE event_key=?',(key,)).fetchone()[0])
+                self.store.record_result('sent','流式回复气泡已确认创建',category='message',event='message.stream_started')
+            else:
+                with self.store.db:
+                    self.store.db.execute('UPDATE chat_messages SET content=?,status=? WHERE id=?',
+                        (text,'sent' if self.state_current() else 'sent_stale',self.source_ids[0]))
+        async def complete(finish):
+            if prepared:
+                async with self.day.lock:
+                    if not guard():raise ScheduleChanged('日程已变化，停止流式回复')
+                    latest=self.day.dialogue.prepare(update)
+                    receipt=await finish()
+                    if receipt and self.state_current():
+                        self.day.dialogue.apply(latest,{'kind':'user','target':self.target,'sender_id':self.user,'message_id':self.data['id']})
+                        self.schedule_stamp=self.day.stamp()
+                    return receipt
+            return await finish()
+        if not guard():raise ScheduleChanged('会话已变化，停止流式回复')
+        if self.batch is not None and not self.bot.inbox.mark_sending(self.batch):raise ScheduleChanged('批次已取消')
+        try:
+            receipt=await send_typewriter(self.bot.api,self.target,self.data['id'],content,
+                before_send=guard,on_confirmed=confirmed,complete=complete)
+        except (asyncio.CancelledError,ScheduleChanged):raise
+        except ProviderHTTPError as error:
+            if not self.confirmed and error.status in (403,404,405,501):
+                self.store.log('info','平台明确拒绝流式接口，改为普通文字回复',category='message',event='message.stream_fallback')
+                return 'fallback'
+            self.store.log('warn','流式回复未完成，未自动重发',category='message',event='message.stream_unknown',details=exception_details(error))
+            return None
+        except Exception as error:
+            self.store.log('warn','流式回复中断，未自动重发；请检查平台流式权限',category='message',event='message.stream_unknown',details=exception_details(error))
+            return None
+        if not receipt:self.store.log('warn','流式回复未确认完成，未自动重发',category='message',event='message.stream_unknown')
+        return receipt

@@ -8,6 +8,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import date, datetime
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlsplit
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
@@ -15,7 +16,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError, field_validator
-from .config import Settings, OllamaConfig, SpeechConfig, MemoryModelConfig
+from .config import Settings, OllamaConfig, SpeechConfig, MemoryModelConfig, ImageGenerationConfig
 from .registry import BotManager, BotRuntime
 from .providers import ProviderConfig, ProviderHTTPError, list_models, generate, read_response
 from .qq_connect import QQConnect
@@ -56,7 +57,7 @@ def create_app(data_dir=None, static_dir=None):
 
     @app.middleware('http')
     async def security(request: Request, call_next):
-        max_body = 10 * 1024 * 1024 if request.url.path.endswith(('/memes/upload','/qzone/images','/providers/test-speech')) else 131072
+        max_body = 10 * 1024 * 1024 if request.url.path.endswith(('/memes/upload','/qzone/images','/providers/test-speech','/image-generation/references')) else 131072
         if request.headers.get('content-length', '').isdigit() and int(request.headers['content-length']) > max_body:
             return JSONResponse({'detail': '请求内容过大'}, status_code=413)
         if request.url.path.startswith('/api/'):
@@ -72,7 +73,7 @@ def create_app(data_dir=None, static_dir=None):
         response.headers['X-Content-Type-Options'] = 'nosniff'
         response.headers['X-Frame-Options'] = 'DENY'
         response.headers['Referrer-Policy'] = 'same-origin'
-        response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'"
+        response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://img.aigengtu.com; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'"
         if request.url.path.startswith('/api/'):
             response.headers['Cache-Control'] = 'no-store'
         return response
@@ -216,20 +217,23 @@ def create_app(data_dir=None, static_dir=None):
         temperature: float = Field(default=0.7, ge=0, le=2)
         timeout: int = Field(default=120, ge=5, le=600)
         max_tokens: int = Field(default=1024, ge=128, le=32768)
+        context_window: int = Field(default=8192, ge=4096, le=2097152)
+        reasoning_reserve: int = Field(default=0, ge=0, le=32768)
+        safety_reserve: int = Field(default=512, ge=128, le=8192)
 
     @app.post('/api/providers/test-generation')
     async def test_generation(body: GenerationProbe, provider_id: str = ''):
         try:
             return await run_generation_probe(body,provider_id)
         except Exception:
-            config=ProviderConfig.model_validate(body.model_dump(exclude={'model','temperature','timeout','max_tokens'}))
+            config=ProviderConfig.model_validate(body.model_dump(exclude={'model','temperature','timeout','max_tokens','context_window','reasoning_reserve','safety_reserve'}))
             prepared=app.state.manager.providers.prepare(config,provider_id)
             app.state.manager.providers.checked(provider_id,prepared,'failed')
             raise
 
     async def run_generation_probe(body,provider_id):
-        provider = app.state.manager.providers.prepare(ProviderConfig.model_validate(body.model_dump(exclude={'model', 'temperature', 'timeout', 'max_tokens'})), provider_id)
-        if provider.purpose in ('tts','stt'):raise ValueError('语音服务请使用试听或转写测试')
+        provider = app.state.manager.providers.prepare(ProviderConfig.model_validate(body.model_dump(exclude={'model', 'temperature', 'timeout', 'max_tokens','context_window','reasoning_reserve','safety_reserve'})), provider_id)
+        if provider.purpose in ('tts','stt','image'):raise ValueError('语音或生图服务请使用对应的专用测试')
         if provider.purpose != 'chat':
             from .retrieval import embed, rerank
             if provider.purpose == 'embedding':
@@ -242,7 +246,9 @@ def create_app(data_dir=None, static_dir=None):
             return {'content': '重排测试成功', 'results': result['results'], 'input_tokens': result['input_tokens'], 'output_tokens': 0}
         if provider.type == 'anthropic' and provider.anthropic_version == '2023-06-01' and provider.send_temperature and body.temperature > 1:
             raise ValueError('Anthropic 温度范围为 0–1')
-        selection = OllamaConfig(model=body.model, temperature=body.temperature, timeout=body.timeout)
+        selection = OllamaConfig(model=body.model, temperature=body.temperature, timeout=body.timeout,
+                                max_tokens=body.max_tokens, context_window=body.context_window,
+                                reasoning_reserve=body.reasoning_reserve, safety_reserve=body.safety_reserve)
         result = await generate(provider_request, provider, selection, [
             {'role': 'system', 'content': '你是连接测试助手，只输出一句简短中文。'},
             {'role': 'user', 'content': '请回复：连接正常。'}], body.max_tokens, thinking=provider.chat_thinking if provider.type == 'ollama' else None)
@@ -251,6 +257,23 @@ def create_app(data_dir=None, static_dir=None):
             raise ValueError('服务未返回文本回答，请检查模型、协议和输出 Token 限制')
         app.state.manager.providers.checked(provider_id,provider,'verified')
         return {'content': content[:500], 'input_tokens': result.get('prompt_eval_count', 0), 'output_tokens': result.get('eval_count', 0)}
+
+    class ImageProbe(ProviderConfig):
+        model: str = Field(min_length=1,max_length=200)
+        prompt: str = Field(default='一只坐在窗边晒太阳的橘猫，自然摄影风格',min_length=1,max_length=2000)
+
+    @app.post('/api/providers/test-image')
+    async def test_image(body:ImageProbe,provider_id:str=''):
+        from .image_generation import generate_image
+        provider=app.state.manager.providers.prepare(ProviderConfig.model_validate(body.model_dump(exclude={'model','prompt'})),provider_id)
+        try:
+            async with httpx.AsyncClient(trust_env=False,follow_redirects=False) as client:
+                image=await generate_image(client,provider,body.model,body.prompt)
+            app.state.manager.providers.checked(provider_id,provider,'verified')
+            return {'image':base64.b64encode(image).decode(),'mime':'image/jpeg','message':'生图调用成功，仅在此页面预览，不发送 QQ；本次测试按供应商规则计费'}
+        except Exception:
+            app.state.manager.providers.checked(provider_id,provider,'failed')
+            raise
 
     class SpeechProbe(ProviderConfig):
         model: str = Field(min_length=1,max_length=200)
@@ -290,9 +313,12 @@ def create_app(data_dir=None, static_dir=None):
         await app.state.manager.delete_provider(provider_id)
         return {'ok': True}
 
+    class BotCreate(BotName):
+        transport: Literal['qq_official', 'napcat'] = 'qq_official'
+
     @app.post('/api/bots', status_code=201)
-    async def create_bot(body: BotName):
-        return await app.state.manager.create(body.name)
+    async def create_bot(body: BotCreate):
+        return await app.state.manager.create(body.name, transport=body.transport)
 
     @app.patch('/api/bots/{bot_id}')
     async def rename_bot(bot_id: str, body: BotName):
@@ -396,6 +422,8 @@ def create_app(data_dir=None, static_dir=None):
                 c=runtime.store.load().model_copy(deep=True)
                 c.ollama=assignment.chat
                 c.speech=assignment.speech
+                if assignment.image_generation is not None:
+                    c.image_generation=assignment.image_generation
                 c.memory.embedding=assignment.embedding
                 c.memory.rerank=assignment.rerank
                 try:c=Settings.model_validate(c.model_dump())
@@ -421,6 +449,8 @@ def create_app(data_dir=None, static_dir=None):
             for purpose in ('tts','stt'):
                 selected=getattr(c.speech,purpose)
                 if selected.provider_id and app.state.manager.providers.get(selected.provider_id).purpose!=purpose:raise ValueError('语音模型的供应商用途不匹配')
+            if c.image_generation.provider_id and app.state.manager.providers.get(c.image_generation.provider_id).purpose!='image':
+                raise ValueError('图片创作必须选择图片生成用途的供应商')
             c.ollama.url = provider.base_url
             if provider.type == 'anthropic' and provider.anthropic_version == '2023-06-01' and provider.send_temperature and c.ollama.temperature > 1:
                 raise ValueError('Anthropic 温度范围为 0–1')
@@ -439,7 +469,7 @@ def create_app(data_dir=None, static_dir=None):
             if c.proactive != old.proactive and c.proactive.recipient_id:
                 runtime.store.set_idle_time(c.account_id, c.proactive.recipient_id, 0)
             runtime.bot.token = ''
-            display_fields = {'debounce_enabled', 'debounce_seconds', 'debounce_max_wait', 'debounce_max_messages', 'split_enabled', 'split_length', 'split_max_parts', 'split_delay'}
+            display_fields = {'debounce_enabled', 'debounce_seconds', 'debounce_max_wait', 'debounce_max_messages', 'split_enabled', 'split_length', 'split_max_parts', 'split_delay', 'show_thinking', 'stream_output', 'user_identification', 'real_world_time'}
             if c.rules.model_dump(exclude=display_fields) != old.rules.model_dump(exclude=display_fields) or c.ollama != old.ollama or c.account_id != old.account_id or c.schedule != old.schedule or c.memory != old.memory:
                 runtime.store.clear_history()
             runtime.store.log('info', '配置已保存')
@@ -449,12 +479,14 @@ def create_app(data_dir=None, static_dir=None):
         model_config={'extra':'forbid'}
         chat: OllamaConfig
         speech: SpeechConfig
+        image_generation: ImageGenerationConfig | None = None
         embedding: MemoryModelConfig
         rerank: MemoryModelConfig
 
     def public_assignments(runtime):
         c=runtime.store.load()
         return {'chat':c.ollama.model_dump(),'speech':c.speech.model_dump(),
+                'image_generation':c.image_generation.model_dump(),
                 'embedding':c.memory.embedding.model_dump(),'rerank':c.memory.rerank.model_dump(),
                 'state':runtime.bot.state}
 
@@ -513,6 +545,8 @@ def create_app(data_dir=None, static_dir=None):
 
     from .memory_api import install as install_memory_routes
     install_memory_routes(app, scoped_runtime)
+    from .emotion_api import install as install_emotion_routes
+    install_emotion_routes(app, scoped_runtime)
     from .logs_api import install as install_log_routes
     install_log_routes(app, scoped_runtime)
 
@@ -604,6 +638,7 @@ def create_app(data_dir=None, static_dir=None):
             runtime.start_error = ''
             await runtime.bot.start()
             runtime.store.set_enabled(True)
+            app.state.browser_tasks.refresh_dm(runtime.id)
         return {'ok': True}
 
     @app.post('/api/bot/stop')
@@ -612,8 +647,12 @@ def create_app(data_dir=None, static_dir=None):
         async with runtime.control_lock:
             runtime.store.set_enabled(False)
             runtime.start_error = ''
-            await runtime.bot.stop()
-            runtime.store.log('info', '机器人已停止')
+            try:
+                await app.state.browser_tasks.stop_dm_monitor(runtime.id)
+                await app.state.browser_tasks.cancel_bot(runtime.id)
+            finally:
+                await runtime.bot.stop()
+                runtime.store.log('info', '机器人已停止')
         return {'ok': True}
 
     @app.delete('/api/history')
@@ -632,6 +671,8 @@ def create_app(data_dir=None, static_dir=None):
     register_qzone_routes(app,scoped_runtime)
     from .diary_routes import register_diary_routes
     register_diary_routes(app,scoped_runtime)
+    from .image_generation_routes import register_image_generation_routes
+    register_image_generation_routes(app,scoped_runtime)
 
     from .browser_routes import register_browser_routes
     register_browser_routes(app, scoped_runtime)
@@ -659,6 +700,8 @@ def create_app(data_dir=None, static_dir=None):
     @app.get('/chats')
     @app.get('/schedule')
     @app.get('/memory')
+    @app.get('/emotion')
+    @app.get('/image-generation')
     @app.get('/memes')
     @app.get('/browser')
     @app.get('/qzone')

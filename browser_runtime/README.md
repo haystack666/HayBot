@@ -4,7 +4,26 @@
 
 当前实现和实机验收范围为 **macOS arm64**。macOS Intel 有架构检查分支，未实测；Windows/Linux 只有安装路径发现，身份和启动流程尚未实现，会阻断启动。
 
-## 启动
+## 随应用容器自动启停（macOS）
+
+首次安装依赖、配置下文的后台运行时地址与访问码后，执行一次：
+
+```sh
+python3 scripts/browser_runtime_service.py --install
+```
+
+该命令安装当前用户的 `~/Library/LaunchAgents/local.haybot.browser-runtime.plist`，立即生效，并在以后登录 macOS 时自动运行。守护程序每 5 秒按 Compose 项目工作目录与 `app` 服务标签检查容器：应用容器运行时启动宿主浏览器服务，容器停止时关闭由守护程序启动的浏览器服务。Docker 暂不可达时保留当前服务，恢复后继续检测。运行时异常退出会重新启动，但不会重放已提交操作。容器启动无需 Ollama。
+
+运行时继续使用项目 `.browser-runtime/` 中的访问码、独立 Chrome 资料和登录状态。日志位于 `~/Library/Logs/HayBot/browser-runtime.log` 与 `~/Library/Logs/HayBot/browser-runtime-error.log`。项目移动位置后需重新执行安装命令。自动模式下无需双击手动启动入口；守护程序不会终止其他入口启动的服务。
+
+卸载自动启动（保留资料与配置）：
+
+```sh
+launchctl bootout gui/$(id -u)/local.haybot.browser-runtime
+rm ~/Library/LaunchAgents/local.haybot.browser-runtime.plist
+```
+
+## 手动启动
 
 推荐从项目根目录双击 **启动浏览器.command**（macOS），无需手工运行 npm。启动入口在服务启动前检查 Node.js 22 或更新版本；缺失或不兼容时打开官方安装页，提示下载安装 .pkg，安装后按回车重检。依赖缺失时自动执行 npm ci；服务已启动时直接提示返回后台。关闭启动窗口会停止服务。首次使用还需按下文配置后台的运行时地址与访问码。
 
@@ -20,6 +39,8 @@ npm --prefix browser_runtime start
 访问 `http://127.0.0.1:17322/`，将本机 `.browser-runtime/token` 中的访问码填入连接表单。终端只显示访问码文件路径，不显示内容。重启服务后需要重新连接。
 
 进入页面自动检查宿主、Node、工作目录、Chrome 产品/Google 签名/架构和真实隐藏启动连接。通过后检测项收起。选择原型 A/B，点击启动、接管，再打开“测试页”。可在画面内点击、滚动、拖动、滑动、键盘输入；中文也可通过画面下方输入框发送。支持标签管理、放大查看和 Esc 收起。
+
+macOS 架构检查使用系统 `/usr/bin/file` 读取已通过 Google 签名校验的 Mach-O，不依赖 `/usr/bin/lipo` 或 Xcode 许可状态；架构检测工具执行失败会单独提示，不再统一误报为 Chrome 损坏。产品身份、Google 签名、宿主匹配架构及真实隐藏启动连接仍全部必须通过。
 
 画面操作默认为“自动”：鼠标按住移动对应网页原生拖动（滑块、文字选取、拖动控件），触摸按住移动对应滚动页面；滚轮/触控板在鼠标所在的网页位置滚动，也支持内部独立滚动区域和横向滚动。选“滑动”可用鼠标按住上下/左右推来滚页；选“拖动”可强制让触摸操作拖动控件。滑动模式转为桌面网页滚轮事件，不模拟远端移动浏览器的多点触摸或缩放。
 
@@ -105,6 +126,8 @@ npm --prefix browser_runtime run test:chrome
 正式后台接入与验收见 [WORKBENCH.md](../design/browser-runtime-20261028/WORKBENCH.md)。
 
 ## 抖音自主浏览
+
+Bot 必须处于启用状态且未停止，才能发起或继续浏览任务、自动浏览和常驻私信监控。停止 Bot 会取消排队及运行中的浏览任务并撤销运行时操作权限；已停止的任务不会自动重放。手动接管浏览器仍可使用。
 
 在「浏览器 → 抖音自主浏览 → 设置」开启功能，角色兴趣、主人喜好与内容筛选分别填写。迁移旧版用户手填的兴趣但默认不开启浏览器执行权限，不从人格生成兴趣。使用当前 Bot 的对话模型，供应商需声明支持图片。没有音轨/ASR，观看以实际播放器推进、截图及可见字幕为依据。
 
