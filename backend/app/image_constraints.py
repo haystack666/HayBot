@@ -24,8 +24,20 @@ RULES='''你是图片要求编译器，只输出JSON，不添加用户未要求�
 
 
 async def compile_constraints(bot,config,text,prompt):
-    result=await bot.generate(config.ollama.model_copy(update={'timeout':25}),[
-        {'role':'system','content':RULES+'\n严格遵循此JSON Schema，字段类型必须一致，不使用null：'+json.dumps(PictureConstraints.model_json_schema(),ensure_ascii=False)},{'role':'user','content':json.dumps({'current_request':text,'resolved_scene':prompt},ensure_ascii=False)}],1400,json_output=True)
-    bot.store.record_usage(result)
-    constraints=parse_object(result.get('message',{}).get('content'),PictureConstraints)
-    return '\n【本轮构图与内容约束，优先于默认风格和参考图原构图】\n'+constraints.model_dump_json()
+    messages=[{'role':'system','content':RULES+'\n描述简洁，每个文本字段不超过80字，数组最多6项。严格遵循JSON Schema，不使用null：'+json.dumps(PictureConstraints.model_json_schema(),ensure_ascii=False)},
+              {'role':'user','content':json.dumps({'current_request':text,'resolved_scene':prompt},ensure_ascii=False)}]
+    for attempt in range(2):
+        result=await bot.generate(config.ollama.model_copy(update={'timeout':45}),messages,4000 if attempt==0 else 6000,json_output=True)
+        bot.store.record_usage(result)
+        raw=result.get('message',{}).get('content','')
+        try:
+            if result.get('finish_reason') in ('length','max_tokens','max_output_tokens'):
+                raise ValueError('输出达到长度上限，需要简洁完整的JSON')
+            constraints=parse_object(raw,PictureConstraints)
+            return '\n【本轮构图与内容约束，优先于默认风格和参考图原构图】\n'+constraints.model_dump_json()
+        except (ValueError,TypeError) as error:
+            from .event_logs import exception_details
+            bot.store.log('warn','构图结构校验失败'+('，进行一次文本修复' if attempt==0 else '，停止生图'),category='model',event='image_generation.constraints_validation',details={**exception_details(error),'attempt':attempt+1})
+            if attempt:raise
+            messages += [{'role':'assistant','content':raw[:16000] or '[空正文]'},
+                         {'role':'user','content':'上次JSON不完整或字段不正确。请重新返回完整简洁的JSON，不输出解释，保持用户要求不变，每个字段一句话。只修复格式，不添加画面内容。'}]

@@ -427,5 +427,14 @@ class ImageGenerationService:
             if jid: self.status(jid, 'sent' if image_confirmed else 'unknown' if sending else 'failed')
             text = str(error) if isinstance(error, ImageGenerationError) else '图片创作或 QQ 上传失败，未自动重试；请检查连接和额度'
             self.store.log('warn', text, category='message', event='image_generation.receipt_unknown' if sending else 'image_generation.failed', details={'job_id': jid})
-            if not sending: await notice(text)
+            if not sending:
+                from .image_conversation import failure_reply
+                response='这张我先不给你啦，不想拿没弄好的图糊弄你。'
+                try:
+                    response=await failure_reply(self.bot,config,self.bot.conversation_text(data) or prompt,key,group,data)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    self.store.log('warn','角色失败回应未完成，使用简短自然回复',category='model',event='image_generation.failure_reply_fallback')
+                await notice(response)
         return True

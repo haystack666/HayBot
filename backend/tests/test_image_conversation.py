@@ -155,3 +155,4 @@ async def test_failure_does_not_fabricate_delivery_or_resend_picture(tmp_path,mo
 def isolated_composition_compiler(monkeypatch):
     # These tests isolate delivery/intent behavior; compiler contracts have their own suite.
     monkeypatch.setattr('app.image_constraints.compile_constraints',AsyncMock(return_value=''))
+    monkeypatch.setattr('app.image_conversation.failure_reply',AsyncMock(return_value='这张先不给你啦，没弄好。'))

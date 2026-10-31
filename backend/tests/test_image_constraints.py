@@ -55,3 +55,14 @@ async def test_nonconforming_actual_picture_is_not_sent(tmp_path,monkeypatch):
         assert store.db.execute("SELECT count(*) FROM chat_messages WHERE source='generated_image'").fetchone()[0]==0
     finally:
         await bot.client.aclose();providers.close();store.close()
+
+@pytest.mark.asyncio
+async def test_malformed_constraint_json_is_repaired_without_image_call():
+    from app.image_constraints import compile_constraints,PictureConstraints
+    from types import SimpleNamespace
+    model=AsyncMock(side_effect=[{'message':{'content':'{"viewpoint":"unfinished'}},
+        {'message':{'content':PictureConstraints(viewpoint='自拍相机视角').model_dump_json()}}])
+    bot=SimpleNamespace(generate=model,store=SimpleNamespace(record_usage=lambda r:None,log=lambda *a,**k:None))
+    c=SimpleNamespace(ollama=SimpleNamespace(model_copy=lambda **k:None))
+    assert '自拍相机' in await compile_constraints(bot,c,'自拍','自拍')
+    assert model.await_count==2 and model.call_args_list[0].args[2]==4000

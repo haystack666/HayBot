@@ -104,3 +104,18 @@ async def acknowledgement(bot,config,user_request,prompt,key,group,data):
     if not text or len(text)>120 or text.startswith(('{','```')):
         raise ValueError('等待回应无效')
     return text
+
+
+async def failure_reply(bot,config,user_request,key,group,data):
+    persona=config.rules.prompt
+    if group:
+        from . import group_identity
+        persona=group_identity.persona(config,data)
+    result=await bot.generate(config.ollama.model_copy(update={'timeout':15}),[
+        {'role':'system','content':persona+'\n本轮没有成功发出用户要的图片。结合当前请求和近期对话，以角色平时口吻简短回应，最多80字。可以自然说这次先不给/没弄好，不责怪用户，不编造设备损坏、身体原因等借口，不声称已发或保证稍后自动发送。不提JSON、提示词、构图整理、接口、供应商等内部技术细节，不要求换模型。只输出自然对白，不输出JSON。'},
+        {'role':'user','content':json.dumps({'current_request':user_request,'recent_dialogue':recent_dialogue(bot.store,key,config.rules.rounds)},ensure_ascii=False)}],350)
+    bot.store.record_usage(result)
+    text=(result.get('message',{}).get('content') or '').strip()
+    if not text or len(text)>180 or text.startswith(('{','```')) or re.search(r'JSON|schema|API|Token|供应商|构图整理',text,re.I):
+        raise ValueError('失败回应格式无效')
+    return text
