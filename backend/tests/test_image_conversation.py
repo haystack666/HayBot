@@ -149,3 +149,9 @@ async def test_failure_does_not_fabricate_delivery_or_resend_picture(tmp_path,mo
             if failure=='caption_failure':assert '画面细节尚未确认' in history and '蓝色' not in history
     finally:
         await bot.client.aclose();providers.close();store.close()
+
+
+@pytest.fixture(autouse=True)
+def isolated_composition_compiler(monkeypatch):
+    # These tests isolate delivery/intent behavior; compiler contracts have their own suite.
+    monkeypatch.setattr('app.image_constraints.compile_constraints',AsyncMock(return_value=''))

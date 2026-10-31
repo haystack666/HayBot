@@ -320,6 +320,18 @@ class ImageGenerationService:
                     self.store.log('warn','图片场景补全未完成，保留用户要求，不猜测日程',category='model',event='image_generation.scene_failed')
                 if not guard():
                     self.status(jid,'cancelled');return True
+                from .image_constraints import compile_constraints
+                original_request=self.bot.conversation_text(data) or prompt
+                try:
+                    composition=await compile_constraints(self.bot,config,original_request,prompt)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    composition='\n【本轮约束】严格执行用户原话指定的视角、景别、人数、姿势、空间关系和否定要求；默认风格、日程和参考图只能补缺，不能覆盖这些要求。'
+                    self.store.log('warn','构图约束提炼未完成，保留用户原话及通用约束',category='model',event='image_generation.constraints_fallback')
+                prompt += composition+'\n【用户本轮原话，明确要求优先】\n'+original_request
+                if not guard():
+                    self.status(jid,'cancelled');return True
                 prompt_text = ('基础风格与拍摄要求：\n' + c.base_prompt.strip() + '\n角色固定外貌：\n' + c.character_prompt.strip()
                     + ('\n附图是同一个角色的' + '、'.join(SLOTS[r['slot']] for r in refs) + '。保持同一角色的脸型、发型、发色和身体特征；根据本次要求改变场景与动作。只生成一张最终成片，不要生成三视图拼图。' if refs else '')
                     + '\n本次用户画面要求：\n' + prompt)

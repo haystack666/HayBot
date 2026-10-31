@@ -254,3 +254,9 @@ def test_image_probe_reuses_encrypted_key_without_sending_qq(client,monkeypatch)
     assert client.get('/api/providers').json()['providers'][-1]['check_state']=='verified'
     result=client.post('/api/providers/test-generation?provider_id='+p['id'],json={'type':'openai_image','model':'image-model'})
     assert result.status_code==400
+
+
+@pytest.fixture(autouse=True)
+def isolated_composition_compiler(monkeypatch):
+    # These tests isolate delivery/intent behavior; compiler contracts have their own suite.
+    monkeypatch.setattr('app.image_constraints.compile_constraints',AsyncMock(return_value=''))

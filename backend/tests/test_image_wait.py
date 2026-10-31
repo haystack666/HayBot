@@ -21,3 +21,9 @@ async def test_wait_precedes_generation_and_uses_separate_message_sequence(tmp_p
         assert store.db.execute("SELECT count(*) FROM chat_messages WHERE source='image_wait'").fetchone()[0]==1
     finally:
         await bot.client.aclose();providers.close();store.close()
+
+
+@pytest.fixture(autouse=True)
+def isolated_composition_compiler(monkeypatch):
+    # These tests isolate delivery/intent behavior; compiler contracts have their own suite.
+    monkeypatch.setattr('app.image_constraints.compile_constraints',AsyncMock(return_value=''))
