@@ -9,7 +9,7 @@ async def test_wait_precedes_generation_and_uses_separate_message_sequence(tmp_p
     monkeypatch.setattr('app.image_conversation.acknowledgement',AsyncMock(return_value='等我一下，给你准备张适合屏保的。'))
     async def generate(*a,**k):order.append('generate');return picture()
     monkeypatch.setattr('app.image_generation.generate_image',generate)
-    monkeypatch.setattr('app.image_conversation.caption',AsyncMock(side_effect=ValueError()))
+    monkeypatch.setattr('app.image_conversation.caption',AsyncMock(return_value=__import__('app.image_conversation',fromlist=['ImageCaption']).ImageCaption(requirements_met=True,visual_description='蓝色画面',reply='给你啦。')))
     async def api(method,path,**kwargs):
         if path.endswith('/files'):return {'file_info':'media'}
         b=kwargs['json'];order.append((b['msg_type'],b['msg_seq']));return {'id':'ok'}

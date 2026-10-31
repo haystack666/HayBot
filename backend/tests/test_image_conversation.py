@@ -18,7 +18,7 @@ def output(value):
 
 
 def caption():
-    return output({'visual_description':'蓝色纯色画面，没有人物或海滩','reply':'这张的效果不太对，没拍出你想要的那种感觉。'})
+    return output({'requirements_met':True,'violations':[],'visual_description':'蓝色纯色画面，没有人物或海滩','reply':'这张的效果不太对，没拍出你想要的那种感觉。'})
 
 
 @pytest.mark.asyncio
@@ -140,8 +140,8 @@ async def test_failure_does_not_fabricate_delivery_or_resend_picture(tmp_path,mo
         status=store.db.execute('SELECT status FROM image_generation_jobs').fetchone()[0]
         if failure=='unknown_picture':
             assert len(pictures)==1 and texts==[] and status=='unknown'
-        elif failure=='reset_while_looking':
-            assert not pictures and not texts and status=='cancelled'
+        elif failure in ('reset_while_looking','caption_failure'):
+            assert not pictures and status==('cancelled' if failure=='reset_while_looking' else 'failed')
         else:
             assert len(pictures)==1 and len(texts)==1 and status=='sent'
             history=store.history('user:alice:alice',6)[-1]['content']

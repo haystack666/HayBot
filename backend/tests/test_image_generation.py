@@ -131,7 +131,7 @@ async def test_qq_image_chain_confirmed_only_and_no_second_generation(tmp_path,m
     store,bot,providers=setup_generation(tmp_path,group=scenario=='group',napcat=scenario=='napcat')
     request=event(group=scenario=='group');request['d']['content']='/画图 给我发张你的自拍'
     calls=[]
-    bot.generate.return_value={'message':{'content':json.dumps({'visual_description':'蓝色纯色画面','reply':'这张发给你啦，看看喜不喜欢。'},ensure_ascii=False)}}
+    bot.generate.return_value={'message':{'content':json.dumps({'requirements_met':True,'violations':[],'visual_description':'蓝色纯色画面','reply':'这张发给你啦，看看喜不喜欢。'},ensure_ascii=False)}}
     async def generate(*args,**kwargs):
         calls.append(args)
         assert '日光摄影' in args[3] and '三视图合图' in args[3] and len(args[4])==1

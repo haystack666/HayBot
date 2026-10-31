@@ -286,7 +286,7 @@ class ImageGenerationService:
             return guard() and (batch is None or self.bot.inbox.mark_sending(batch))
         async def notice(text):
             if mark_sending():
-                await self.bot.send_schedule_text(text, config, data, group, target, source='image_notice', guard=guard)
+                await self.bot.send_schedule_text(text, config, data, group, target, first_sequence=3, source='image_notice', guard=guard)
         jid = None
         sending = False
         image_confirmed = False
@@ -326,9 +326,10 @@ class ImageGenerationService:
                     composition=await compile_constraints(self.bot,config,original_request,prompt)
                 except asyncio.CancelledError:
                     raise
-                except Exception:
-                    composition='\n【本轮约束】严格执行用户原话指定的视角、景别、人数、姿势、空间关系和否定要求；默认风格、日程和参考图只能补缺，不能覆盖这些要求。'
-                    self.store.log('warn','构图约束提炼未完成，保留用户原话及通用约束',category='model',event='image_generation.constraints_fallback')
+                except Exception as error:
+                    from .event_logs import exception_details
+                    self.store.log('warn','构图约束提炼失败，停止本轮生图，不降级继续生成',category='model',event='image_generation.constraints_failed',details=exception_details(error))
+                    raise ImageGenerationError('这次画面的视角和构图要求没有整理完整，我先不画，免得又发错图给你。') from None
                 prompt += composition+'\n【用户本轮原话，明确要求优先】\n'+original_request
                 if not guard():
                     self.status(jid,'cancelled');return True
@@ -363,12 +364,16 @@ class ImageGenerationService:
                 response='图片发给你啦，看看喜不喜欢。'
                 try:
                     grounded=await caption(self.bot,config,image,user_request,prompt,key,group,data,sid)
+                    if not grounded.requirements_met or grounded.violations:
+                        raise ImageGenerationError('这张图的构图没符合你的要求，我先不把错图发给你。不会自动重新生成。')
                     visual_description,response=grounded.visual_description,grounded.reply
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:
                     from .event_logs import exception_details
-                    self.store.log('warn','成片理解未完成，使用不描述画面细节的简短回应',category='model',event='image_generation.caption_failed',details=exception_details(error))
+                    self.store.log('warn','成片核验未通过，停止发送图片',category='model',event='image_generation.caption_failed',details=exception_details(error))
+                    if isinstance(error,ImageGenerationError):raise
+                    raise ImageGenerationError('这张图还没能确认符合你的要求，我先不发送，避免再发错图。不会自动重新生成。') from None
                 if not guard():
                     self.status(jid,'cancelled');return True
                 if config.transport == 'napcat':

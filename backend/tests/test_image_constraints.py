@@ -20,3 +20,38 @@ async def test_general_constraints_preserve_current_request(text,view,framing,fo
     assert payload['current_request']==text
     assert view in compiled and framing in compiled
     assert json.loads(compiled.split('\n')[-1])['forbidden_elements']==forbidden
+
+@pytest.mark.asyncio
+async def test_constraint_failure_never_calls_paid_image_generation(tmp_path,monkeypatch):
+    from test_image_generation import setup_generation
+    from test_reply_segments import event
+    store,bot,providers=setup_generation(tmp_path)
+    monkeypatch.setattr('app.image_constraints.compile_constraints',AsyncMock(side_effect=ValueError('invalid schema')))
+    image=AsyncMock();monkeypatch.setattr('app.image_generation.generate_image',image)
+    request=event();request['d']['content']='/画图 自拍'
+    try:
+        await bot.handle(request)
+        image.assert_not_awaited()
+        assert store.db.execute("SELECT count(*) FROM logs WHERE event='image_generation.constraints_failed'").fetchone()[0]==1
+        assert store.db.execute("SELECT count(*) FROM chat_messages WHERE source='generated_image'").fetchone()[0]==0
+    finally:
+        await bot.client.aclose();providers.close();store.close()
+
+
+@pytest.mark.asyncio
+async def test_nonconforming_actual_picture_is_not_sent(tmp_path,monkeypatch):
+    from test_image_generation import setup_generation,picture
+    from test_reply_segments import event
+    from app.image_conversation import ImageCaption
+    store,bot,providers=setup_generation(tmp_path)
+    monkeypatch.setattr('app.image_constraints.compile_constraints',AsyncMock(return_value='自拍相机视角，不允许第三视角举手机'))
+    monkeypatch.setattr('app.image_conversation.acknowledgement',AsyncMock(return_value='等我一下。'))
+    monkeypatch.setattr('app.image_generation.generate_image',AsyncMock(return_value=picture()))
+    monkeypatch.setattr('app.image_conversation.caption',AsyncMock(return_value=ImageCaption(requirements_met=False,violations=['实际是第三视角举手机'],visual_description='角色举着手机',reply='给你啦')))
+    request=event();request['d']['content']='/画图 自拍'
+    try:
+        await bot.handle(request)
+        assert all(c.kwargs['json']['msg_type']==0 for c in bot.api.await_args_list)
+        assert store.db.execute("SELECT count(*) FROM chat_messages WHERE source='generated_image'").fetchone()[0]==0
+    finally:
+        await bot.client.aclose();providers.close();store.close()

@@ -25,7 +25,7 @@ RULES='''你是图片要求编译器，只输出JSON，不添加用户未要求�
 
 async def compile_constraints(bot,config,text,prompt):
     result=await bot.generate(config.ollama.model_copy(update={'timeout':25}),[
-        {'role':'system','content':RULES},{'role':'user','content':json.dumps({'current_request':text,'resolved_scene':prompt},ensure_ascii=False)}],1400,json_output=True)
+        {'role':'system','content':RULES+'\n严格遵循此JSON Schema，字段类型必须一致，不使用null：'+json.dumps(PictureConstraints.model_json_schema(),ensure_ascii=False)},{'role':'user','content':json.dumps({'current_request':text,'resolved_scene':prompt},ensure_ascii=False)}],1400,json_output=True)
     bot.store.record_usage(result)
     constraints=parse_object(result.get('message',{}).get('content'),PictureConstraints)
     return '\n【本轮构图与内容约束，优先于默认风格和参考图原构图】\n'+constraints.model_dump_json()
